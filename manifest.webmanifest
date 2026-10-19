@@ -1,0 +1,14 @@
+{
+  "name": "블로그 글공장",
+  "short_name": "글공장",
+  "description": "블로그 원고 발행표 — 복사, 쓰레드 발행, 글 요청",
+  "display": "standalone",
+  "background_color": "#EEF1EC",
+  "theme_color": "#EEF1EC",
+  "lang": "ko",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
