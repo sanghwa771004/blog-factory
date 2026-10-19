@@ -22,6 +22,7 @@
 
 1. `index.html`의 `APP_VER`와 `version.json`의 `version`을 같은 값으로 올리기
 2. `version.json`의 `notes`에 바뀐 점 한 줄
-3. 커밋하고 푸시하면 1~2분 뒤 GitHub Pages에 반영되고, 앱을 다시 열면 자동으로 새 버전이 떠요
+3. 커밋하고 `main`과 `gh-pages` 둘 다 푸시 (`git push origin main main:gh-pages`)
+4. 1~2분 뒤 GitHub Pages(`gh-pages` 가지)에 반영되고, 앱을 다시 열면 자동으로 새 버전이 떠요
 
 아이콘은 `python3 tools/make_icons.py .`로 다시 만들 수 있어요.
