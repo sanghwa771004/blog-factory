@@ -22,6 +22,8 @@
 | 서버 API | `supabase/functions/blog-app` (Supabase Edge Function, `index.ts` + `checks.js`) |
 | DB 변경 기록 | `supabase/migrations/001~010` (표를 지우거나 새로 만들지 않고 더하기만) |
 | 자동 작가 지시문 | `docs/auto-writer-prompt.md` (Claude 예약 작업, 하루 세 번) |
+| Claude 안 글공장 (바로 쓰기·주제 추천·요청 바로 처리) | `claude-artifact/blog-factory.html` (claude.ai 아티팩트 원본 — 고치면 Claude에서 같은 주소로 다시 게시) |
+| 최종 완료 보고서 | `docs/REPORT-2026-10-21.md` |
 | 정책 조사 | `docs/policy-research-2026-10-21.md` |
 | 점검 보고서 | `docs/audit-2026-10-21.md` |
 | 보안 점검 | `docs/security.md` |
@@ -34,8 +36,9 @@
 
 ```bash
 npm install                           # 처음 한 번 (DB 테스트용 PGlite)
-npm test                              # 규칙·계산 + DB(마이그레이션·함수) 테스트 (Node 20+)
+npm test                              # 규칙·계산 + DB(마이그레이션·함수) + Claude 안 글공장 계산 테스트 (Node 20+)
 python3 tests/ui/app_ui_test.py /tmp  # 휴대폰 크기 화면 테스트 (Playwright, 모의 서버)
+python3 tests/artifact/run_check.py /tmp  # Claude 안 글공장 화면·흐름 테스트 (모의 Claude·Supabase)
 ```
 
 실서버 점검 방법은 `tests/live/README.md`에 있어 (진짜 접속 코드 없이 임시 세션으로).

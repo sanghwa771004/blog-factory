@@ -1,0 +1,2304 @@
+<title>블로그 글공장</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Do+Hyeon&family=IBM+Plex+Sans+KR:wght@400;500;700&display=swap">
+<style>
+/* Layout: 좁은 작업대 한 줄 — 위에 앱 연결 줄과 탭, 가운데 입력 카드, 아래 원고지 같은 결과물. 형광펜이 유일한 장식 */
+:root{
+  --bg:#EEF1EC; --paper:#FBFCF9; --ink:#1B2420; --muted:#5E6B64; --line:#D5DCD5;
+  --accent:#1F5D4C; --accent-ink:#FFFFFF; --accent-soft:#DCEBE4; --mark:#F4DA62; --mark-ink:#1B2420;
+  --warn-bg:#FFF4D6; --warn:#7A5A00; --chip:#E2E8E1;
+  --late-bg:#FBE3DF; --late:#9A2F1F; --done-bg:#E3EFE8; --done:#2D6A4F;
+  --shadow:rgba(20,30,25,.14);
+  --display:"Do Hyeon","IBM Plex Sans KR",system-ui,sans-serif;
+  --body:"IBM Plex Sans KR",system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#121815; --paper:#1A221E; --ink:#E6ECE7; --muted:#9AA8A0; --line:#2C3832;
+  --accent:#6FC3A8; --accent-ink:#0E1A15; --accent-soft:#1E3A30; --mark:#B89A1E; --mark-ink:#0E1210;
+  --warn-bg:#2B2512; --warn:#E8C96A; --chip:#25302A;
+  --late-bg:#3A1F1A; --late:#F2A493; --done-bg:#1C3328; --done:#8FD3B1;
+  --shadow:rgba(0,0,0,.5); color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#121815; --paper:#1A221E; --ink:#E6ECE7; --muted:#9AA8A0; --line:#2C3832;
+  --accent:#6FC3A8; --accent-ink:#0E1A15; --accent-soft:#1E3A30; --mark:#B89A1E; --mark-ink:#0E1210;
+  --warn-bg:#2B2512; --warn:#E8C96A; --chip:#25302A;
+  --late-bg:#3A1F1A; --late:#F2A493; --done-bg:#1C3328; --done:#8FD3B1;
+  --shadow:rgba(0,0,0,.5); color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.6;-webkit-text-size-adjust:100%;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:20px 48px;overflow-wrap:anywhere}
+a{color:var(--accent)}
+.wrap{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:14px}
+header h1{font-family:var(--display);font-weight:400;font-size:clamp(30px,7vw,42px);line-height:1.1;margin:0;text-wrap:balance}
+header h1 .hl{background:linear-gradient(transparent 55%,var(--mark) 55%);color:inherit;padding:0 2px}
+header p{margin:6px 0 0;color:var(--muted);max-width:60ch;font-size:14.5px}
+
+/* 앱 연결 줄 */
+.conn{display:flex;align-items:center;gap:8px 10px;flex-wrap:wrap;background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-size:14px}
+.conn .dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex-shrink:0}
+.conn[data-s="ok"] .dot{background:var(--done)}
+.conn[data-s="need"] .dot,.conn[data-s="cached"] .dot,.conn[data-s="loading"] .dot{background:var(--warn)}
+.conn[data-s="error"] .dot,.conn[data-s="denied"] .dot{background:var(--late)}
+.conn p{margin:0;flex:1 1 220px;min-width:0}
+.upd{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;background:var(--accent-soft);border-radius:12px;padding:10px 14px;font-size:14px}
+.upd p{margin:0;min-width:0;flex:1}
+.ver{font-size:12px;color:var(--muted);text-align:center;margin:4px 0 0;font-variant-numeric:tabular-nums}
+
+/* 탭 */
+.tabs{display:flex;gap:5px;flex-wrap:wrap}
+.tab{border:1px solid var(--line);background:var(--paper);color:var(--ink);font:inherit;font-size:14px;padding:7px 10px;border-radius:999px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;min-height:38px}
+.tab[aria-selected="true"]{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.count{min-width:18px;padding:0 5px;border-radius:999px;background:var(--mark);color:var(--mark-ink);font-size:11.5px;line-height:18px;text-align:center;font-weight:700;font-variant-numeric:tabular-nums}
+
+/* 입력 카드 */
+.panel{background:var(--paper);border:1px solid var(--line);border-radius:14px;padding:18px;display:flex;flex-direction:column;gap:14px;min-width:0}
+.stack{display:flex;flex-direction:column;gap:12px;margin-top:12px}
+label.f{display:flex;flex-direction:column;gap:6px;font-size:13px;font-weight:500;color:var(--muted);min-width:0}
+input[type=text],input[type=url],textarea,select{font:inherit;font-size:16px;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;width:100%;min-width:0}
+textarea{min-height:90px;resize:vertical}
+select:disabled{opacity:.75}
+input:focus,textarea:focus,select:focus,button:focus-visible,a:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+.legend{font-size:13px;font-weight:500;color:var(--muted);margin-bottom:6px}
+.seg,.picks{display:flex;flex-wrap:wrap;gap:6px}
+.seg input,.picks input{position:absolute;opacity:0;pointer-events:none;width:1px;height:1px}
+.seg label,.picks label{border:1px solid var(--line);border-radius:8px;padding:7px 11px;font-size:14px;cursor:pointer;color:var(--ink);background:var(--bg);display:inline-flex;align-items:baseline;gap:6px;line-height:1.35}
+.seg input:checked+label,.picks input:checked+label{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.seg input:focus-visible+label,.picks input:focus-visible+label{outline:2px solid var(--accent);outline-offset:1px}
+.seg input:disabled+label{opacity:.5;cursor:not-allowed}
+.picks label small{font-size:11.5px;font-weight:500;color:var(--warn)}
+.picks input:checked+label small{color:inherit;opacity:.85}
+.picks input:disabled+label{cursor:not-allowed;color:var(--muted);background:transparent;border-style:dashed}
+.picks input:disabled+label small{color:var(--late)}
+details{border-top:1px dashed var(--line);padding-top:12px}
+summary{cursor:pointer;font-weight:500;font-size:14px}
+.hint{font-size:13px;color:var(--muted);margin:0}
+.lead{margin:0;font-size:14.5px}
+.go,.acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{font:inherit;font-weight:700;font-size:15px;border:1px solid var(--accent);border-radius:10px;padding:12px 18px;cursor:pointer;background:var(--accent);color:var(--accent-ink);text-decoration:none;display:inline-flex;align-items:center;gap:4px;line-height:1.3}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--line);font-weight:500}
+.btn.sm{font-size:14px;padding:8px 12px;border-radius:9px}
+.btn.danger{color:var(--late);border-color:var(--late-bg);background:transparent;font-weight:500}
+.btn.danger-solid{background:var(--late);border-color:var(--late);color:var(--paper)}
+.btn:disabled{opacity:.5;cursor:default}
+.status{font-size:14px;color:var(--muted);margin:0}
+.notice{background:var(--warn-bg);color:var(--warn);border-radius:10px;padding:10px 12px;font-size:13.5px;margin:0}
+.okline{background:var(--done-bg);color:var(--done);border-radius:10px;padding:10px 12px;font-size:13.5px;margin:0}
+.chip{background:var(--chip);border-radius:999px;padding:3px 10px;font-size:12.5px;white-space:nowrap}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.st-writing{background:var(--accent-soft)}
+.st-done{background:var(--done-bg);color:var(--done)}
+.st-fail{background:var(--late-bg);color:var(--late);white-space:normal}
+.st-wait{background:var(--warn-bg);color:var(--warn);white-space:normal}
+
+/* 목록 */
+.grp{display:flex;flex-direction:column;gap:6px}
+.grp h4,.sub-h{margin:0;font-size:13px;font-weight:700;color:var(--muted);letter-spacing:.02em}
+.list{display:flex;flex-direction:column;gap:6px}
+.item{display:flex;align-items:center;gap:10px;background:var(--bg);border:1px solid transparent;border-radius:10px;padding:8px 10px;min-width:0}
+.item.on{border-color:var(--accent)}
+.item>input[type=checkbox]{width:18px;height:18px;accent-color:var(--accent);flex-shrink:0;margin:0}
+.item .main{flex:1;min-width:0;text-align:left;font:inherit;background:none;border:0;color:var(--ink);padding:0;display:flex;flex-direction:column}
+button.main,label.main{cursor:pointer}
+.item .main b{font-weight:500;line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.item .main small{color:var(--muted);font-size:12.5px}
+.item .side{display:flex;align-items:center;gap:6px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end;max-width:45%}
+.kind{font-size:12px;font-weight:700;color:var(--accent)}
+.pill{font-size:12px;border-radius:999px;padding:2px 8px;white-space:nowrap}
+.pill.late{background:var(--late-bg);color:var(--late)}
+.pill.today{background:var(--warn-bg);color:var(--warn)}
+.pill.plan{background:var(--chip);color:var(--ink)}
+.pill.run{background:var(--accent);color:var(--accent-ink)}
+.pill.none{border:1px dashed var(--line);color:var(--muted)}
+.pill.done{background:var(--done-bg);color:var(--done)}
+.mini{font-size:12px;color:var(--warn);white-space:nowrap}
+.donegrp summary{font-size:13px;color:var(--muted);padding:4px 0}
+.donegrp .list{margin-top:8px}
+
+/* 주제 */
+.topics{display:flex;flex-direction:column;gap:8px}
+.topic{background:var(--bg);border:1px solid transparent;border-radius:12px;padding:12px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.topic.on{border-color:var(--accent)}
+.t-top{display:flex;align-items:flex-start;gap:10px}
+.t-top input{margin:3px 0 0;width:18px;height:18px;accent-color:var(--accent);flex-shrink:0}
+.t-title{flex:1;min-width:0;display:flex;flex-direction:column;cursor:pointer}
+.t-title b{font-weight:700;line-height:1.45}
+.t-title small{color:var(--muted);font-size:12.5px}
+.score{flex-shrink:0;display:flex;flex-direction:column;align-items:flex-end;line-height:1}
+.score b{font-family:var(--display);font-weight:400;font-size:24px;color:var(--accent);font-variant-numeric:tabular-nums}
+.score small{font-size:11px;color:var(--muted);margin-top:3px;white-space:nowrap}
+.t-basis{margin:0;font-size:13.5px}
+.t-det{padding-top:8px}
+.t-det summary{font-size:13px;color:var(--muted);font-weight:500}
+.factors{display:flex;flex-direction:column;gap:9px;margin-top:10px}
+.factor{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 10px;font-size:13px;align-items:center}
+.factor b{font-weight:500}
+.factor small{grid-column:1/-1;color:var(--muted);font-size:12.5px}
+.dots{display:inline-flex;gap:3px;align-items:center}
+.dots i{width:10px;height:10px;border-radius:2px;background:var(--line)}
+.dots i.on{background:var(--accent)}
+.dots em{font-style:normal;font-size:12px;color:var(--muted);margin-left:4px;font-variant-numeric:tabular-nums}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:13px;margin:12px 0 0}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0}
+.batch{display:flex;flex-direction:column;gap:10px;border-top:1px dashed var(--line);padding-top:14px}
+
+/* 원고 */
+.out{background:var(--paper);border:1px solid var(--line);border-radius:14px;overflow:hidden;min-width:0}
+.out-head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 18px;border-bottom:1px solid var(--line)}
+.out-head .tag{font-size:13px;color:var(--muted)}
+.sect{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:10px;min-width:0}
+.sect:last-child{border-bottom:0}
+.sect h3{margin:0;font-size:13px;letter-spacing:.04em;color:var(--muted);font-weight:500;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.meta{margin:0;font-size:13px;color:var(--muted)}
+.count-n{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums;letter-spacing:0}
+.checks{display:flex;flex-direction:column;gap:6px;margin:0;padding:0;list-style:none}
+.checks li{font-size:13.5px;padding:8px 10px;border-radius:8px;display:flex;gap:8px;align-items:baseline}
+.checks li b{flex-shrink:0;font-weight:700;font-size:12px}
+.checks li.e{background:var(--late-bg);color:var(--late)}
+.checks li.w{background:var(--warn-bg);color:var(--warn)}
+.checks li.t{background:var(--chip);color:var(--ink)}
+.copy{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:999px;padding:4px 10px;cursor:pointer;white-space:nowrap}
+.titles{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px}
+.titles li{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;padding:8px 10px;background:var(--bg);border-radius:8px;font-weight:500}
+.titles li span{min-width:0}
+.post{font-size:16px;line-height:1.85;max-width:65ch;min-width:0}
+.post h2{font-family:var(--display);font-weight:400;font-size:22px;margin:22px 0 6px;text-wrap:balance}
+.post p{margin:0 0 12px}
+.post ul{margin:0 0 12px;padding-left:20px}
+.post .img{border:1.5px dashed var(--line);border-radius:10px;padding:14px;color:var(--muted);font-size:14px;text-align:center;margin:0 0 12px}
+.post .me{background:var(--mark);color:var(--mark-ink);padding:1px 4px;border-radius:3px}
+.post .cta{border:1px solid var(--accent);border-radius:10px;padding:12px 14px;margin:0 0 12px;display:flex;flex-direction:column}
+.post .cta small{color:var(--muted);word-break:break-all}
+.post .disc{font-size:13px;color:var(--muted);background:var(--bg);border-radius:8px;padding:8px 10px;white-space:pre-line}
+.tblwrap{overflow-x:auto;margin:0 0 12px}
+.post table{border-collapse:collapse;font-size:14px;min-width:100%}
+.post th,.post td{border:1px solid var(--line);padding:6px 10px;text-align:left;white-space:nowrap}
+.post th{background:var(--bg)}
+.sns{white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:10px 12px;font-size:14px;margin:0}
+.outnote{font-size:13px;color:var(--accent);min-height:1em;margin:0}
+.delrow{flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px}
+
+/* 사용법 */
+.guide h3{font-family:var(--display);font-weight:400;font-size:20px;margin:0}
+.gsec{display:flex;flex-direction:column;gap:6px}
+.gsec ol,.gsec ul{margin:0;padding-left:20px;font-size:14.5px}
+.gsec li{margin-bottom:3px}
+.gsec p{margin:0;font-size:14px;color:var(--muted);max-width:62ch}
+
+/* 수동 복사 시트 */
+.sheet{position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--paper);border-top:1px solid var(--line);box-shadow:0 -8px 24px var(--shadow);
+  padding-top:14px;padding-bottom:calc(14px + env(safe-area-inset-bottom,0px));padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px))}
+.sheet-in{max-width:760px;margin:0 auto;display:flex;flex-direction:column;gap:8px}
+.sheet textarea{min-height:160px;font-size:13px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>블로그 <span class="hl">글공장</span></h1>
+    <p>급할 때 Claude 안에서 바로 쓰는 곳이야. 여기서 쓴 원고는 홈 화면 앱(글공장)의 검수함으로 들어가.</p>
+  </header>
+
+  <div class="conn" id="conn" data-s="init" role="status" aria-live="polite">
+    <span class="dot" aria-hidden="true"></span>
+    <p id="connText">앱 연결을 확인하는 중…</p>
+    <div class="go" id="connActs"></div>
+  </div>
+
+  <div class="upd" id="upd" role="status" hidden>
+    <p id="updText"></p>
+    <button class="btn sm ghost" id="updOk" type="button">확인</button>
+  </div>
+
+  <nav class="tabs" role="tablist" aria-label="메뉴">
+    <button class="tab" role="tab" id="t-write" aria-controls="p-write" aria-selected="true" type="button">글쓰기</button>
+    <button class="tab" role="tab" id="t-topics" aria-controls="p-topics" aria-selected="false" type="button">주제</button>
+    <button class="tab" role="tab" id="t-jobs" aria-controls="p-jobs" aria-selected="false" type="button">요청<span class="count" id="jobCount" hidden></span></button>
+    <button class="tab" role="tab" id="t-drafts" aria-controls="p-drafts" aria-selected="false" type="button">보관함<span class="count" id="draftCount" hidden></span></button>
+    <button class="tab" role="tab" id="t-guide" aria-controls="p-guide" aria-selected="false" type="button">사용법</button>
+  </nav>
+
+  <!-- 글쓰기 -->
+  <section class="panel" id="p-write" role="tabpanel" aria-labelledby="t-write">
+    <label class="f" for="kw">키워드
+      <input type="text" id="kw" placeholder="예: 원룸 전기요 고르는 법, 가습기 세척 방법" autocomplete="off" maxlength="120">
+    </label>
+    <p class="hint" id="kwNote" hidden></p>
+    <div>
+      <div class="legend" id="chLegend">어디에 올릴 거야?</div>
+      <div class="seg" id="chSeg" role="radiogroup" aria-labelledby="chLegend"></div>
+    </div>
+    <div>
+      <div class="legend" id="prLegend">어떻게 돈 벌 거야? (여러 개 골라도 돼)</div>
+      <div class="picks" id="prPicks" role="group" aria-labelledby="prLegend"></div>
+      <p class="hint" id="prNote" hidden style="margin-top:8px"></p>
+    </div>
+    <div class="row">
+      <label class="f" for="ctype">글 유형
+        <select id="ctype"></select>
+      </label>
+      <label class="f" for="len" id="lenWrap">길이
+        <select id="len">
+          <option value="1500">보통 (1,500자)</option>
+          <option value="2500" selected>길게 (2,500자)</option>
+          <option value="3500">아주 길게 (3,500자)</option>
+        </select>
+      </label>
+      <label class="f" for="cat">카테고리 (선택)
+        <input type="text" id="cat" list="catList" placeholder="예: 겨울 가전" maxlength="60" autocomplete="off">
+      </label>
+    </div>
+    <datalist id="catList"></datalist>
+    <p class="hint" id="ctNote" hidden></p>
+    <label class="f" for="link" id="linkWrap" hidden>제휴 링크 (선택)
+      <input type="url" id="link" placeholder="파트너스에서 만든 링크 (예: https://link.coupang.com/…)" inputmode="url" autocomplete="off">
+    </label>
+    <p class="hint" id="linkNote" hidden></p>
+    <details id="moreBox">
+      <summary>내 경험 · 참고 글 넣기</summary>
+      <div class="stack">
+        <label class="f" for="exp">내가 실제로 겪은 것 (있을 때만)
+          <textarea id="exp" placeholder="예: 6평 원룸에서 두 달 씀. 머리카락은 잘 빨아들이는데 소음이 커서 밤엔 못 씀"></textarea>
+        </label>
+        <p class="hint">적어준 경험만 1인칭으로 써. 안 적으면 써본 척하는 문장은 넣지 않아. '실제 경험 후기' 유형은 경험을 적어야 골라져.</p>
+        <label class="f" for="ref">참고할 글 (반응 좋았던 쓰레드·인스타·블로그 글)
+          <textarea id="ref" placeholder="구성과 말투만 참고하고 문장은 새로 써"></textarea>
+        </label>
+      </div>
+    </details>
+    <div class="go">
+      <button class="btn" id="gen" type="button">원고 쓰기</button>
+      <button class="btn ghost" id="stop" type="button" hidden>멈추기</button>
+      <span class="status" id="status" aria-live="polite"></span>
+    </div>
+    <p class="notice" id="unavail" hidden>여기서는 Claude 글쓰기가 안 돼. Claude 앱이나 claude.ai에서 이 페이지를 열어줘.</p>
+  </section>
+
+  <!-- 주제 -->
+  <section class="panel" id="p-topics" role="tabpanel" aria-labelledby="t-topics" hidden>
+    <div class="row">
+      <label class="f" for="tcat">카테고리
+        <input type="text" id="tcat" list="catList" placeholder="예: 겨울 가전, 자취템" maxlength="60" autocomplete="off">
+      </label>
+      <label class="f" for="tcount">개수
+        <select id="tcount"><option value="6">6개</option><option value="10">10개</option></select>
+      </label>
+    </div>
+    <div>
+      <div class="legend" id="tmLegend">무엇을 기준으로 추천할까?</div>
+      <div class="seg" role="radiogroup" aria-labelledby="tmLegend">
+        <input type="radio" name="tmode" id="tm1" value="category" checked><label for="tm1">카테고리·시즌</label>
+        <input type="radio" name="tmode" id="tm2" value="performance"><label for="tm2">내 실적</label>
+      </div>
+      <p class="hint" id="tmNote" style="margin-top:8px"></p>
+    </div>
+    <div class="go">
+      <button class="btn" id="tBtn" type="button">주제 추천 받기</button>
+      <span class="status" id="tStatus" aria-live="polite"></span>
+    </div>
+    <p class="hint">점수는 실제 검색량이 아니라 AI 추정이야. 근거와 신뢰도를 같이 보여줘.</p>
+    <div id="adopted" class="grp"></div>
+    <div class="topics" id="topicList"></div>
+    <div class="batch" id="tBar" hidden>
+      <p class="hint" id="tBarInfo"></p>
+      <div class="go">
+        <button class="btn" id="tWrite" type="button">쓸 주제를 골라줘</button>
+        <button class="btn ghost" id="tSave" type="button">앱 주제함에 저장</button>
+        <button class="btn ghost" id="tAll" type="button">전체 선택</button>
+        <button class="btn ghost" id="tStop" type="button" hidden>멈추기</button>
+      </div>
+      <p class="status" id="tBarStatus" aria-live="polite"></p>
+    </div>
+    <p class="notice" id="tUnavail" hidden>여기서는 Claude 추천이 안 돼. Claude 앱이나 claude.ai에서 이 페이지를 열어줘.</p>
+  </section>
+
+  <!-- 요청 -->
+  <section class="panel" id="p-jobs" role="tabpanel" aria-labelledby="t-jobs" hidden>
+    <p class="lead" id="jobsLead">앱과 연결되면 기다리는 요청이 여기 보여.</p>
+    <div class="list" id="jobList"></div>
+    <div class="go">
+      <button class="btn" id="jRun" type="button" disabled>처리할 요청 없음</button>
+      <button class="btn ghost" id="jStop" type="button" hidden>멈추기</button>
+      <button class="btn ghost" id="jRefresh" type="button">새로고침</button>
+    </div>
+    <p class="status" id="jStatus" aria-live="polite"></p>
+    <div id="jobLog" class="grp"></div>
+    <p class="hint">한 번에 5개까지 처리해. 원고 하나에 1분쯤 걸리니 이 페이지를 열어둔 채로 기다려줘. 멈추거나 끊긴 요청은 30분 뒤 자동 작가가 다시 처리해.</p>
+  </section>
+
+  <!-- 보관함 -->
+  <section class="panel" id="p-drafts" role="tabpanel" aria-labelledby="t-drafts" hidden>
+    <div id="draftList" class="grp"><p class="hint">불러오는 중…</p></div>
+  </section>
+
+  <!-- 사용법 -->
+  <section class="panel guide" id="p-guide" role="tabpanel" aria-labelledby="t-guide" hidden>
+    <div class="gsec">
+      <h3>홈 화면 앱이랑 뭐가 달라?</h3>
+      <p>여기는 Claude 안에서 바로 원고를 쓰는 곳이야. 네 Claude 구독으로 돌아가서 따로 돈이 들지 않아. 다 쓴 원고는 홈 화면 앱(글공장) &gt; 콘텐츠 &gt; 검수 필요로 들어가.</p>
+      <p>제휴 링크 넣기, 발행 전 검사, 복사, 게시 완료 표시, 실적 입력은 홈 화면 앱에서 해.</p>
+    </div>
+    <div class="gsec">
+      <h3>처음 한 번만</h3>
+      <ol>
+        <li>위의 <b>앱 연결하기</b>를 누르고 Supabase 연결을 허용해.</li>
+        <li>처음 원고를 쓸 때 Claude 사용 허용 창이 뜨면 허용해.</li>
+      </ol>
+    </div>
+    <div class="gsec">
+      <h3>탭마다 하는 일</h3>
+      <ul>
+        <li><b>글쓰기</b>: 키워드·채널·수익 모델·글 유형을 고르면 원고 1편을 써서 앱 검수함에 넣어. 발행일은 앱이 빈 날짜에 잡아.</li>
+        <li><b>주제</b>: 카테고리나 내 실적을 기준으로 주제를 추천받아. 앱 주제함에 저장하거나, 골라서 바로 몰아 써.</li>
+        <li><b>요청</b>: 앱에서 넣은 원고·주제 추천·채널별 버전 요청을 자동 작가(하루 세 번)를 기다리지 않고 바로 처리해.</li>
+        <li><b>보관함</b>: 여기서 쓴 원고 사본이야. 앱으로 못 보낸 원고는 여기서 다시 보내거나 복사해.</li>
+      </ul>
+    </div>
+    <div class="gsec">
+      <h3>여기서 일부러 안 하는 것</h3>
+      <ul>
+        <li><b>웹 확인</b>: 여기선 웹을 못 봐서 상품 스펙·가격·통계·검색량을 쓰지 않아. 상품 비교·장단점 분석·최신 정보 요약은 앱에서 요청하면 자동 작가가 공식 자료를 확인해서 써.</li>
+        <li><b>자동 게시</b>: 블로그나 SNS에 대신 올리지 않아. 네가 확인하고 올려.</li>
+        <li><b>링크 바꾸기</b>: 제휴 링크를 중간 주소로 돌리거나 바꾸지 않아. 받은 그대로 써.</li>
+      </ul>
+    </div>
+    <div class="gsec">
+      <h3>원고 규칙</h3>
+      <ul>
+        <li>적어준 실제 경험만 1인칭으로 써. 써본 척하는 문장이나 가상 인물 후기는 넣지 않아.</li>
+        <li>가격은 넣지 않고 "최신 가격은 링크에서 확인"으로 안내해.</li>
+        <li>장점만이 아니라 단점과 안 맞는 사람도 써.</li>
+        <li>광고 고지문은 본문에 쓰지 않아. 복사할 때 앱 설정 &gt; 수익 모델에 있는 공식 문구가 맨 위에 붙어 (쓰레드·인스타 글은 맨 앞).</li>
+        <li>최근에 같은 키워드로 쓴 글이 있으면 알려줘. 비슷한 글을 계속 찍어내면 블로그 품질이 떨어져.</li>
+      </ul>
+    </div>
+    <div class="gsec">
+      <h3>주제 점수 읽는 법</h3>
+      <p>검색 수요·구매 의도·경쟁도·상품 정보·차별화·수익화·제작 부담 7가지를 0~5점으로 매기고, 앱 설정의 가중치로 100점 만점 점수를 내. 실제 검색량 데이터가 없어서 대부분 'AI 추정 · 신뢰도 낮음'이야. 참고용으로 보고, 실적이 쌓이면 '내 실적' 기준 추천을 써봐.</p>
+    </div>
+    <div class="gsec">
+      <h3>블로그는 왜 붙여넣기야?</h3>
+      <p>티스토리는 Open API를 2024년 2월까지 단계적으로 닫았고, 네이버 블로그도 글쓰기 API가 끝났어. 남은 건 비공식 자동 로그인뿐인데 정책이 바뀌면 바로 막히고 계정도 위험해. 그래서 원고를 미리 써두고 각 블로그의 예약 발행으로 거는 게 가장 안전해.</p>
+    </div>
+  </section>
+
+  <!-- 원고 보기 -->
+  <article class="out" id="out" hidden></article>
+  <p class="ver" id="ver"></p>
+</div>
+
+<div class="sheet" id="sheet" hidden>
+  <div class="sheet-in">
+    <b>자동 복사가 막혔어</b>
+    <p class="hint">아래 칸을 길게 눌러 전체 선택한 뒤 복사해줘.</p>
+    <textarea id="sheetText" readonly></textarea>
+    <div class="go"><button class="btn ghost sm" id="sheetClose" type="button">닫기</button></div>
+  </div>
+</div>
+
+<script>
+/*PURE-START*/
+const WD = ["일", "월", "화", "수", "목", "금", "토"];
+const pad = n => String(n).padStart(2, "0");
+const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const parseYmd = s => { const [y, m, d] = String(s).slice(0, 10).split("-").map(Number); return new Date(y, m - 1, d); };
+function fmtDate(s){
+  if (!s) return "날짜 미정";
+  const d = parseYmd(s);
+  if (isNaN(d)) return "날짜 미정";
+  return `${d.getMonth() + 1}월 ${d.getDate()}일 (${WD[d.getDay()]})`;
+}
+function fmtTime(t){
+  const d = new Date(t);
+  if (isNaN(d)) return "";
+  const h = d.getHours();
+  return `${d.getMonth() + 1}월 ${d.getDate()}일 ${h < 12 ? "오전" : "오후"} ${h % 12 || 12}:${pad(d.getMinutes())}`;
+}
+function kstNow(){
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date());
+    const g = t => (parts.find(p => p.type === t) || {}).value || "";
+    return { date: `${g("year")}-${g("month")}-${g("day")}`, h: Number(g("hour")) % 24, m: Number(g("minute")) };
+  } catch (e) {
+    const d = new Date();
+    return { date: ymd(d), h: d.getHours(), m: d.getMinutes() };
+  }
+}
+// 자동 작가 예약 작업: 매일 오전 8:51 · 오후 12:51 · 오후 6:51 (한국 시각)
+const RUN_TIMES = [[8, 51], [12, 51], [18, 51]];
+function nextRunText(now){
+  const n = now || kstNow();
+  const cur = n.h * 60 + n.m;
+  const next = RUN_TIMES.find(([h, m]) => h * 60 + m > cur);
+  const [h, m] = next || RUN_TIMES[0];
+  return `${next ? "오늘" : "내일"} ${h < 12 ? "오전" : "오후"} ${h % 12 || 12}:${pad(m)}`;
+}
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const safeUrl = u => { u = String(u || "").trim(); return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : ""; };
+const stripMd = s => String(s || "").replace(/\*\*(.+?)\*\*/g, "$1");
+const clip = (s, n) => { s = String(s || ""); n = n || 60; return s.length > n ? s.slice(0, n - 1) + "…" : s; };
+const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ""));
+const str = (v, n) => (typeof v === "string" ? v.trim().slice(0, n || 20000) : "");
+const strArr = (v, n, each) => (Array.isArray(v) ? v.map(x => (typeof x === "string" ? x.trim().slice(0, each || 300) : "")).filter(Boolean).slice(0, n) : []);
+const normKw = s => String(s || "").replace(/\s+/g, "").toLowerCase();
+const firstChars = (s, n) => Array.from(String(s || "")).slice(0, n).join("");
+
+// 글 유형 11가지 (앱 checks.js 와 같은 id)
+const CONTENT_TYPES = {
+  comparison: { label: "상품 비교", minProducts: 2 },
+  buying_guide: { label: "구매 가이드" },
+  problem_solving: { label: "문제 해결 정보" },
+  how_to: { label: "사용 설명서" },
+  experience_review: { label: "실제 경험 후기", needsExperience: true },
+  pros_cons: { label: "장단점 분석", minProducts: 1 },
+  checklist: { label: "체크리스트" },
+  news_summary: { label: "최신 정보 요약", needsSources: true },
+  faq: { label: "자주 묻는 질문" },
+  tutorial: { label: "튜토리얼" },
+  sns_short: { label: "SNS용 짧은 글", short: true }
+};
+// 유형마다 다른 구성 (같은 틀 반복 금지)
+const TYPE_PLAN = {
+  comparison: "비교 기준 → 상품별 특징(주어진 상품 정보에 있는 값만) → 기준별 비교표(확인된 값만) → 이런 사람에게 이 상품 → 3줄 요약",
+  buying_guide: "고르기 전에 알아둘 것 → 기준별 설명(왜 중요한지, 매장·상세페이지에서 어떻게 확인하는지) → 상황별로 무엇을 먼저 볼지(공간·예산·사용 빈도 같은 조건) → 흔한 실수 → 체크리스트 → 3줄 요약",
+  problem_solving: "어떤 상황·증상인지 → 원인 후보 → 쉬운 해결부터 단계별로 → 그래도 안 될 때(제조사 AS·전문가) → 예방법 → 3줄 요약",
+  how_to: "준비할 것 → 처음 쓸 때 순서 → 자주 쓰는 기능의 일반적인 원리 → 주의할 점 → 관리·보관 → 3줄 요약 (특정 모델의 버튼 이름·수치는 쓰지 마)",
+  experience_review: "사용 환경·기간(작성자 경험 그대로) → 좋았던 점 → 아쉬웠던 점 → 이런 사람에게 맞고 이런 사람에겐 안 맞음 → 3줄 요약",
+  pros_cons: "상품 소개(주어진 정보만) → 장점 → 단점·한계 → 맞는 사람과 안 맞는 사람 → 3줄 요약",
+  checklist: "체크리스트가 필요한 이유 한두 문장 → 단계·상황별로 묶은 체크 항목(\"- \" 목록) → 놓치기 쉬운 항목 → 3줄 요약",
+  news_summary: "무엇이 바뀌었는지 → 누구에게 영향이 있는지 → 해야 할 일 → 출처 → 3줄 요약",
+  faq: "짧은 도입 → \"## Q. 질문\" 소제목과 답 6~8개 → 3줄 요약",
+  tutorial: "목표와 결과 → 준비 → 단계별 소제목(1단계, 2단계…) → 막힐 때 확인할 것 → 다음에 해볼 것 → 3줄 요약",
+  sns_short: "첫 줄은 궁금하게 만드는 훅 → 핵심 3~5줄 → 마무리 한 줄. 소제목·표·목록 기호 없이 짧은 줄로"
+};
+const SCORE_FACTORS = {
+  demand: "검색 수요",
+  intent: "구매 의도",
+  competition: "경쟁도 (낮을수록 높은 점수)",
+  product_info: "상품 정보 확보 가능성",
+  differentiation: "차별화 가능성",
+  monetization: "수익화 가능성",
+  effort: "제작 부담 (적을수록 높은 점수)"
+};
+const KIND_LABEL = { affiliate: "제휴 링크", ads: "광고 수익", sponsor: "협찬", product: "상품 판매", cpa: "CPA", other: "기타" };
+const JOB_KIND = { write: "원고", topics: "주제 추천", reformat: "채널별 버전" };
+const VARIANT_LABEL = { threads: "쓰레드", instagram: "인스타", cards: "카드뉴스", shortform: "숏폼 대본", summary: "요약", faq: "FAQ", titles: "제목 후보", naver_blog: "네이버 블로그", tistory: "티스토리", website: "웹사이트" };
+const VARIANT_RULES = {
+  threads: "threads: 420자 이내 문자열. 첫 줄은 훅, 반말 구어체.",
+  instagram: "instagram: 2000자 이내 캡션 문자열. 본문 링크는 눌리지 않으니 '프로필 링크에서 확인'처럼 안내.",
+  cards: "cards: 카드뉴스 문구 배열 [{\"title\": \"...\", \"text\": \"...\"}] 6~8장.",
+  shortform: "shortform: 숏폼 대본 {\"hook\": \"...\", \"script\": \"...\", \"cta\": \"...\"} (30~45초 분량).",
+  summary: "summary: 3줄 요약 문자열.",
+  faq: "faq: [{\"q\": \"...\", \"a\": \"...\"}] 4~6개.",
+  titles: "titles: 다른 제목 후보 5개 문자열 배열.",
+  naver_blog: "naver_blog: 네이버 블로그에 맞춘 본문 문자열 (형식만 조정, \"## \" 소제목과 \"- \" 목록 유지).",
+  tistory: "tistory: 티스토리에 맞춘 본문 문자열 (형식만 조정).",
+  website: "website: 독립 사이트에 맞춘 본문 문자열 (형식만 조정)."
+};
+const LEGACY_MONEY = { "쿠팡파트너스": ["coupang_partners"], "토스 쇼핑 제휴": ["toss_sharelink"], "애드센스(정보성 글)": ["google_adsense"] };
+const LEGACY_PLATFORM = { "네이버 블로그": "naver_blog", "티스토리": "tistory", "워드프레스 / 구글 블로그": "website" };
+const LEGACY_STYLE = { "TOP N 비교 추천형": "comparison", "구매 가이드(고르는 법)형": "buying_guide", "문제 해결 정보형": "problem_solving", "단일 상품 솔직 리뷰형": "experience_review" };
+const DEFAULT_SETTINGS = { per_day: 1, len: "2500", auto_topics: "", default_channel: "naver_blog", default_programs: ["coupang_partners"], score_weights: { demand: 2, intent: 2, competition: 1, product_info: 1, differentiation: 1, monetization: 2, effort: 1 } };
+// 앱이 답하기 전에 이름만 보여주는 용도 (판정·고지문은 항상 앱에서 불러옴)
+const BUILTIN_CHANNELS = [
+  { id: "naver_blog", name: "네이버 블로그", kind: "blog", max_chars: null, clickable_links: true },
+  { id: "tistory", name: "티스토리", kind: "blog", max_chars: null, clickable_links: true },
+  { id: "website", name: "워드프레스 등 독립 사이트", kind: "site", max_chars: null, clickable_links: true },
+  { id: "threads", name: "쓰레드", kind: "sns", max_chars: 500, clickable_links: true },
+  { id: "instagram", name: "인스타그램", kind: "sns", max_chars: 2200, clickable_links: false }
+];
+const BUILTIN_PROGRAMS = [
+  { id: "coupang_partners", name: "쿠팡파트너스", kind: "affiliate", needs_link: true },
+  { id: "toss_sharelink", name: "토스쇼핑 쉐어링크", kind: "affiliate", needs_link: true },
+  { id: "naver_shopping_connect", name: "네이버 쇼핑 커넥트", kind: "affiliate", needs_link: true },
+  { id: "naver_adpost", name: "네이버 애드포스트", kind: "ads", needs_link: false },
+  { id: "google_adsense", name: "Google 애드센스", kind: "ads", needs_link: false },
+  { id: "sponsorship", name: "브랜드 협찬·제작비", kind: "sponsor", needs_link: false },
+  { id: "digital_product", name: "디지털 상품 판매", kind: "product", needs_link: true },
+  { id: "cpa", name: "CPA·리드 제휴", kind: "cpa", needs_link: true }
+];
+const ARTIFACT_NOTE = "Claude 안 글공장에서 웹 확인 없이 쓴 원고야. 상품 스펙·가격·통계는 넣지 않았어.";
+const SNS_FALLBACK_DISCLOSURE = "#광고 이 글의 링크로 구매하면 수수료를 받아요";
+
+// ───────── 본문 형식 (앱 checks.js 1.1.1 과 같은 규칙) ─────────
+function parseBody(md){
+  const blocks = [];
+  let list = null, tbl = null;
+  const flushList = () => { if (list){ blocks.push({ t: "ul", items: list }); list = null; } };
+  const flushTbl = () => { if (tbl){ blocks.push({ t: "table", rows: tbl }); tbl = null; } };
+  for (const raw of String(md || "").split("\n")){
+    const l = raw.trim();
+    if (/^\|.*\|$/.test(l)){
+      flushList();
+      if (/^\|[\s\-|:]+\|$/.test(l)) continue;
+      (tbl = tbl || []).push(l.replace(/^\||\|$/g, "").split("|").map(c => c.trim()));
+      continue;
+    }
+    if (/^[-•*]\s+/.test(l)){ flushTbl(); (list = list || []).push(l.replace(/^[-•*]\s+/, "")); continue; }
+    flushList(); flushTbl();
+    if (!l) continue;
+    if (/^#{1,4}\s/.test(l)) blocks.push({ t: "h", text: l.replace(/^#+\s/, "") });
+    else if (/^\[이미지/.test(l)) blocks.push({ t: "img", text: l.replace(/^\[이미지:?\s*|\]$/g, "") });
+    else if (/^\[링크/.test(l)) blocks.push({ t: "cta", text: l.replace(/^\[링크\s*\d*\s*:?\s*|\]$/g, "") });
+    else blocks.push({ t: "p", text: l.replace(/^>\s?/, "") });
+  }
+  flushList(); flushTbl();
+  return blocks;
+}
+const ME_RE = /\[내 경험[^\]]*\]/g;
+const countMe = b => (String(b || "").match(ME_RE) || []).length;
+const countImg = b => (String(b || "").match(/^\s*\[이미지[^\]]*\]\s*$/gm) || []).length;
+const countCta = b => (String(b || "").match(/^\s*\[링크[^\]]*\]\s*$/gm) || []).length;
+const removeEmptyMe = b => String(b || "").replace(/^\s*\[내 경험[^\]]*\]\s*$\n?/gm, "").replace(ME_RE, "");
+
+function disclosureFor(ids, P){
+  const texts = [], missing = [], unknown = [];
+  for (const id of ids || []){
+    const p = P && P[id];
+    if (!p || p.needs_disclosure === "불필요") continue;
+    const t = String(p.disclosure_template || "").trim();
+    if (t){ if (!texts.includes(t)) texts.push(t); }
+    else if (p.needs_disclosure === "필요") missing.push(p);
+    else unknown.push(p);
+  }
+  return { text: texts.join("\n"), missing, unknown };
+}
+function compatOf(pid, chId, compat){
+  const r = (compat || []).find(c => c.program_id === pid && c.channel_id === chId);
+  return r || { program_id: pid, channel_id: chId, verdict: "확인 필요", reason: "아직 확인하지 않은 조합" };
+}
+function sentences(body){
+  const out = [];
+  for (const b of parseBody(body)){
+    const parts = b.t === "ul" ? b.items : b.t === "table" ? b.rows.map(r => r.join(" | ")) : [b.text || ""];
+    for (const part of parts){
+      for (const s of stripMd(part).replace(/([.!?。])\s+/g, "$1\u0001").split("\u0001")){
+        const t = s.trim();
+        if (t) out.push({ text: t, kind: b.t });
+      }
+    }
+  }
+  return out;
+}
+const FAKE_EXPERIENCE = [
+  /(직접|실제로|제가|저는|내가|나는|저희|우리)\s*[^.!?\n]{0,12}(써|사용해|이용해|입어|먹어|발라)\s*(보니|봤|보았|보면서)/,
+  /(제가|저는|내가|나는)\s*[^.!?\n]{0,12}(써|사용해|이용해)\s*본/,
+  /내돈내산/,
+  /(한\s*달|일주일|보름|[0-9]+\s*(일|주|주일|개월|달|년))\s*(째|동안|간|정도)?\s*(써|사용|이용)(해)?\s*(보니|봤|보았|중)/,
+  /(제가|저는|내가|나는|저희|우리)\s*[^.!?\n]{0,12}(샀|구매했|구입했|주문했)/
+];
+const OTHERS_EXPERIENCE = /(사람들|분들|사용자들|후기를 보면|리뷰를 보면|후기들|리뷰들)/;
+const HYPE = ["무조건", "100%", "역대급", "최저가 보장", "부작용 없", "완벽한", "절대 후회", "인생템", "1등", "최고의 선택"];
+const PRICE_EXACT = /(\d{1,3}(?:,\d{3})+|\d{4,})\s*원(?!\s*(대|이하|이상|안팎|선|미만|초과|부터|까지|정도|내외))|\d+(?:\.\d+)?\s*만\s*원(?!\s*(대|이하|이상|안팎|선|미만|초과|부터|까지|정도|내외))/;
+const NUM_CLAIM = /\d[\d,.]*\s*(%|퍼센트|배\b|kWh|kW|W\b|와트|mAh|dB|℃|시간|kg|리터)/;
+const VAGUE_DISCLOSURE = /(받을|제공받을|지급받을|받게\s*될)\s*수(도)?\s*있/;
+
+const progIdsOf = d => (Array.isArray(d.program_ids) ? d.program_ids : (LEGACY_MONEY[d.money] || []));
+const chIdOf = d => d.channel_id || LEGACY_PLATFORM[d.platform] || "naver_blog";
+const typeOf = d => d.content_type || LEGACY_STYLE[d.style] || "";
+
+// 앱의 발행 전 검사 중 여기서 미리 볼 수 있는 것만
+function quickCheck(d, C){
+  const errors = [], warns = [], todos = [];
+  const body = String(d.body || "");
+  const pids = progIdsOf(d), chId = chIdOf(d);
+  const progs = pids.map(id => C.prog[id]).filter(Boolean);
+  const ch = C.ch[chId];
+  const ct = CONTENT_TYPES[typeOf(d)] || null;
+  const hasExp = String(d.experience || "").trim().length > 0;
+  const sents = sentences(body);
+  const me = countMe(body);
+  if (me) errors.push(`빈 [내 경험] 칸 ${me}곳 — 직접 겪은 걸로 채우거나 지워야 '발행 준비 완료'로 바꿀 수 있어.`);
+  if (ct && ct.needsExperience && !hasExp) errors.push("실제 경험 후기인데 경험 내용이 없어. 경험을 적거나 글 유형을 바꿔줘.");
+  const fake = sents.filter(s => !OTHERS_EXPERIENCE.test(s.text) && FAKE_EXPERIENCE.some(re => re.test(s.text)));
+  if (fake.length && !hasExp) errors.push(`써본 것처럼 쓴 문장 ${fake.length}곳: “${clip(fake[0].text)}”`);
+  const prices = sents.filter(s => PRICE_EXACT.test(s.text));
+  if (prices.length) errors.push(`정확한 가격 ${prices.length}곳: “${clip(prices[0].text)}” — 가격은 빼고 링크에서 확인하라고 바꿔줘.`);
+  if (ch && ch.max_chars && body.length > ch.max_chars) errors.push(`${ch.name} 글자 수 제한(${ch.max_chars}자)을 넘었어. 지금 ${body.length}자.`);
+  if (C.fromApp){
+    for (const p of progs){
+      const v = compatOf(p.id, chId, C.compat);
+      if (v.verdict === "불가") errors.push(`${p.name} × ${ch ? ch.name : chId}: 쓸 수 없는 조합이야.${v.reason ? " " + v.reason : ""}`);
+      else if (v.verdict === "확인 필요") warns.push(`${p.name} × ${ch ? ch.name : chId}: 가능한지 아직 공식 안내로 확인 안 된 조합이야.`);
+    }
+  }
+  const hype = HYPE.filter(w => body.includes(w));
+  if (hype.length) warns.push(`과장 표현: ${hype.join(", ")}`);
+  const claims = sents.filter(s => NUM_CLAIM.test(s.text) && s.kind !== "table");
+  if (claims.length) warns.push(`출처 없는 숫자 문장 ${claims.length}곳: “${clip(claims[0].text)}”`);
+  const unk = (body.match(/확인 필요/g) || []).length;
+  if (unk) warns.push(`본문에 '확인 필요'가 ${unk}곳 남아 있어. 독자에게는 미완성으로 보여.`);
+  const fc = Array.isArray(d.needs_fact_check) ? d.needs_fact_check.filter(Boolean) : [];
+  if (fc.length) warns.push(`사실 확인이 필요한 문장 ${fc.length}곳: “${clip(fc[0])}”`);
+  const link = safeUrl(d.link);
+  if (link && pids.includes("coupang_partners") && /^https?:\/\/(www\.|m\.)?coupang\.com\//i.test(link)) warns.push("쿠팡 상품 주소를 그대로 넣었어. 이 주소로는 수익이 집계되지 않아. 파트너스에서 만든 링크(link.coupang.com/…)로 바꿔줘.");
+  const cta = countCta(body);
+  const needsLink = progs.some(p => p.kind === "affiliate" && p.needs_link);
+  if (cta && !link) todos.push(needsLink ? `링크 자리 ${cta}곳 — 제휴 링크를 넣어야 수익이 생겨.` : `링크 자리 ${cta}곳 — 링크를 넣거나 그 자리를 지워줘.`);
+  if (!cta && !link && needsLink && !(ch && ch.kind === "sns")) todos.push("제휴 글인데 링크 자리가 없어. 링크를 넣어줘.");
+  const img = countImg(body);
+  if (img) todos.push(`사진 자리 ${img}곳 — 붙여넣은 뒤 직접 찍은 사진을 넣어줘.`);
+  return { errors, warns, todos };
+}
+
+// ───────── 내보내기 (앱 lib.js 와 같은 모양, 링크는 원고에 넣은 링크 하나) ─────────
+function inlineHtml(s, mode){
+  const h = esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  return h.replace(/\[(내 경험[^\]]*)\]/g, mode === "export" ? '<span style="background:#fff1a8;">[$1]</span>' : '<span class="me">[$1]</span>');
+}
+function viewHtml(d){
+  const link = safeUrl(d.link);
+  return parseBody(d.body).map(b => {
+    if (b.t === "h") return `<h2>${inlineHtml(b.text, "view")}</h2>`;
+    if (b.t === "p") return `<p>${inlineHtml(b.text, "view")}</p>`;
+    if (b.t === "ul") return `<ul>${b.items.map(i => `<li>${inlineHtml(i, "view")}</li>`).join("")}</ul>`;
+    if (b.t === "table") return `<div class="tblwrap"><table>${b.rows.map((r, ri) => `<tr>${r.map(c => (ri ? `<td>${inlineHtml(c, "view")}</td>` : `<th>${inlineHtml(c, "view")}</th>`)).join("")}</tr>`).join("")}</table></div>`;
+    if (b.t === "img") return `<div class="img">📷 ${esc(b.text)}</div>`;
+    if (b.t === "cta") return `<div class="cta"><span>🔗 ${esc(b.text || "최저가 확인하기")}</span><small>${link ? esc(link) : "제휴 링크를 넣으면 여기에 걸려"}</small></div>`;
+    return "";
+  }).join("");
+}
+function exportHtml(d, P){
+  const link = safeUrl(d.link), disc = disclosureFor(progIdsOf(d), P).text, out = [];
+  const S = {
+    p: "line-height:1.8;margin:0 0 1em;",
+    h: "font-size:1.3em;font-weight:bold;line-height:1.4;margin:1.6em 0 .6em;",
+    th: "border:1px solid #d9d9d9;padding:8px 10px;text-align:left;background:#f4f6f4;font-weight:bold;",
+    td: "border:1px solid #d9d9d9;padding:8px 10px;text-align:left;"
+  };
+  if (disc) out.push(`<p style="font-size:.9em;color:#555;background:#f4f4f4;padding:10px 12px;border-radius:6px;margin:0 0 1.4em;">${esc(disc).replace(/\n/g, "<br>")}</p>`);
+  for (const b of parseBody(d.body)){
+    if (b.t === "h") out.push(`<h2 style="${S.h}">${inlineHtml(b.text, "export")}</h2>`);
+    else if (b.t === "p") out.push(`<p style="${S.p}">${inlineHtml(b.text, "export")}</p>`);
+    else if (b.t === "ul") out.push(`<ul style="margin:0 0 1em;padding-left:1.4em;line-height:1.8;">${b.items.map(i => `<li>${inlineHtml(i, "export")}</li>`).join("")}</ul>`);
+    else if (b.t === "table") out.push(`<table style="border-collapse:collapse;width:100%;margin:0 0 1.2em;font-size:.95em;">${b.rows.map((r, ri) => `<tr>${r.map(c => `<${ri ? "td" : "th"} style="${ri ? S.td : S.th}">${inlineHtml(c, "export")}</${ri ? "td" : "th"}>`).join("")}</tr>`).join("")}</table>`);
+    else if (b.t === "img") out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 ${esc(b.text)} (여기에 사진 넣기)</p>`);
+    else if (b.t === "cta") out.push(link
+      ? `<p style="text-align:center;margin:1.4em 0;"><a href="${esc(link)}" target="_blank" rel="noopener nofollow sponsored" style="display:inline-block;padding:12px 24px;border-radius:8px;background:#1F5D4C;color:#ffffff;font-weight:bold;text-decoration:none;">${esc(b.text || "최저가 확인하기")}</a></p>`
+      : `<p style="text-align:center;margin:1.4em 0;">🔗 ${esc(b.text || "최저가 확인하기")} (여기에 제휴 링크 넣기)</p>`);
+  }
+  return out.join("\n");
+}
+function exportPlain(d, P){
+  const link = safeUrl(d.link), disc = disclosureFor(progIdsOf(d), P).text, lines = [];
+  if (disc) lines.push(disc, "");
+  for (const b of parseBody(d.body)){
+    if (b.t === "h") lines.push("", "■ " + stripMd(b.text));
+    else if (b.t === "p") lines.push(stripMd(b.text));
+    else if (b.t === "ul") b.items.forEach(i => lines.push("· " + stripMd(i)));
+    else if (b.t === "table") b.rows.forEach(r => lines.push(r.map(stripMd).join(" | ")));
+    else if (b.t === "img") lines.push("(사진: " + b.text + ")");
+    else if (b.t === "cta") lines.push("👉 " + (b.text || "최저가 확인하기") + (link ? "\n" + link : ""));
+  }
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+// SNS: 제휴·협찬·CPA 글이면 수익 모델의 공식 고지문을 맨 앞에 ('#광고'만으로는 부족 — 토스 고지 가이드, 첫 부분 표시 — 공정위 지침)
+function snsDisclosure(pids, P){
+  const aff = (pids || []).some(id => P[id] && ["affiliate", "sponsor", "cpa"].includes(P[id].kind));
+  if (!aff) return "";
+  return disclosureFor(pids, P).text || SNS_FALLBACK_DISCLOSURE;
+}
+function withSnsDisclosure(text, pids, P){
+  const t = String(text || "").trim();
+  const dsc = snsDisclosure(pids, P);
+  if (!dsc) return t;
+  if (!t) return dsc;
+  if (dsc.split("\n").every(line => t.includes(line))) return t;
+  return dsc + "\n\n" + t;
+}
+function threadsShare(d, P){
+  let text = String(d.threads || "").trim();
+  const url = safeUrl(d.blogUrl) || safeUrl(d.link);
+  const before = text;
+  text = withSnsDisclosure(text, progIdsOf(d), P);
+  if (text.length > 480) text = text.slice(0, 477) + "…";
+  return { url: "https://www.threads.com/intent/post?text=" + encodeURIComponent(text) + (url ? "&url=" + encodeURIComponent(url) : ""), added: text !== before, linked: !!url };
+}
+function instagramText(d, P){
+  const cap = withSnsDisclosure(String(d.instagram || "").trim(), progIdsOf(d), P);
+  const tags = (d.hashtags || []).map(h => "#" + h).join(" ");
+  return cap + (tags ? "\n\n" + tags : "");
+}
+
+// ───────── 주제 점수 (앱 lib.js topicScore 와 같은 계산) ─────────
+function topicScore(topic, weights){
+  const w = weights || {};
+  const parts = [];
+  let sum = 0, max = 0, wAll = 0, measured = 0;
+  for (const [f, label] of Object.entries(SCORE_FACTORS)){
+    const weight = Number(w[f] ?? 1);
+    if (!(weight > 0)) continue;
+    wAll += weight;
+    const s = topic.scores && topic.scores[f];
+    const score = s && typeof s.score === "number" && s.score >= 0 && s.score <= 5 ? s.score : null;
+    if (score != null){
+      sum += weight * score; max += weight * 5;
+      if (/^실측/.test(String(s.source || ""))) measured++;
+    }
+    parts.push({ f, label, weight, score, basis: (s && s.basis) || "", source: (s && s.source) || (score == null ? "데이터 없음" : "AI 추정"), confidence: (s && s.confidence) || "" });
+  }
+  const coverage = wAll ? max / (wAll * 5) : 0;
+  const total = max ? Math.round((sum / max) * 100) : null;
+  const confidence = total == null ? "데이터 없음" : measured === 0 ? "낮음 (실측 데이터 없이 AI 추정만)" : coverage < 0.6 ? "낮음 (빈 항목 많음)" : "보통";
+  return { total, coverage, measured, confidence, parts };
+}
+
+// 여기(웹 확인 없음)서 쓸 수 있는 글 유형
+function infoProducts(products){
+  return (products || []).filter(p => p && p.name && ((Array.isArray(p.specs) && p.specs.length) || (Array.isArray(p.source_urls) && p.source_urls.length) || p.pros || p.cons || p.used_by_me)).length;
+}
+function typeOkHere(k, o){
+  const t = CONTENT_TYPES[k];
+  if (!t) return false;
+  const sns = !!(o && o.sns);
+  if (sns) return k === "sns_short";
+  if (k === "sns_short") return false;
+  if (t.needsSources) return false;
+  if (t.needsExperience && !(o && o.experience)) return false;
+  if (t.minProducts && infoProducts(o && o.products) < t.minProducts) return false;
+  return true;
+}
+
+// ───────── AI 답 정리 ─────────
+function stripDisclosureLines(text, programs){
+  const temps = (programs || []).map(p => String(p.disclosure_template || "").trim()).filter(t => t.length >= 10);
+  return String(text || "").split("\n").filter(line => {
+    const l = line.trim();
+    if (!l) return true;
+    if (temps.some(t => l.includes(t))) return false;
+    if (/^#?\s*(광고|협찬|ad)\s*$/i.test(l)) return false;
+    if (/활동의\s*일환/.test(l) && /수수료/.test(l)) return false;
+    return true;
+  }).join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+function normalizePost(r, o){
+  if (!r || typeof r !== "object" || Array.isArray(r)) throw { code: "invalid_json" };
+  const body = stripDisclosureLines(typeof r.body === "string" ? r.body.replace(/\r\n?/g, "\n") : "", o.programs);
+  if (body.length < 50) throw { code: "invalid_json" };
+  const ch = o.channel || {};
+  let threads = stripDisclosureLines(str(r.threads, 2000), o.programs);
+  let instagram = stripDisclosureLines(str(r.instagram, 3000), o.programs);
+  if (ch.kind === "sns" && ch.id === "threads") threads = body;
+  if (ch.kind === "sns" && ch.id === "instagram") instagram = body;
+  const ct = o.fixedType || (typeof r.content_type === "string" && (o.allowed || []).includes(r.content_type) ? r.content_type : "");
+  const titles = strArr(r.titles, 5, 120);
+  return {
+    keyword: str(r.keyword, 120) || o.keyword,
+    titles: titles.length ? titles : [o.keyword],
+    body,
+    hashtags: (Array.isArray(r.hashtags) ? r.hashtags : []).map(h => String(h).replace(/^#+/, "").replace(/\s+/g, "")).filter(Boolean).slice(0, 15),
+    threads,
+    instagram,
+    content_type: ct,
+    category: str(r.category, 60),
+    summary: str(r.summary, 600),
+    needs_fact_check: strArr(r.needs_fact_check, 10, 300),
+    notes: str(r.notes, 400)
+  };
+}
+function normalizeTopics(raw, o){
+  const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.topics) ? raw.topics : null);
+  if (!arr) throw { code: "invalid_json" };
+  const chIds = new Set((o.channels || []).map(c => c.id));
+  const prIds = new Set((o.programs || []).map(p => p.id));
+  const out = [];
+  for (const it of arr){
+    if (!it || typeof it !== "object") continue;
+    const title = str(it.title, 200);
+    if (!title) continue;
+    const recCh = strArr(it.rec_channels, 5, 40).filter(x => chIds.has(x));
+    const checkCh = recCh.length ? recCh : [o.channelId];
+    const recPr = strArr(it.rec_programs, 8, 40).filter(x => prIds.has(x) && checkCh.every(ch => compatOf(x, ch, o.compat).verdict !== "불가")).slice(0, 5);
+    const scores = {};
+    for (const f of Object.keys(SCORE_FACTORS)){
+      const s = it.scores && typeof it.scores === "object" ? it.scores[f] : null;
+      let score = s && typeof s.score === "number" && isFinite(s.score) ? Math.round(s.score) : null;
+      if (score != null && (score < 0 || score > 5)) score = null;
+      const source = s && s.source === "성과 데이터" && o.hasPerf ? "성과 데이터" : "AI 추정";
+      let confidence = s && ["높음", "보통", "낮음"].includes(s.confidence) ? s.confidence : "낮음";
+      if (source === "AI 추정" && confidence === "높음") confidence = "보통";
+      scores[f] = { score, basis: str(s && s.basis, 200) || (score == null ? "확인 불가" : ""), source, confidence };
+    }
+    out.push({
+      title, keyword: str(it.keyword, 120), category: str(it.category, 60) || o.category || "",
+      search_intent: str(it.search_intent, 300), audience: str(it.audience, 300), problem: str(it.problem, 300),
+      affiliate_fit: str(it.affiliate_fit, 300), product_availability: str(it.product_availability, 300),
+      competition: str(it.competition, 300), differentiation: str(it.differentiation, 300),
+      seasonality: str(it.seasonality, 200), research_needed: str(it.research_needed, 400),
+      rec_channels: recCh, rec_programs: recPr,
+      rec_content_type: CONTENT_TYPES[it.rec_content_type] ? it.rec_content_type : "",
+      scores, basis: str(it.basis, 500)
+    });
+  }
+  if (!out.length) throw { code: "invalid_json" };
+  return out.slice(0, 12);
+}
+function normalizeVariants(r, targets, programs){
+  if (!r || typeof r !== "object" || Array.isArray(r)) throw { code: "invalid_json" };
+  const out = {};
+  for (const k of targets){
+    const v = r[k];
+    if (["threads", "instagram", "summary", "naver_blog", "tistory", "website"].includes(k)){
+      let s = str(v, k === "threads" ? 600 : k === "instagram" ? 2200 : 60000);
+      if (k === "threads" || k === "instagram") s = stripDisclosureLines(s, programs);
+      if (s) out[k] = s;
+    } else if (k === "cards"){
+      const a = (Array.isArray(v) ? v : []).filter(c => c && (c.title || c.text)).slice(0, 10).map(c => ({ title: str(c.title, 120), text: str(c.text, 600) }));
+      if (a.length) out[k] = a;
+    } else if (k === "shortform"){
+      if (v && typeof v === "object" && (v.script || v.hook)) out[k] = { hook: str(v.hook, 300), script: str(v.script, 3000), cta: str(v.cta, 300) };
+    } else if (k === "faq"){
+      const a = (Array.isArray(v) ? v : []).filter(x => x && x.q && x.a).slice(0, 8).map(x => ({ q: str(x.q, 200), a: str(x.a, 1000) }));
+      if (a.length) out[k] = a;
+    } else if (k === "titles"){
+      const a = strArr(v, 8, 120);
+      if (a.length) out[k] = a;
+    }
+  }
+  if (!Object.keys(out).length) throw { code: "invalid_json" };
+  return out;
+}
+
+// ───────── Supabase execute_sql 답 읽기 ─────────
+function dollarTag(s){
+  let t;
+  do { t = "$gf" + Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/g, "x") + "$"; } while (String(s).includes(t));
+  return t;
+}
+const dq = s => { const v = String(s); const t = dollarTag(v); return t + v + t; };
+function sqlRows(res){
+  if (res && Array.isArray(res.payload)) return res.payload;
+  const p = res ? res.payload : null;
+  let text = "";
+  if (typeof p === "string") text = p;
+  else if (p && typeof p === "object") text = typeof p.result === "string" ? p.result : JSON.stringify(p);
+  if (!text && res && Array.isArray(res.content)) text = res.content.filter(b => b && b.type === "text").map(b => b.text).join("\n");
+  if (/^\s*\{/.test(text)){ try { const o = JSON.parse(text); if (o && typeof o.result === "string") text = o.result; } catch (e) {} }
+  const m = text.match(/<untrusted-data-[^>]*>([\s\S]*?)<\/untrusted-data-[^>]*>/);
+  const inner = (m ? m[1] : text).trim();
+  const a = inner.indexOf("["), b = inner.lastIndexOf("]");
+  if (a < 0 || b < a) throw { code: "bad_result" };
+  let rows;
+  try { rows = JSON.parse(inner.slice(a, b + 1)); } catch (e) { throw { code: "bad_result" }; }
+  if (!Array.isArray(rows)) throw { code: "bad_result" };
+  return rows;
+}
+function dbText(e){
+  let s = "";
+  try { s = String((e && e.message) || ""); if (e && e.result) s += " " + JSON.stringify(e.result); } catch (x) {}
+  return s;
+}
+function dbMsg(e){
+  const s = dbText(e);
+  const m = s.match(/incompatible:\s*([^\n"\\]+)/);
+  if (m) return "이 채널에선 같이 쓸 수 없는 수익 모델이 있어: " + m[1].trim();
+  if (/job is not pending/.test(s)) return "다른 곳에서 이미 처리 중이거나 끝난 요청이야.";
+  if (/post is not waiting/.test(s)) return "이미 써진 원고라 덮어쓰지 않았어.";
+  if (/post not found/.test(s)) return "앱에서 지운 원고야.";
+  if (/body is required/.test(s)) return "본문이 너무 짧아서 저장하지 않았어.";
+  if (/paused|inactive|not active/i.test(s)) return "Supabase 프로젝트가 쉬는 중이야. Supabase 대시보드에서 프로젝트를 다시 켜줘(Restore).";
+  return "앱 서버가 받지 않았어.";
+}
+
+// ───────── 프롬프트 ─────────
+function productLines(products){
+  return (products || []).slice(0, 6).map((p, i) => {
+    const specs = Array.isArray(p.specs) ? p.specs.filter(s => s && s.name && s.value).slice(0, 12).map(s => `${s.name}: ${s.value}${safeUrl(s.source_url) ? " (출처 " + s.source_url + ")" : ""}`).join("; ") : "";
+    return [
+      `${i + 1}. ${[p.brand, p.name, p.model].filter(Boolean).join(" ")}`,
+      specs ? `   스펙: ${specs}` : "   스펙: 저장된 값 없음 (스펙을 쓰지 마)",
+      p.pros ? `   장점(작성자 메모): ${p.pros}` : null,
+      p.cons ? `   단점(작성자 메모): ${p.cons}` : null,
+      p.used_by_me ? "   작성자가 직접 써본 상품 (그래도 경험 문장은 위의 실제 경험에 적힌 것만)" : null
+    ].filter(Boolean).join("\n");
+  }).join("\n");
+}
+function buildWritePrompt(o){
+  const ch = o.channel;
+  const sns = ch.kind === "sns";
+  const limit = sns ? Math.max(200, (Number(ch.max_chars) || 500) - 80) : 0;
+  const ct = o.contentType || "";
+  const progs = o.programs || [];
+  const linkSlots = !sns && progs.some(p => p.kind === "affiliate" && p.needs_link);
+  const progLine = progs.length ? progs.map(p => `${p.name} (${KIND_LABEL[p.kind] || p.kind})`).join(", ") : "없음 (정보 글)";
+  const prods = productLines(o.products);
+  const allowed = o.allowed || [];
+  const plan = ct ? `${CONTENT_TYPES[ct].label}: ${TYPE_PLAN[ct] || ""}` : allowed.map(k => `- ${k} (${CONTENT_TYPES[k].label}): ${TYPE_PLAN[k] || ""}`).join("\n");
+  const L = [
+    "너는 한국어 수익형 블로그·SNS 원고를 쓰는 작가야. 아래 [조건]과 [규칙]을 지켜서 원고 1편을 써.",
+    "너는 지금 웹 검색도, 웹 페이지 열기도 할 수 없어. 확인할 수 없는 사실(특정 상품의 스펙·가격·출시일·판매 순위, 통계, 검색량, 정책 수치)은 쓰지 말고, 일반적인 원리·고르는 기준·스스로 확인하는 방법으로 써.",
+    "",
+    "[조건]",
+    `- 오늘(한국 날짜): ${o.today}`,
+    `- 키워드: ${o.keyword}`,
+    o.titleHint ? `- 제목 방향: ${o.titleHint}` : null,
+    `- 게시 채널: ${ch.name}${sns ? ` (SNS — 본문 ${limit}자 이내)` : ""}`,
+    `- 수익 모델: ${progLine}`,
+    ct ? `- 글 유형: ${ct} (${CONTENT_TYPES[ct].label})` : `- 글 유형: 정해지지 않음 — 키워드의 검색 의도에 맞게 다음 중 하나를 골라 content_type 에 적어: ${allowed.join(", ")}`,
+    sns ? null : `- 분량: 본문 약 ${o.len || "2500"}자`,
+    `- 카테고리: ${o.category || "알맞게 정해서 category 에 적어"}`,
+    o.experience ? `- 작성자의 실제 경험 (이 내용만 1인칭 경험으로 써도 돼):\n${o.experience.slice(0, 3000)}` : "- 작성자의 실제 경험: 없음",
+    o.ref ? `- 참고 글 (구성·말투·리듬만 참고하고 문장은 절대 베끼지 마):\n${o.ref.slice(0, 6000)}` : null,
+    o.notes ? `- 요청 메모: ${o.notes.slice(0, 1000)}` : null,
+    prods ? `- 작성자가 저장해 둔 상품 정보 (여기 적힌 값만 쓸 수 있어. 가격은 쓰지 마):\n${prods}` : "- 상품 정보: 없음. 특정 상품 이름·모델을 지어내거나 골라서 추천하지 마. 고르는 기준으로 써.",
+    (o.recent && o.recent.length) ? `- 최근에 쓴 키워드 (같은 내용을 문장만 바꿔 다시 쓰지 마): ${o.recent.slice(0, 40).join(", ")}` : null,
+    "",
+    "[구성]",
+    plan,
+    "매번 같은 틀(공감 도입 → 체크리스트 → 비교표 → 요약)을 반복하지 말고, 이 유형의 독자에게 필요한 순서로 써.",
+    "",
+    "[규칙]",
+    o.experience
+      ? "1. 경험: 위의 실제 경험에 있는 내용만 1인칭으로 써. 경험에 없는 사용 기간·결과·느낌을 덧붙이지 마."
+      : "1. 경험: \"써보니\", \"직접 써본\", \"한 달 동안 사용\", \"제가 샀던\" 같은 1인칭 사용·구매 표현을 절대 쓰지 마. 꼭 필요하면 \"[내 경험: 무엇을 적으면 좋은지]\" 자리를 1~2곳만 남기고, 아니면 정보형으로 끝까지 써.",
+    "2. 가격: 금액(예: 39,900원, 5만 원대)을 쓰지 마. \"최신 가격은 링크에서 확인\"처럼 안내해.",
+    "3. 숫자: 출처를 댈 수 없는 수치(%, 배, W, kWh, mAh, dB, 시간, kg 등)는 쓰지 말고 일반적인 설명으로 바꿔. \"확인 필요\" 같은 미완성 표시를 본문에 남기지 마. 표가 필요하면 확인 안 된 값 대신 '상황 | 먼저 볼 것 | 덜 중요한 것' 같은 기준 표로 만들어.",
+    "4. 장점만 쓰지 말고 단점·한계·안 맞는 사람도 써.",
+    "5. 과장 금지: 무조건, 역대급, 100%, 최저가 보장, 인생템, 부작용 없음, 1등, 완벽한, 절대 후회, 최고의 선택 같은 표현을 쓰지 마.",
+    "6. 광고 고지문(\"수수료를 제공받습니다\", \"#광고\" 같은 문구)은 본문·SNS 글 어디에도 쓰지 마. 앱이 복사할 때 수익 모델별 공식 문구를 맨 앞에 붙여.",
+    linkSlots ? "7. 링크 자리: \"[링크: 버튼 문구]\" 한 줄을 본문 중간 1곳, 마지막 1곳에 넣어." : "7. 링크 자리(\"[링크: …]\")는 넣지 마. 정보만으로 끝까지 읽히게 써.",
+    sns ? "8. 사진 자리·소제목·표 없이 짧은 줄로 써." : "8. 사진 자리: \"[이미지: 무엇을 찍을지]\" 한 줄로 2~4곳.",
+    sns ? `9. 형식: 반말 구어체, 줄바꿈으로 리듬을 만들어. 본문 ${limit}자 이내.` : "9. 형식: 소제목은 \"## \", 목록은 \"- \", 표는 \"| 항목 | A | B |\" 다음 줄 \"|---|---|---|\". 문장은 짧게, 모바일에서 읽기 편하게.",
+    sns ? "10. 마지막 줄은 자연스러운 다음 행동 안내로 끝내." : "10. 마지막은 3줄 요약과 자연스러운 다음 행동 안내로 끝내.",
+    "11. 가상의 인물(예: \"30대 직장인 A씨\", \"제 친구\")을 만들어 추천하거나 후기를 말하게 하지 마.",
+    "12. 다른 글을 베끼지 말고 직접 정리해서 써.",
+    "",
+    "[출력] 아래 모양의 JSON 객체 하나로만 답해. 문자열 안의 줄바꿈은 \\n 으로.",
+    JSON.stringify({ keyword: "검색 키워드", titles: ["검색 잘 되는 제목 3개, 키워드를 앞쪽에"], body: "본문", hashtags: ["# 없이 10개"], threads: "쓰레드 홍보글 3~5줄, 300자 이내, 반말, 첫 줄은 궁금하게 만드는 훅, 링크·해시태그·고지문 없이", instagram: "인스타 캡션 4~6줄, 해시태그·고지문 없이", content_type: "글 유형 id", category: "카테고리", summary: "3줄 요약 (줄바꿈으로 3줄)", needs_fact_check: ["작성자가 사실인지 확인해야 할 문장 그대로, 없으면 빈 배열"], notes: "작성자에게 남길 짧은 메모, 없으면 빈 문자열" })
+  ];
+  return L.filter(x => x != null).join("\n");
+}
+function buildTopicPrompt(o){
+  const typeIds = Object.keys(CONTENT_TYPES).filter(k => k !== "experience_review");
+  const blocked = [];
+  for (const c of o.channels || []) for (const p of o.allPrograms || []){
+    const v = compatOf(p.id, c.id, o.compat);
+    if (v.verdict === "불가") blocked.push(`${p.id} × ${c.id}`);
+  }
+  const perfLines = (o.perf || []).slice(0, 20).map(x => `- ${x.keyword || "(키워드 없음)"} · ${x.category || "카테고리 없음"} · ${x.content_type || "유형 없음"} · 조회 ${x.views ?? "없음"} · 클릭 ${x.clicks ?? "없음"} · 주문 ${x.orders ?? "없음"} · 발생 수익 ${x.revenue_est ?? "없음"}`).join("\n");
+  const progsLine = (o.programs || []).length ? o.programs.map(p => `${p.name}(${p.id})`).join(", ") : "없음";
+  return [
+    "너는 한국 수익형 블로그의 주제 기획자야. 아래 [조건]으로 글 주제를 추천해.",
+    "너는 웹 검색을 할 수 없고, 실제 검색량·경쟁도·검색 순위·구매 전환율 데이터도 없어. 그런 숫자를 지어내지 말고, 근거가 약하면 약하다고 솔직하게 적어.",
+    "",
+    "[조건]",
+    `- 오늘(한국 날짜): ${o.today}. 지금 시즌에 찾는 사람이 늘어나는 주제를 우선해.`,
+    `- 카테고리: ${o.category || "제한 없음"}`,
+    `- 추천 개수: ${o.count}개`,
+    o.hint ? `- 요청 메모: ${o.hint}` : null,
+    `- 주로 올릴 채널: ${o.channel.name}(${o.channel.id})`,
+    `- 주로 쓸 수익 모델: ${progsLine}`,
+    `- 고를 수 있는 채널 id: ${(o.channels || []).map(c => `${c.id}(${c.name})`).join(", ")}`,
+    `- 고를 수 있는 수익 모델 id: ${(o.allPrograms || []).map(p => `${p.id}(${p.name})`).join(", ")}`,
+    blocked.length ? `- 같이 쓸 수 없는 조합 (수익 모델 × 채널, rec_programs 와 rec_channels 에 같이 넣지 마): ${blocked.join(", ")}` : null,
+    `- 글 유형 id: ${typeIds.map(k => `${k}(${CONTENT_TYPES[k].label})`).join(", ")}`,
+    (o.recent && o.recent.length) ? `- 최근에 쓴 키워드 (겹치지 않게): ${o.recent.slice(0, 60).join(", ")}` : null,
+    o.mode === "performance" ? (perfLines ? `- 작성자가 입력한 최근 90일 실적 (실제 숫자):\n${perfLines}` : "- 작성자가 입력한 실적: 없음") : null,
+    "",
+    "[규칙]",
+    "- 키워드는 3~5어절의 구체적인 롱테일로. 서로 겹치지 않게.",
+    "- scores 에는 7개 키를 모두 넣어: demand(검색 수요), intent(구매 의도), competition(경쟁 — 경쟁이 낮을수록 높은 점수), product_info(상품 정보를 공식 자료로 확보할 가능성), differentiation(차별화 가능성), monetization(수익화 가능성), effort(제작 부담 — 적게 들수록 높은 점수)",
+    "- 각 점수는 {\"score\": 0~5 정수 또는 null, \"basis\": \"근거 한 줄\", \"source\": \"AI 추정\" 또는 \"성과 데이터\", \"confidence\": \"보통\" 또는 \"낮음\"}. 실측 데이터가 없으니 대부분 source 는 \"AI 추정\", confidence 는 \"낮음\"이야. 판단할 근거가 없으면 score 는 null, basis 는 \"확인 불가\".",
+    o.mode === "performance"
+      ? "- 실적 기준: 클릭·주문·수익이 실제로 있었던 글의 카테고리·유형을 근거로 후속·확장 주제를 추천하고, basis 에 그 글의 실제 숫자를 적어. 그 숫자를 근거로 한 점수만 source 를 \"성과 데이터\"로 적어. 실적이 없으면 basis 에 \"실적 데이터 없음 — 카테고리 기준 추천\"이라고 적어."
+      : "- 실적 데이터를 쓰지 않으니 source 는 모두 \"AI 추정\"이야.",
+    "- basis·competition 같은 칸에 '월 검색량 1만'처럼 확인 안 된 숫자를 쓰지 마. 가짜 통계·순위·출처 금지.",
+    "- comparison·pros_cons·news_summary 를 추천하면 research_needed 에 무엇을 공식 자료로 확인해야 하는지 적어.",
+    "",
+    "[출력] JSON 배열 하나로만 답해. 항목 모양:",
+    JSON.stringify({ title: "글 제목 후보", keyword: "검색 키워드", category: "카테고리", search_intent: "검색 의도", audience: "누가 찾는지", problem: "독자의 문제", affiliate_fit: "제휴 상품과 맞는 정도와 이유", product_availability: "연결할 만한 상품군", competition: "경쟁 상황 설명 (숫자 없이)", differentiation: "차별화 방법", seasonality: "시즌성", research_needed: "쓰기 전에 확인할 것", rec_channels: ["채널 id"], rec_programs: ["수익 모델 id"], rec_content_type: "글 유형 id", scores: { demand: { score: 3, basis: "근거 한 줄", source: "AI 추정", confidence: "낮음" } }, basis: "추천 근거" })
+  ].filter(x => x != null).join("\n");
+}
+function buildReformatPrompt(o){
+  const src = (o.sources || []).filter(s => s && safeUrl(s.url)).slice(0, 10).map(s => `- ${s.title || s.url} (${s.url})${s.claim ? ": " + s.claim : ""}`).join("\n");
+  return [
+    "아래 원고를 채널별 버전으로 바꿔줘.",
+    "원고와 출처에 있는 사실만 써. 새 사실·숫자를 더하지 마. 고지 문구(#광고, 제휴, 수수료 같은 말)는 쓰지 마 — 제휴 글이면 앱이 복사할 때 그 수익 모델의 공식 고지문을 맨 앞에 붙여.",
+    "원고에 없는 경험을 만들거나 가상의 인물 후기를 넣지 마.",
+    "",
+    "[만들 것]",
+    o.targets.map(k => "- " + VARIANT_RULES[k]).join("\n"),
+    "",
+    `[원고 제목] ${o.title || "(없음)"}`,
+    "[원고 본문]",
+    String(o.body || "").slice(0, 60000),
+    src ? "[출처]\n" + src : "[출처] 없음",
+    "",
+    `[출력] JSON 객체 하나로만 답해. 키는 ${o.targets.join(", ")} 만.`
+  ].join("\n");
+}
+
+const EXAMPLE = {
+  v: 5, example: true, keyword: "원룸 무선청소기 고르는 법", channel_id: "naver_blog", program_ids: ["coupang_partners"], content_type: "buying_guide", category: "생활 가전", link: "", experience: "",
+  titles: ["원룸 무선청소기 고르는 법, 흡입력보다 먼저 볼 3가지", "자취방 무선청소기 살 때 체크리스트 (무게·보관·먼지통)", "원룸에 맞는 무선청소기 고르는 기준 정리"],
+  body: "## 원룸이면 흡입력보다 먼저 볼 것\n자취방 청소를 자꾸 미루게 되는 건 대부분 꺼내기 귀찮아서예요. 원룸에서는 무게와 보관 방법이 매일 손이 가는지를 정해요.\n[이미지: 좁은 원룸 바닥과 벽에 걸린 무선청소기]\n## 고를 때 체크리스트\n- 한 손으로 들어도 손목이 버틸 무게인지 (매장에서 직접 들어보기)\n- 벽걸이 거치대나 세워두는 거치대가 같이 오는지\n- 먼지통을 손에 안 묻히고 비울 수 있는지\n- 배터리를 따로 빼서 충전할 수 있는지\n## 상황별로 먼저 볼 것\n| 상황 | 먼저 볼 것 | 덜 중요한 것 |\n|---|---|---|\n| 작은 원룸 | 무게, 보관 | 최대 흡입력 |\n| 반려동물과 함께 | 브러시 엉킴 방지, 먼지통 크기 | 부가 헤드 개수 |\n| 밤에 청소 | 소음, 약한 모드 | 화면 표시 기능 |\n[링크: 지금 가격 보러 가기]\n## 아쉬운 점도 알고 사요\n무선은 유선보다 한 번에 쓰는 시간이 짧고, 배터리는 쓸수록 약해져요. 집이 넓거나 카펫이 많다면 다른 방식이 나을 수 있어요.\n[이미지: 먼지통을 비우는 손]\n## 정리\n- 원룸은 무게와 보관이 먼저\n- 반려동물·밤 청소처럼 생활 패턴에 맞춰 우선순위 정하기\n- 최신 가격과 구성은 링크에서 확인\n[링크: 조건에 맞는 모델 보기]",
+  hashtags: ["원룸청소기", "자취템", "무선청소기", "자취꿀팁", "청소기고르는법"],
+  threads: "원룸 청소기 고를 때 흡입력부터 보면 실패함\n작은 방은 무게랑 보관이 진짜 중요해\n고르는 기준 정리해둠",
+  instagram: "원룸 청소기, 흡입력보다 먼저 볼 것 🧹\n✔️ 한 손으로 들 수 있는 무게\n✔️ 벽걸이 거치\n✔️ 손 안 묻는 먼지통\n자세한 기준은 프로필 링크에서!",
+  summary: "원룸은 무게와 보관이 먼저\n생활 패턴에 맞춰 우선순위 정하기\n최신 가격과 구성은 링크에서 확인",
+  needs_fact_check: [], notes: ""
+};
+/*PURE-END*/
+
+const $ = s => document.querySelector(s);
+const $$ = s => Array.from(document.querySelectorAll(s));
+const LS = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+  del(k){ try { localStorage.removeItem(k); } catch (e) {} }
+};
+const reduceMotion = () => { try { return matchMedia("(prefers-reduced-motion: reduce)").matches; } catch (e) { return false; } };
+const scrollToEl = e => { try { e.scrollIntoView({ behavior: reduceMotion() ? "auto" : "smooth", block: "start" }); } catch (x) {} };
+function el(tag, cls, text){ const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; }
+function mkBtn(text, cls, onClick){ const b = el("button", cls, text); b.type = "button"; b.onclick = onClick; return b; }
+function sect(title, extra){ const s = el("div", "sect"); const h = el("h3"); h.append(document.createTextNode(title)); if (extra) h.append(extra); s.append(h); return s; }
+function flash(btn, msg){
+  if (!btn) return;
+  if (!btn.dataset.label) btn.dataset.label = btn.textContent;
+  btn.textContent = msg; clearTimeout(btn._t);
+  btn._t = setTimeout(() => { btn.textContent = btn.dataset.label; }, 1600);
+}
+
+const APP_VER = "5";
+const APP_DATE = "2026.10.21";
+const APP_PROJECT = "oxewhsqmdkiasckvnyua";
+const SERVER = "Supabase";
+const WHATS_NEW = "새 앱(1.1)에 맞췄어. 채널과 수익 모델을 따로 고르고, 글 유형 11가지·주제 추천 점수·앱 요청 바로 처리가 생겼어. 쓴 원고는 앱 검수함으로 들어가.";
+const ERR = {
+  not_granted: "Claude 사용을 허용해야 쓸 수 있어.",
+  rate_limited: "너무 자주 돌렸거나 사용량이 다 찼어. 잠깐 쉬었다가 다시 해줘.",
+  session_expired: "로그인이 풀렸어. 다시 로그인해줘.",
+  refused: "이 내용으로는 못 써. 키워드를 바꿔봐.",
+  invalid_json: "결과 형식이 깨졌어. 한 번 더 눌러줘.",
+  empty_completion: "답이 비어서 왔어. 키워드를 조금 바꿔서 다시 해봐.",
+  prompt_too_large: "참고 글이 너무 길어. 줄여서 다시 해줘.",
+  sampling_disabled: "이 계정에선 Claude 글쓰기가 꺼져 있어.",
+  not_declared: "이 페이지에서 Claude 글쓰기가 꺼졌어.",
+  capability_disabled: "여기서는 Claude 글쓰기를 쓸 수 없어.",
+  capability_removed: "여기서는 Claude 글쓰기를 쓸 수 없어.",
+  upstream_error: "연결이 잠깐 끊겼어. 다시 눌러줘."
+};
+const STOP_CODES = ["rate_limited", "not_granted", "sampling_disabled", "session_expired", "not_declared", "capability_disabled", "capability_removed"];
+const SAMPLE_PAUSE = STOP_CODES.concat(["upstream_error"]);
+const MCP_MSG = {
+  not_in_manifest: "Supabase 연결이 허용되지 않았어. '권한 열기'에서 Supabase를 켜줘.",
+  approval_required: "허용 창에서 '허용'을 눌러야 앱과 주고받을 수 있어.",
+  server_not_connected: "claude.ai 설정 > 커넥터에서 Supabase를 연결해줘.",
+  needs_reauth: "claude.ai 설정 > 커넥터에서 Supabase를 다시 연결해줘.",
+  selection_required: "Supabase 커넥터가 여러 개야. 쓸 것 하나를 골라줘.",
+  server_not_found: "Supabase 커넥터를 찾을 수 없어. 설정 > 커넥터에서 다시 연결해줘.",
+  blocked_by_policy: "조직 설정 때문에 Supabase를 쓸 수 없어.",
+  server_unavailable: "Supabase가 잠깐 응답하지 않아. 조금 뒤에 다시 해줘.",
+  upstream_error: "연결이 잠깐 끊겼어. 조금 뒤에 다시 해줘.",
+  rate_limited: "너무 자주 불렀어. 잠깐 뒤에 다시 해줘.",
+  cancelled: "중간에 멈췄어.",
+  not_granted: "여기서는 앱과 연결할 수 없어.",
+  capability_disabled: "여기서는 앱과 연결할 수 없어.",
+  capability_removed: "여기서는 앱과 연결할 수 없어.",
+  bad_result: "앱 서버 답을 읽지 못했어. 다시 해줘."
+};
+const errMsg = e => (e && e.code === "cancelled") ? "멈췄어." : (ERR[e && e.code] || "잠깐 문제가 생겼어. 다시 눌러줘.");
+const connMsg = e => (e && e.code === "tool_error") ? dbMsg(e) : (MCP_MSG[e && e.code] || "앱과 연결하지 못했어.");
+
+let sample = null, db = null, mcp = null, perms = null;
+let cat = builtinCatalog();
+let catCacheStr = "";
+let posts = [], loaded = false;
+const unsaved = new Map();
+let viewing = null, lastWritten = null, curTab = "write";
+let form = LS.get("bgf5-form", null);
+if (form && typeof form !== "object") form = null;
+let formTouched = !!form;
+let topics = LS.get("bgf5-topics", []);
+if (!Array.isArray(topics)) topics = [];
+topics.forEach(t => { if (t.state === "writing") t.state = ""; });
+const adoptedPick = new Set();
+const adoptedDone = {};
+const conn = { state: "init", msg: "" };
+const jobUi = {};
+const jobLog = [];
+let outMsg = "", outMsgAt = 0;
+let genCtl = null, genRunning = false, topicRunning = false, batchRunning = false, batchStop = false, batchCtl = null;
+let jobsRunning = false, jobsStop = false, jobCtl = null, loadingCat = false;
+
+function builtinCatalog(){
+  return {
+    fromApp: false, live: false, at: 0, settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)),
+    programs: BUILTIN_PROGRAMS.map(p => ({ ...p, needs_disclosure: "확인 필요", disclosure_template: "", active: true })),
+    channels: BUILTIN_CHANNELS.map(c => ({ ...c, active: true })),
+    compat: [], recent: [], adopted: [], perf: [], jobs: [], upcoming: null
+  };
+}
+function ctxC(){
+  return {
+    prog: Object.fromEntries(cat.programs.map(p => [p.id, p])),
+    ch: Object.fromEntries(cat.channels.map(c => [c.id, c])),
+    compat: cat.compat, fromApp: cat.fromApp
+  };
+}
+const activeChannels = () => cat.channels.filter(c => c.active !== false);
+const activePrograms = () => cat.programs.filter(p => p.active !== false);
+const busy = () => genRunning || batchRunning || topicRunning || jobsRunning;
+const byNew = (a, b) => (b.createdAt || 0) - (a.createdAt || 0);
+const typeLabel = k => (CONTENT_TYPES[k] ? CONTENT_TYPES[k].label : "");
+
+/* ---------- 복사 ---------- */
+function showSheet(text){ const t = $("#sheetText"); t.value = text; $("#sheet").hidden = false; t.focus(); t.select(); }
+$("#sheetClose").onclick = () => { $("#sheet").hidden = true; };
+function copyPlain(text, btn){
+  const fallback = () => {
+    const ta = document.createElement("textarea"); ta.value = text; ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;left:-9999px;top:0;"; document.body.append(ta); ta.select();
+    let ok = false; try { ok = document.execCommand("copy"); } catch (e) {} ta.remove();
+    if (ok) flash(btn, "복사됨"); else showSheet(text);
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(() => flash(btn, "복사됨"), fallback); return; }
+  } catch (e) {}
+  fallback();
+}
+function copyRich(html, plain, btn){
+  let item = null;
+  try {
+    if (navigator.clipboard && navigator.clipboard.write && window.ClipboardItem){
+      item = new ClipboardItem({ "text/html": new Blob([html], { type: "text/html" }), "text/plain": new Blob([plain], { type: "text/plain" }) });
+    }
+  } catch (e) { item = null; }
+  if (item){ navigator.clipboard.write([item]).then(() => flash(btn, "복사됨"), () => richFallback(html, plain, btn)); return; }
+  richFallback(html, plain, btn);
+}
+function richFallback(html, plain, btn){
+  let ok = false;
+  try {
+    const box = document.createElement("div"); box.contentEditable = "true"; box.innerHTML = html;
+    box.style.cssText = "position:fixed;left:-9999px;top:0;"; document.body.append(box);
+    const r = document.createRange(); r.selectNodeContents(box);
+    const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+    ok = document.execCommand("copy"); s.removeAllRanges(); box.remove();
+  } catch (e) {}
+  if (ok) flash(btn, "복사됨"); else copyPlain(plain, btn);
+}
+
+/* ---------- 앱 DB (Supabase 커넥터의 execute_sql, 정해진 함수만 부름) ---------- */
+async function sql(query){
+  if (!mcp) throw { code: "not_granted" };
+  const res = await mcp.callTool(SERVER, "execute_sql", { project_id: APP_PROJECT, query });
+  return sqlRows(res);
+}
+// 읽기만 한 번 다시 시도 (쓰기는 절대 자동으로 다시 보내지 않음)
+async function sqlRead(query){
+  try { return await sql(query); }
+  catch (e) {
+    if (e && e.retryable){
+      const wait = Math.min(Number(e.retryAfterMs) || 0, 8000) || (1200 + Math.random() * 1500);
+      await new Promise(r => setTimeout(r, wait));
+      return sql(query);
+    }
+    throw e;
+  }
+}
+const CATALOG_SQL = `select jsonb_build_object(
+  'ctx', public.writer_context(),
+  'programs', (select coalesce(jsonb_agg(jsonb_build_object('id', p.id, 'name', p.name, 'kind', p.kind, 'needs_link', p.needs_link, 'needs_disclosure', p.needs_disclosure, 'disclosure_template', p.disclosure_template, 'disclosure_where', p.disclosure_where, 'my_status', p.my_status, 'policy_url', p.policy_url, 'policy_checked_at', p.policy_checked_at, 'active', p.active) order by p.sort, p.id), '[]'::jsonb) from public.programs p),
+  'channels', (select coalesce(jsonb_agg(jsonb_build_object('id', c.id, 'name', c.name, 'kind', c.kind, 'max_chars', c.max_chars, 'clickable_links', c.clickable_links, 'active', c.active) order by c.sort, c.id), '[]'::jsonb) from public.channels c),
+  'compat', (select coalesce(jsonb_agg(jsonb_build_object('program_id', pc.program_id, 'channel_id', pc.channel_id, 'verdict', pc.verdict, 'reason', pc.reason)), '[]'::jsonb) from public.program_channels pc)
+) as data;`;
+
+function applyCatalog(data, source){
+  const ctx = data.ctx || {};
+  const progs = Array.isArray(data.programs) ? data.programs.filter(p => p && p.id && p.name) : [];
+  const chs = Array.isArray(data.channels) ? data.channels.filter(c => c && c.id && c.name) : [];
+  if (!progs.length || !chs.length) throw { code: "bad_result" };
+  const live = source === "live";
+  const settings = Object.assign(JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), (live ? ctx.settings : data.settings) || {});
+  if (!Array.isArray(settings.default_programs)) settings.default_programs = [];
+  if (!settings.score_weights || typeof settings.score_weights !== "object") settings.score_weights = DEFAULT_SETTINGS.score_weights;
+  cat = {
+    fromApp: true, live, at: live ? Date.now() : (Number(data.savedAt) || 0), settings,
+    programs: progs, channels: chs, compat: Array.isArray(data.compat) ? data.compat : [],
+    recent: live ? (Array.isArray(ctx.recent_keywords) ? ctx.recent_keywords : []) : (Array.isArray(data.recent) ? data.recent : []),
+    adopted: live && Array.isArray(ctx.adopted_topics) ? ctx.adopted_topics : [],
+    perf: live && Array.isArray(ctx.performance_90d) ? ctx.performance_90d : [],
+    jobs: live && Array.isArray(ctx.jobs) ? ctx.jobs : [],
+    upcoming: live && typeof ctx.upcoming === "number" ? ctx.upcoming : null
+  };
+}
+function stableStr(v){
+  if (Array.isArray(v)) return "[" + v.map(stableStr).join(",") + "]";
+  if (v && typeof v === "object") return "{" + Object.keys(v).sort().map(k => JSON.stringify(k) + ":" + stableStr(v[k])).join(",") + "}";
+  return JSON.stringify(v === undefined ? null : v);
+}
+const cacheBody = () => ({ settings: cat.settings, programs: cat.programs, channels: cat.channels, compat: cat.compat, recent: (cat.recent || []).slice(0, 200) });
+async function saveCatalogCache(){
+  if (!db || !cat.live) return;
+  const body = cacheBody();
+  const s = stableStr(body);
+  if (s === catCacheStr) return;
+  try { await db.doc("meta/catalog").set({ ...body, savedAt: Date.now() }); catCacheStr = s; } catch (e) {}
+}
+async function loadCatalogCache(){
+  if (!db) return;
+  try {
+    const snap = await db.doc("meta/catalog").get();
+    if (!snap.exists) return;
+    const d = snap.data() || {};
+    catCacheStr = stableStr({ settings: d.settings, programs: d.programs, channels: d.channels, compat: d.compat, recent: d.recent });
+    if (cat.live) return;
+    applyCatalog({ programs: d.programs, channels: d.channels, compat: d.compat, settings: d.settings, recent: d.recent, savedAt: d.savedAt }, "cache");
+    onCatalog();
+  } catch (e) {}
+}
+async function loadCatalog(){
+  if (!mcp || loadingCat) return false;
+  loadingCat = true;
+  conn.state = "loading"; renderConn(); syncBusy();
+  let ok = false;
+  try {
+    const rows = await sqlRead(CATALOG_SQL);
+    const data = rows[0] && rows[0].data;
+    if (!data || typeof data !== "object") throw { code: "bad_result" };
+    applyCatalog(data, "live");
+    conn.state = "ok"; conn.msg = ""; ok = true;
+    saveCatalogCache();
+  } catch (e) {
+    if (cat.fromApp) cat.live = false;
+    cat.jobs = [];
+    conn.state = (e && (e.code === "not_in_manifest" || e.code === "approval_required")) ? "denied" : "error";
+    conn.msg = connMsg(e);
+  } finally {
+    loadingCat = false;
+    onCatalog();
+  }
+  return ok;
+}
+async function openPerms(){
+  try { await perms.manage(); }
+  catch (e) { conn.msg = "여기서 권한 창을 못 열었어. 이 페이지 메뉴의 권한(Permissions)에서 Supabase를 켜줘."; renderConn(); return; }
+  loadCatalog();
+}
+
+/* ---------- 연결 상태 줄 ---------- */
+function renderConn(){
+  const box = $("#conn"), t = $("#connText"), a = $("#connActs");
+  a.textContent = "";
+  const s = conn.state;
+  let text = "";
+  if (s === "init") text = "앱 연결을 확인하는 중…";
+  else if (s === "loading") text = "홈 화면 앱 정보를 불러오는 중…";
+  else if (s === "none") text = "여기서는 홈 화면 앱과 연결할 수 없어. 쓴 원고는 이 페이지 보관함에만 저장돼.";
+  else if (s === "need"){ text = "홈 화면 앱과 주고받으려면 Supabase 연결을 한 번 허용해줘."; a.append(mkBtn("앱 연결하기", "btn sm", () => loadCatalog())); }
+  else if (s === "denied"){
+    text = conn.msg || "Supabase 연결이 꺼져 있어.";
+    if (perms) a.append(mkBtn("권한 열기", "btn sm ghost", openPerms));
+    a.append(mkBtn("다시 연결", "btn sm ghost", () => loadCatalog()));
+  } else if (s === "error"){ text = conn.msg || "앱과 연결하지 못했어."; a.append(mkBtn("다시 연결", "btn sm ghost", () => loadCatalog())); }
+  else if (s === "ok"){
+    const goal = (Number(cat.settings.per_day) || 1) * 7;
+    text = `앱 연결됨 · 기다리는 요청 ${cat.jobs.length}개 · 7일 발행표 ${cat.upcoming == null ? "?" : cat.upcoming}/${goal}편 · 자동 작가 다음 실행 ${nextRunText()}`;
+    const r = mkBtn("새로고침", "btn sm ghost", () => loadCatalog()); r.disabled = busy();
+    a.append(r);
+  }
+  if (s !== "ok" && s !== "loading" && cat.fromApp && !cat.live && cat.at) text += ` 지금은 마지막으로 불러온 설정(${fmtTime(cat.at)})으로 쓰는 중이야.`;
+  box.dataset.s = (s === "error" || s === "denied") && cat.fromApp ? "cached" : s;
+  t.textContent = text;
+}
+
+/* ---------- 탭 ---------- */
+const TABS = ["write", "topics", "jobs", "drafts", "guide"];
+function showTab(t){
+  if (!TABS.includes(t)) t = "write";
+  curTab = t;
+  TABS.forEach(o => {
+    const b = $("#t-" + o);
+    b.setAttribute("aria-selected", String(o === t)); b.tabIndex = o === t ? 0 : -1;
+    $("#p-" + o).hidden = o !== t;
+  });
+  LS.set("bgf5-tab", t);
+  if (t === "drafts" && !(viewing && posts.some(p => p.id === viewing))){
+    const first = posts.filter(p => !p.sent).sort(byNew)[0];
+    viewing = first ? first.id : null;
+  }
+  if (t === "topics") renderTopics();
+  if (t === "jobs") renderJobs();
+  if (t === "drafts") renderDrafts();
+  renderOut();
+}
+TABS.forEach(t => { $("#t-" + t).onclick = () => showTab(t); });
+$(".tabs").addEventListener("keydown", e => {
+  if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+  const i = TABS.indexOf(curTab);
+  const n = TABS[(i + (e.key === "ArrowRight" ? 1 : TABS.length - 1)) % TABS.length];
+  showTab(n); $("#t-" + n).focus(); e.preventDefault();
+});
+
+/* ---------- 글쓰기 입력 ---------- */
+function currentChannelId(){
+  const r = document.querySelector('input[name="ch"]:checked');
+  return r ? r.value : ((form && form.channel) || cat.settings.default_channel || "naver_blog");
+}
+function selectedProgramIds(){
+  const inputs = $$('input[name="pr"]');
+  if (inputs.length) return inputs.filter(i => i.checked).map(i => i.value);
+  return (form && Array.isArray(form.programs)) ? form.programs : (cat.settings.default_programs || []);
+}
+function readForm(){
+  return {
+    keyword: $("#kw").value.trim(), chId: currentChannelId(), progIds: selectedProgramIds(),
+    ctype: $("#ctype").value, len: $("#len").value, category: $("#cat").value.trim(),
+    link: $("#link").value.trim(), experience: $("#exp").value.trim(), ref: $("#ref").value.trim()
+  };
+}
+function saveForm(){
+  const f = readForm();
+  form = { channel: f.chId, programs: f.progIds, ctype: f.ctype, len: f.len, cat: f.category };
+  formTouched = true; LS.set("bgf5-form", form);
+}
+function applyDefaults(){
+  const S = cat.settings;
+  form = { channel: S.default_channel || "naver_blog", programs: (S.default_programs || []).slice(), ctype: "", len: String(S.len || "2500"), cat: "" };
+  const lenSel = $("#len");
+  lenSel.value = [...lenSel.options].some(o => o.value === form.len) ? form.len : "2500";
+  $$('input[name="pr"]').forEach(i => i.remove());
+}
+function renderChannels(){
+  const box = $("#chSeg");
+  const cur = currentChannelId();
+  const list = activeChannels();
+  const pick = list.some(c => c.id === cur) ? cur : ((list.find(c => c.id === cat.settings.default_channel) || list[0] || {}).id);
+  box.textContent = "";
+  list.forEach(c => {
+    const inp = document.createElement("input"); inp.type = "radio"; inp.name = "ch"; inp.id = "ch-" + c.id; inp.value = c.id; inp.checked = c.id === pick;
+    inp.addEventListener("change", onChannelChange);
+    const lab = el("label", null, c.name); lab.htmlFor = inp.id;
+    box.append(inp, lab);
+  });
+}
+function renderPrograms(){
+  const box = $("#prPicks");
+  const chId = currentChannelId();
+  const want = new Set(selectedProgramIds());
+  const dropped = [];
+  box.textContent = "";
+  activePrograms().forEach(p => {
+    const v = cat.fromApp ? compatOf(p.id, chId, cat.compat) : null;
+    const blocked = !!(v && v.verdict === "불가");
+    const inp = document.createElement("input"); inp.type = "checkbox"; inp.name = "pr"; inp.id = "pr-" + p.id; inp.value = p.id;
+    inp.disabled = blocked;
+    inp.checked = !blocked && want.has(p.id);
+    if (blocked && want.has(p.id)) dropped.push(p.name);
+    inp.addEventListener("change", onProgramChange);
+    const lab = el("label", blocked ? "off" : null); lab.htmlFor = inp.id;
+    lab.append(document.createTextNode(p.name));
+    if (blocked) lab.append(el("small", null, "불가"));
+    else if (v && v.verdict === "확인 필요") lab.append(el("small", null, "확인 필요"));
+    box.append(inp, lab);
+  });
+  renderPrNote(dropped);
+  if (dropped.length) saveForm();
+}
+function renderPrNote(dropped){
+  const C = ctxC();
+  const chId = currentChannelId(), ch = C.ch[chId];
+  const parts = [];
+  if (!cat.fromApp) parts.push("앱 연결 전이라 채널마다 되는 수익 모델인지 아직 못 불러왔어. 앱으로 보낼 때 앱이 다시 검사해.");
+  else {
+    if (dropped && dropped.length) parts.push(`${ch ? ch.name : ""}에선 ${dropped.join(", ")}을(를) 쓸 수 없어서 뺐어.`);
+    const blocked = activePrograms().map(p => ({ p, v: compatOf(p.id, chId, cat.compat) })).filter(x => x.v.verdict === "불가");
+    if (blocked.length) parts.push(`${ch ? ch.name : ""}에서 못 쓰는 것: ${blocked.map(x => x.p.name + (x.v.reason ? ` (${x.v.reason})` : "")).join(" · ")}`);
+    const unk = selectedProgramIds().map(id => C.prog[id]).filter(p => p && compatOf(p.id, chId, cat.compat).verdict === "확인 필요");
+    if (unk.length) parts.push(`'확인 필요'는 공식 안내로 아직 확인 못 한 조합이야 (${unk.map(p => p.name).join(", ")}). 앱 설정 > 수익 모델에서 근거를 볼 수 있어.`);
+  }
+  const n = $("#prNote"); n.textContent = parts.join(" "); n.hidden = !parts.length;
+}
+function renderTypes(){
+  const sel = $("#ctype");
+  const cur = sel.value || (form && form.ctype) || "";
+  const ch = ctxC().ch[currentChannelId()];
+  const sns = !!(ch && ch.kind === "sns");
+  const hasExp = $("#exp").value.trim().length > 0;
+  sel.textContent = "";
+  const opt = (v, label, disabled) => { const o = document.createElement("option"); o.value = v; o.textContent = label; o.disabled = !!disabled; sel.append(o); return o; };
+  const note = $("#ctNote");
+  if (sns){
+    opt("sns_short", "SNS용 짧은 글"); sel.value = "sns_short"; sel.disabled = true;
+    $("#lenWrap").hidden = true;
+    note.textContent = `${ch.name}은(는) SNS라 짧은 글로 써${ch.max_chars ? ` (최대 ${Number(ch.max_chars).toLocaleString()}자, 고지문 자리를 남겨둬)` : ""}.`;
+    note.hidden = false;
+    return;
+  }
+  sel.disabled = false; $("#lenWrap").hidden = false;
+  opt("", "자동 (키워드에 맞게)");
+  for (const [k, t] of Object.entries(CONTENT_TYPES)){
+    if (k === "sns_short") continue;
+    const ok = typeOkHere(k, { products: [], experience: hasExp, sns: false });
+    opt(k, t.label + (ok ? "" : (t.needsExperience ? " · 경험을 적으면 골라져" : " · 앱에서 요청")), !ok);
+  }
+  sel.value = [...sel.options].some(o => o.value === cur && !o.disabled) ? cur : "";
+  note.textContent = "상품 비교·장단점 분석·최신 정보 요약은 공식 자료 확인이 필요해서 홈 화면 앱에서 요청해줘. 자동 작가가 확인해서 써.";
+  note.hidden = false;
+}
+function renderLinkField(){
+  const C = ctxC();
+  const need = selectedProgramIds().some(id => { const p = C.prog[id]; return p && p.needs_link; });
+  $("#linkWrap").hidden = !need;
+  renderLinkNote();
+}
+function renderLinkNote(){
+  const n = $("#linkNote");
+  if ($("#linkWrap").hidden){ n.hidden = true; return; }
+  const v = $("#link").value.trim();
+  const ch = ctxC().ch[currentChannelId()];
+  let t = "";
+  if (v && !safeUrl(v)) t = "https://로 시작하는 주소를 넣어줘.";
+  else if (v && selectedProgramIds().includes("coupang_partners") && /^https?:\/\/(www\.|m\.)?coupang\.com\//i.test(v)) t = "쿠팡 상품 주소를 그대로 넣으면 수익이 집계되지 않아. 파트너스 사이트에서 만든 링크(link.coupang.com/…)를 넣어줘.";
+  else if (ch && ch.clickable_links === false) t = `${ch.name}은(는) 본문 링크가 눌리지 않아. 링크는 저장해 두고 프로필 링크로 안내해.`;
+  else if (!v) t = "지금 없으면 비워둬. 앱에서 상품마다 링크를 여러 개 넣을 수 있어. 받은 링크는 그대로 쓰고 바꾸지 않아.";
+  n.textContent = t; n.hidden = !t;
+}
+function renderCats(){
+  const dl = $("#catList"); dl.textContent = "";
+  const seen = new Set();
+  String(cat.settings.auto_topics || "").split(/[,，]/).map(s => s.trim()).filter(Boolean).forEach(c => {
+    if (seen.has(c)) return; seen.add(c);
+    const o = document.createElement("option"); o.value = c; dl.append(o);
+  });
+}
+function renderKwNote(){
+  const k = normKw($("#kw").value);
+  const n = $("#kwNote");
+  const hit = k && (cat.recent || []).some(r => normKw(r) === k);
+  n.textContent = hit ? "최근 90일 안에 같은 키워드로 쓴 글이 있어. 같은 내용을 반복하면 앱에서 '비슷한 글' 경고가 떠. 다른 각도로 쓰거나 키워드를 바꿔줘." : "";
+  n.hidden = !hit;
+}
+function onChannelChange(){ saveForm(); renderPrograms(); renderTypes(); renderLinkField(); renderTopicBar(); renderTopicBasis(); }
+function onProgramChange(){ saveForm(); renderPrNote(); renderLinkField(); renderTopicBar(); renderTopicBasis(); }
+$("#ctype").addEventListener("change", saveForm);
+$("#len").addEventListener("change", saveForm);
+$("#cat").addEventListener("change", saveForm);
+$("#kw").addEventListener("input", renderKwNote);
+$("#link").addEventListener("input", renderLinkNote);
+$("#exp").addEventListener("input", () => { const had = $("#ctype").value; renderTypes(); if (had && $("#ctype").value !== had) saveForm(); });
+
+function makeInput(f){
+  const C = ctxC();
+  const ch = C.ch[f.chId];
+  if (!ch) return { error: "채널을 골라줘." };
+  const progs = f.progIds.map(id => C.prog[id]).filter(Boolean);
+  if (cat.fromApp){
+    const bad = progs.filter(p => compatOf(p.id, ch.id, cat.compat).verdict === "불가");
+    if (bad.length) return { error: `${ch.name}에선 ${bad.map(p => p.name).join(", ")}을(를) 쓸 수 없어.` };
+  }
+  const linkFirst = p => (p.kind === "affiliate" && p.needs_link ? 0 : 1);
+  progs.sort((a, b) => linkFirst(a) - linkFirst(b));
+  const sns = ch.kind === "sns";
+  const ct = sns ? "sns_short" : f.ctype;
+  if (ct && !typeOkHere(ct, { products: [], experience: !!f.experience, sns })) return { error: "이 글 유형은 여기서 쓸 수 없어. 다른 유형을 골라줘." };
+  return {
+    keyword: f.keyword, channel: ch, programs: progs, programIds: progs.map(p => p.id), contentType: ct,
+    len: sns ? "" : f.len, category: f.category, experience: f.experience, ref: f.ref, link: safeUrl(f.link),
+    products: [], notes: "", titleHint: "", topicId: ""
+  };
+}
+function promptFor(input){
+  const sns = input.channel.kind === "sns";
+  const allowed = Object.keys(CONTENT_TYPES).filter(k => typeOkHere(k, { products: input.products, experience: !!input.experience, sns }));
+  return { prompt: buildWritePrompt({ ...input, allowed, today: kstNow().date, recent: cat.recent || [] }), allowed };
+}
+
+/* ---------- 저장소 (이 페이지 보관함: 폰·PC 같이 보임, 안 되면 이 기기) ---------- */
+function saveLocal(){ LS.set("bgf-posts", posts.filter(p => !p.unsaved).slice(0, 300)); }
+const store = {
+  async add(data){
+    if (db){
+      const ref = db.collection("posts").doc(); const id = ref.id;
+      posts.unshift({ id, ...data }); renderLists();
+      try { await ref.set(data); return { id, ok: true }; }
+      catch (e) { unsaved.set(id, data); const p = posts.find(x => x.id === id); if (p) p.unsaved = true; renderLists(); return { id, ok: false }; }
+    }
+    const id = "l" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    posts.unshift({ id, ...data }); saveLocal(); renderLists();
+    return { id, ok: true };
+  },
+  async update(id, patch){
+    const p = posts.find(x => x.id === id); if (p) Object.assign(p, patch);
+    if (unsaved.has(id)){ Object.assign(unsaved.get(id), patch); return; }
+    if (db){ await db.doc("posts/" + id).update(patch); return; }
+    saveLocal();
+  },
+  async remove(id){
+    posts = posts.filter(x => x.id !== id);
+    if (unsaved.has(id)){ unsaved.delete(id); return; }
+    if (db){ await db.doc("posts/" + id).delete(); return; }
+    saveLocal();
+  }
+};
+async function migrateOld(){
+  const old = LS.get("bgf-hist", null);
+  if (!Array.isArray(old) || !old.length) return;
+  LS.del("bgf-hist");
+  const now = Date.now();
+  for (let i = old.length - 1; i >= 0; i--){
+    const o = old[i]; if (!o || typeof o.body !== "string") continue;
+    await store.add({
+      keyword: String(o.keyword || ""), money: String(o.money || "쿠팡파트너스"), platform: String(o.platform || ""), style: String(o.style || ""), len: String(o.len || ""),
+      titles: Array.isArray(o.titles) ? o.titles.map(String) : [], body: o.body,
+      hashtags: Array.isArray(o.hashtags) ? o.hashtags.map(String) : [], threads: String(o.threads || ""), instagram: String(o.instagram || ""),
+      link: safeUrl(o.link), blogUrl: "", date: "", status: "planned", createdAt: now - i * 1000, publishedAt: null, sent: false
+    });
+  }
+}
+
+/* ---------- 앱으로 보내기 (add_post → 앱 검수함 '검수 필요') ---------- */
+function appPayload(d){
+  const p = { keyword: d.keyword || "", titles: d.titles || [], body: d.body || "", hashtags: d.hashtags || [], threads: d.threads || "", instagram: d.instagram || "", link: safeUrl(d.link), source: "artifact" };
+  if (!d.v){
+    Object.assign(p, { money: d.money || "", platform: d.platform || "", style: d.style || "", len: d.len || "", content_type: LEGACY_STYLE[d.style] || "" });
+  } else {
+    Object.assign(p, {
+      channel_id: d.channel_id, program_ids: d.program_ids || [], content_type: d.content_type || "", category: d.category || "",
+      summary: d.summary || "", sources: [], products: [], needs_fact_check: d.needs_fact_check || [], notes: d.notes || "",
+      experience: d.experience || "", len: d.len || ""
+    });
+    if (isUuid(d.topic_id)) p.topic_id = d.topic_id;
+  }
+  return p;
+}
+function sendFail(e){
+  const code = e && e.code;
+  if (code === "server_unavailable" || code === "upstream_error" || code === "cancelled") return { ok: false, unknown: true, msg: "앱에 들어갔는지 확인을 못 했어" };
+  if (code === "tool_error") return { ok: false, msg: dbMsg(e) };
+  return { ok: false, msg: MCP_MSG[code] || "앱으로 보내지 못했어" };
+}
+async function sendToApp(d, offset){
+  if (!mcp) return { ok: false, msg: "여기서는 앱으로 보낼 수 없어" };
+  const q = `select post_id::text as post_id, publish_date::text as publish_date from public.add_post(${dq(JSON.stringify(appPayload(d)))}::jsonb, ${offset ? 1 : 0});`;
+  try {
+    const rows = await sql(q);
+    const r = rows[0] || {};
+    return { ok: true, postId: r.post_id || "", date: r.publish_date || "" };
+  } catch (e) { return sendFail(e); }
+}
+async function findSent(d){
+  const q = `select id::text as id, publish_date::text as publish_date from public.posts where source = 'artifact' and keyword = ${dq(String(d.keyword || ""))} and left(body, 200) = ${dq(firstChars(d.body, 200))} and created_at > now() - interval '7 days' order by created_at desc limit 1;`;
+  const rows = await sqlRead(q);
+  return rows[0] || null;
+}
+async function writeAndSend(input, o){
+  const { prompt, allowed } = promptFor(input);
+  const raw = await sample.json(prompt, { signal: o.signal, cache: false, onText: o.onText });
+  const r = normalizePost(raw, { keyword: input.keyword, channel: input.channel, programs: cat.programs, allowed, fixedType: input.contentType });
+  if (o.onPhase) o.onPhase("앱 검수함으로 보내는 중…");
+  const draft = {
+    v: 5, origin: o.origin || "write", keyword: r.keyword, channel_id: input.channel.id, program_ids: input.programIds,
+    content_type: r.content_type, category: r.category || input.category || "", len: input.len || "", experience: input.experience || "",
+    link: input.link || "", topic_id: input.topicId || "", titles: r.titles, body: r.body, hashtags: r.hashtags,
+    threads: r.threads, instagram: r.instagram, summary: r.summary, needs_fact_check: r.needs_fact_check,
+    notes: [r.notes, ARTIFACT_NOTE].filter(Boolean).join(" · "), createdAt: Date.now(), sent: false, sendUnknown: false, sendError: ""
+  };
+  const saved = await store.add(draft);
+  const sent = await sendToApp(draft, o.offset);
+  const patch = sent.ok ? { sent: true, sentAt: Date.now(), appPostId: sent.postId, appDate: sent.date, sendUnknown: false, sendError: "" } : { sendUnknown: !!sent.unknown, sendError: sent.msg || "" };
+  try { await store.update(saved.id, patch); } catch (e) { const p = posts.find(x => x.id === saved.id); if (p) Object.assign(p, patch); }
+  return { id: saved.id, saved, sent };
+}
+
+/* ---------- 글쓰기 ---------- */
+const setStatus = t => { $("#status").textContent = t; };
+$("#gen").onclick = async () => {
+  const f = readForm();
+  if (!f.keyword){ setStatus("키워드부터 넣어줘."); $("#kw").focus(); return; }
+  if (f.link && !safeUrl(f.link)){ setStatus("링크는 https://로 시작해야 해."); $("#link").focus(); return; }
+  if (!sample){ $("#unavail").hidden = false; return; }
+  const input = makeInput(f);
+  if (input.error){ setStatus(input.error); return; }
+  genCtl = new AbortController(); genRunning = true; syncBusy();
+  setStatus("구상 중… (보통 30초~1분)");
+  try {
+    const res = await writeAndSend(input, {
+      offset: 0, signal: genCtl.signal, origin: "write",
+      onText: ({ text }) => setStatus(`쓰는 중… ${text.length.toLocaleString()}자`),
+      onPhase: setStatus
+    });
+    lastWritten = res.id;
+    setStatus(res.sent.ok
+      ? `다 썼어. 앱 검수함에 넣었어${res.sent.date ? " · 발행일 " + fmtDate(res.sent.date) : ""}.`
+      : (res.saved.ok ? `다 썼어. ${res.sent.msg} — 보관함에 저장해뒀어.` : "다 썼는데 저장이 안 됐어. 아래에서 바로 복사해 둬."));
+    renderOut(); scrollToEl($("#out"));
+  } catch (e) {
+    setStatus(errMsg(e));
+  } finally {
+    genRunning = false; genCtl = null; syncBusy();
+  }
+};
+$("#stop").onclick = () => { if (genCtl) genCtl.abort(); };
+
+/* ---------- 주제 ---------- */
+const saveTopics = () => LS.set("bgf5-topics", topics.slice(0, 40));
+function renderTopicBasis(){
+  const perfN = (cat.perf || []).length;
+  const tm2 = $("#tm2");
+  tm2.disabled = !cat.live || !perfN;
+  if (tm2.disabled && tm2.checked){ tm2.checked = false; $("#tm1").checked = true; }
+  $("#tmNote").textContent = !cat.live ? "내 실적 기준은 앱과 연결돼야 쓸 수 있어." : (perfN ? `최근 90일에 실적이 있는 글 ${perfN}개를 근거로 추천해.` : "아직 입력한 실적이 없어서 카테고리·시즌 기준으로만 추천할 수 있어. 앱 > 수익에서 실적을 넣으면 열려.");
+}
+function dots(score){
+  const s = el("span", "dots");
+  s.setAttribute("aria-label", score == null ? "점수 없음" : `5점 중 ${score}점`);
+  for (let i = 1; i <= 5; i++) s.append(el("i", score != null && i <= score ? "on" : null));
+  s.append(el("em", null, score == null ? "없음" : String(score)));
+  return s;
+}
+function topicCard(t){
+  const card = el("div", "topic" + (t.checked ? " on" : ""));
+  const top = el("div", "t-top");
+  const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "tp-" + t.lid;
+  cb.checked = !!t.checked; cb.disabled = batchRunning || t.state === "done";
+  cb.onchange = () => { t.checked = cb.checked; saveTopics(); card.classList.toggle("on", cb.checked); renderTopicBar(); };
+  const lab = el("label", "t-title"); lab.htmlFor = cb.id;
+  lab.append(el("b", null, t.title), el("small", null, [t.keyword, typeLabel(t.rec_content_type), t.seasonality].filter(Boolean).join(" · ")));
+  const sc = topicScore(t, cat.settings.score_weights);
+  const badge = el("div", "score");
+  badge.append(el("b", null, sc.total == null ? "–" : String(sc.total)), el("small", null, sc.total == null ? "점수 없음" : "100점 만점"));
+  top.append(cb, lab, badge);
+  card.append(top);
+  const chips = el("div", "chips");
+  if (t.appId) chips.append(el("span", "chip st-done", "앱 주제함에 저장됨"));
+  if (t.state === "writing") chips.append(el("span", "chip st-writing", "쓰는 중…"));
+  if (t.state === "done") chips.append(el("span", "chip st-done", t.sent ? `씀 · 앱 발행일 ${fmtDate(t.date)}` : "씀 · 보관함에 저장"));
+  if (t.state === "fail") chips.append(el("span", "chip st-fail", "실패: " + (t.err || "다시 해줘")));
+  if (chips.children.length) card.append(chips);
+  if (t.basis) card.append(el("p", "t-basis", t.basis));
+  const det = el("details", "t-det");
+  det.append(el("summary", null, `점수 근거 보기 · 신뢰도 ${sc.confidence}`));
+  const fs = el("div", "factors");
+  sc.parts.forEach(p => {
+    const row = el("div", "factor");
+    row.append(el("b", null, `${p.label}${p.weight !== 1 ? ` ×${p.weight}` : ""}`), dots(p.score), el("small", null, [p.basis || (p.score == null ? "확인 불가" : ""), [p.source, p.confidence].filter(Boolean).join(" · ")].filter(Boolean).join(" — ")));
+    fs.append(row);
+  });
+  det.append(fs);
+  const extra = [["검색 의도", t.search_intent], ["누가 찾나", t.audience], ["독자의 문제", t.problem], ["제휴와 맞는 정도", t.affiliate_fit], ["연결할 상품", t.product_availability], ["경쟁", t.competition], ["차별화", t.differentiation], ["쓰기 전에 확인할 것", t.research_needed]].filter(([, v]) => v);
+  if (extra.length){
+    const dl = el("dl", "kv");
+    extra.forEach(([k, v]) => dl.append(el("dt", null, k), el("dd", null, v)));
+    det.append(dl);
+  }
+  card.append(det);
+  return card;
+}
+function renderAdopted(){
+  const box = $("#adopted"); box.textContent = "";
+  const list = (cat.adopted || []).filter(t => t && isUuid(t.id) && !adoptedDone[t.id]);
+  if (!list.length) return;
+  box.append(el("h4", null, `앱에서 채택한 주제 ${list.length}개`));
+  const l = el("div", "list");
+  list.forEach(t => {
+    const r = el("div", "item");
+    const cb = document.createElement("input"); cb.type = "checkbox"; cb.id = "ad-" + t.id; cb.checked = adoptedPick.has(t.id); cb.disabled = batchRunning;
+    cb.onchange = () => { if (cb.checked) adoptedPick.add(t.id); else adoptedPick.delete(t.id); renderTopicBar(); };
+    const lab = el("label", "main"); lab.htmlFor = cb.id;
+    lab.append(el("b", null, t.title || t.keyword || "주제"), el("small", null, [t.keyword, typeLabel(t.rec_content_type), t.category].filter(Boolean).join(" · ")));
+    r.append(cb, lab); l.append(r);
+  });
+  box.append(l);
+}
+function renderTopics(){
+  renderTopicBasis();
+  renderAdopted();
+  const box = $("#topicList"); box.textContent = "";
+  if (!topics.length && !(cat.adopted || []).length){
+    box.append(el("p", "hint", "카테고리를 넣고 '주제 추천 받기'를 누르면 점수와 근거가 붙은 주제가 여기 나와."));
+  }
+  const w = cat.settings.score_weights;
+  topics.slice().sort((a, b) => (topicScore(b, w).total ?? -1) - (topicScore(a, w).total ?? -1)).forEach(t => box.append(topicCard(t)));
+  renderTopicBar();
+}
+function pickedAdopted(){ return (cat.adopted || []).filter(t => adoptedPick.has(t.id) && !adoptedDone[t.id]); }
+function pickCount(){ return topics.filter(t => t.checked && t.state !== "done").length + pickedAdopted().length; }
+function renderTopicBar(){
+  const n = pickCount();
+  $("#tBar").hidden = !(topics.length || (cat.adopted || []).length);
+  const f = readForm(), C = ctxC(), ch = C.ch[f.chId];
+  const names = f.progIds.map(id => (C.prog[id] || {}).name).filter(Boolean).join(" + ") || "수익 모델 없음";
+  $("#tBarInfo").textContent = `${ch ? ch.name : ""} · ${names} 기준으로 써 (글쓰기 탭 설정). 앱이 내일부터 빈 날짜에 넣어. 한 편에 1분쯤 걸리니 이 페이지를 열어둬.`;
+  const wb = $("#tWrite");
+  wb.textContent = batchRunning ? "쓰는 중…" : (n ? `선택한 ${n}개 바로 쓰기 (약 ${n}분)` : "쓸 주제를 골라줘");
+  wb.disabled = busy() || !n;
+  const savable = topics.filter(t => t.checked && !t.appId).length;
+  const sb = $("#tSave");
+  sb.textContent = savable ? `선택한 ${savable}개 앱 주제함에 저장` : "앱 주제함에 저장";
+  sb.disabled = busy() || !savable || !mcp;
+  $("#tAll").hidden = batchRunning || !topics.length;
+  $("#tStop").hidden = !batchRunning;
+}
+const setTStatus = t => { $("#tStatus").textContent = t; };
+$("#tBtn").onclick = async () => {
+  const category = $("#tcat").value.trim();
+  const mode = (document.querySelector('input[name="tmode"]:checked') || {}).value || "category";
+  if (!category && mode === "category"){ setTStatus("카테고리를 넣어줘."); $("#tcat").focus(); return; }
+  if (!sample){ $("#tUnavail").hidden = false; return; }
+  const base = makeInput({ ...readForm(), keyword: "주제", ctype: "" });
+  if (base.error){ setTStatus(base.error); return; }
+  topicRunning = true; syncBusy();
+  setTStatus("주제를 고르는 중… (보통 30초~1분)");
+  try {
+    const count = Number($("#tcount").value) || 6;
+    const prompt = buildTopicPrompt({ category, count, mode, hint: "", channel: base.channel, programs: base.programs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date });
+    const raw = await sample.json(prompt, { cache: false, onText: ({ text }) => setTStatus(`고르는 중… ${text.length.toLocaleString()}자`) });
+    const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: base.channel.id, category, hasPerf: mode === "performance" && cat.perf.length > 0 });
+    const now = Date.now();
+    topics = items.map((t, i) => ({ ...t, lid: now.toString(36) + i, checked: false, state: "", appId: "", at: now, mode }));
+    saveTopics(); renderTopics();
+    setTStatus(`${topics.length}개 나왔어. 쓸 주제를 고르거나 앱 주제함에 저장해. (전에 받은 목록은 지웠어. 앱에 저장한 건 앱 주제함에 있어.)`);
+  } catch (e) {
+    setTStatus(errMsg(e));
+  } finally {
+    topicRunning = false; syncBusy();
+  }
+};
+$("#tAll").onclick = () => {
+  const open = topics.filter(t => t.state !== "done");
+  const all = open.length && open.every(t => t.checked);
+  open.forEach(t => { t.checked = !all; });
+  saveTopics(); renderTopics();
+};
+const topicPayload = t => ({
+  title: t.title, keyword: t.keyword, category: t.category, search_intent: t.search_intent, audience: t.audience, problem: t.problem,
+  affiliate_fit: t.affiliate_fit, product_availability: t.product_availability, competition: t.competition, differentiation: t.differentiation,
+  seasonality: t.seasonality, research_needed: t.research_needed, rec_channels: t.rec_channels, rec_programs: t.rec_programs,
+  rec_content_type: t.rec_content_type, scores: t.scores, basis: t.basis
+});
+$("#tSave").onclick = async () => {
+  const picks = topics.filter(t => t.checked && !t.appId);
+  const out = $("#tBarStatus");
+  if (!picks.length){ out.textContent = "저장할 주제를 골라줘 (이미 저장한 건 빼고)."; return; }
+  if (!mcp){ out.textContent = "여기서는 앱과 연결할 수 없어."; return; }
+  const b = $("#tSave"); b.disabled = true; b.textContent = "저장하는 중…";
+  try {
+    await sql(`select public.add_topics(null, ${dq(JSON.stringify(picks.map(topicPayload)))}::jsonb) as n;`);
+    let ids = [];
+    try { ids = await sqlRead(`select id::text as id, title from public.topics where job_id is null and created_at > now() - interval '10 minutes' and title in (select jsonb_array_elements_text(${dq(JSON.stringify(picks.map(t => t.title)))}::jsonb)) order by created_at desc;`); } catch (e) {}
+    picks.forEach(t => { const m = ids.find(r => r.title === t.title); t.appId = m && isUuid(m.id) ? m.id : "saved"; });
+    saveTopics(); renderTopics();
+    out.textContent = `${picks.length}개를 앱 주제함에 저장했어. 앱 > 주제에서 채택·보류할 수 있어.`;
+  } catch (e) {
+    out.textContent = (e && e.code === "tool_error") ? dbMsg(e) : ((e && (e.code === "server_unavailable" || e.code === "upstream_error")) ? "저장됐는지 확인을 못 했어. 앱 > 주제에서 먼저 확인해줘." : connMsg(e));
+    renderTopicBar();
+  }
+};
+$("#tWrite").onclick = async () => {
+  const picks = pickedAdopted().map(t => ({ src: "app", t })).concat(topics.filter(t => t.checked && t.state !== "done").map(t => ({ src: "local", t })));
+  const out = $("#tBarStatus");
+  if (!picks.length) return;
+  if (!sample){ $("#tUnavail").hidden = false; return; }
+  const base = makeInput({ ...readForm(), keyword: "주제", ctype: "" });
+  if (base.error){ out.textContent = base.error; return; }
+  const sns = base.channel.kind === "sns";
+  batchRunning = true; batchStop = false; syncBusy(); renderTopics();
+  let ok = 0, fail = 0, sentN = 0, stopMsg = "";
+  for (let k = 0; k < picks.length; k++){
+    if (batchStop){ stopMsg = "멈췄어."; break; }
+    const { src, t } = picks[k];
+    if (src === "local"){ t.state = "writing"; saveTopics(); renderTopics(); }
+    out.textContent = `${k + 1}/${picks.length} 쓰는 중 · ${t.title || t.keyword}`;
+    batchCtl = new AbortController();
+    try {
+      const ct = typeOkHere(t.rec_content_type, { products: [], experience: false, sns }) ? t.rec_content_type : (sns ? "sns_short" : "");
+      const topicId = src === "app" ? t.id : (isUuid(t.appId) ? t.appId : "");
+      const input = { ...base, keyword: t.keyword || t.title, titleHint: t.title || "", contentType: ct, category: t.category || "", topicId, experience: "", ref: "", link: "" };
+      const res = await writeAndSend(input, { offset: 1, signal: batchCtl.signal, origin: "topic" });
+      ok++; if (res.sent.ok) sentN++;
+      if (src === "local"){ t.state = "done"; t.checked = false; t.sent = res.sent.ok; t.date = res.sent.date || ""; t.err = ""; }
+      else { adoptedPick.delete(t.id); adoptedDone[t.id] = true; }
+    } catch (e) {
+      if (e && e.code === "cancelled"){ if (src === "local") t.state = ""; stopMsg = "멈췄어."; break; }
+      fail++;
+      if (src === "local"){ t.state = "fail"; t.err = errMsg(e); }
+      if (e && STOP_CODES.includes(e.code)){ stopMsg = errMsg(e); break; }
+    } finally {
+      batchCtl = null; saveTopics(); renderTopics();
+    }
+  }
+  batchRunning = false; syncBusy(); renderTopics(); renderLists();
+  const parts = [];
+  if (ok) parts.push(`${ok}개 썼어.${sentN ? ` ${sentN}개는 앱 검수함에 들어갔어.` : ""}${ok > sentN ? ` ${ok - sentN}개는 앱으로 못 보내서 보관함에 있어.` : ""}`);
+  if (fail) parts.push(`실패 ${fail}개는 다시 누르면 이어서 써.`);
+  if (stopMsg) parts.push(stopMsg);
+  out.textContent = parts.join(" ") || "쓴 글이 없어.";
+  if (sentN) loadCatalog();
+};
+$("#tStop").onclick = () => { batchStop = true; if (batchCtl) batchCtl.abort(); };
+
+/* ---------- 요청 (앱에서 넣은 작업을 바로 처리) ---------- */
+function jobPlan(j){
+  if (!j || !isUuid(j.id)) return { ok: false, why: "요청 번호가 이상해" };
+  const C = ctxC();
+  if (j.kind === "write"){
+    const p = j.post || null;
+    if (p && !isUuid(j.post_id)) return { ok: false, why: "원고 번호가 이상해" };
+    const ct0 = (p && p.content_type) || LEGACY_STYLE[j.content_type] || (CONTENT_TYPES[j.content_type] ? j.content_type : "");
+    const exp = String((p && p.experience) || j.experience || "").trim();
+    const ch = C.ch[(p && p.channel_id) || cat.settings.default_channel];
+    const sns = !!(ch && ch.kind === "sns");
+    const ct = sns ? "sns_short" : ct0;
+    if (ct === "experience_review" && !exp) return { ok: true, ct, needsInput: "후기 글은 실제 경험이 필요해. 써본 기간·환경·느낀 점을 적고 다시 요청해줘." };
+    if (ct && CONTENT_TYPES[ct] && !typeOkHere(ct, { products: (p && p.products) || [], experience: !!exp, sns })){
+      const t = CONTENT_TYPES[ct];
+      return { ok: false, why: t.needsSources ? "출처 확인이 필요한 글이라 자동 작가가 써" : (t.minProducts ? "상품 정보 확인이 필요한 글이라 자동 작가가 써" : "여기서 쓸 수 없는 유형이야") };
+    }
+    return { ok: true, ct };
+  }
+  if (j.kind === "topics") return { ok: true };
+  if (j.kind === "reformat") return (j.post && j.post.body && isUuid(j.post_id)) ? { ok: true } : { ok: false, why: "원고 본문을 못 불러왔어" };
+  return { ok: false, why: "모르는 작업이야" };
+}
+function jobTitle(j){
+  if (j.kind === "write") return (j.post && j.post.title) || j.keyword || "원고";
+  if (j.kind === "topics"){ const pl = j.payload || {}; return `${pl.category || "카테고리 없음"} · ${Number(pl.count) || 6}개${pl.mode === "performance" ? " · 실적 기준" : ""}`; }
+  if (j.kind === "reformat"){ const t = (j.payload && Array.isArray(j.payload.targets)) ? j.payload.targets : []; return `${(j.post && j.post.title) || j.keyword || "원고"} → ${t.map(k => VARIANT_LABEL[k] || k).join(", ") || "버전"}`; }
+  return j.keyword || "요청";
+}
+function setJob(id, state, note, j){
+  jobUi[id] = { state, note };
+  if (j && ["done", "fail", "skip", "wait"].includes(state)) jobLog.unshift({ title: jobTitle(j), kind: j.kind, state, note, at: Date.now() });
+  renderJobs();
+}
+const doableJobs = () => (cat.live ? (cat.jobs || []).filter(j => jobPlan(j).ok) : []);
+const STATE_PILL = { run: ["run", "처리 중…"], done: ["done", "끝"], fail: ["late", "실패"], skip: ["none", "건너뜀"], wait: ["today", "다음에"] };
+function jobRow(j){
+  const plan = jobPlan(j);
+  const ui = jobUi[j.id];
+  const r = el("div", "item");
+  const main = el("div", "main");
+  main.append(el("span", "kind", JOB_KIND[j.kind] || j.kind), el("b", null, jobTitle(j)),
+    el("small", null, [j.created_at ? "요청 " + fmtTime(j.created_at) : "", j.attempts ? `시도 ${j.attempts}회` : "", ui && ui.note ? ui.note : (!plan.ok ? plan.why : "")].filter(Boolean).join(" · ")));
+  const side = el("div", "side");
+  if (ui && STATE_PILL[ui.state]) side.append(el("span", "pill " + STATE_PILL[ui.state][0], STATE_PILL[ui.state][1]));
+  else side.append(el("span", "pill " + (plan.ok ? "plan" : "none"), plan.ok ? (plan.needsInput ? "경험 필요" : "여기서 가능") : "자동 작가 몫"));
+  r.append(main, side);
+  return r;
+}
+function renderJobs(){
+  const list = $("#jobList"); list.textContent = "";
+  const lead = $("#jobsLead");
+  if (!cat.live){
+    lead.textContent = conn.state === "loading" ? "요청을 불러오는 중…" : "앱과 연결돼야 기다리는 요청을 볼 수 있어. 위의 연결 줄을 확인해줘.";
+  } else {
+    const jobs = cat.jobs || [];
+    lead.textContent = jobs.length
+      ? `앱에서 넣은 요청 ${jobs.length}개가 기다리고 있어. 자동 작가는 ${nextRunText()}에 돌아. 지금 바로 하려면 아래 버튼을 눌러.`
+      : "기다리는 요청이 없어. 홈 화면 앱에서 원고·주제 추천·채널별 버전을 요청하면 여기서 바로 처리할 수 있어.";
+    jobs.forEach(j => list.append(jobRow(j)));
+  }
+  const n = Math.min(5, doableJobs().length);
+  const rb = $("#jRun");
+  rb.textContent = jobsRunning ? "처리 중…" : (n ? `지금 처리하기 (${n}개)` : "처리할 요청 없음");
+  rb.disabled = busy() || !n || !sample;
+  $("#jStop").hidden = !jobsRunning;
+  $("#jRefresh").disabled = busy() || loadingCat || !mcp;
+  const lg = $("#jobLog"); lg.textContent = "";
+  if (jobLog.length){
+    lg.append(el("h4", null, "방금 처리한 요청"));
+    const l = el("div", "list");
+    jobLog.slice(0, 10).forEach(x => {
+      const r = el("div", "item");
+      const m = el("div", "main");
+      m.append(el("span", "kind", JOB_KIND[x.kind] || x.kind), el("b", null, x.title), el("small", null, [fmtTime(x.at), x.note].filter(Boolean).join(" · ")));
+      const side = el("div", "side"); const sp = STATE_PILL[x.state] || ["none", x.state];
+      side.append(el("span", "pill " + sp[0], sp[1]));
+      r.append(m, side); l.append(r);
+    });
+    lg.append(l);
+  }
+}
+const jobFail = (id, msg, needs) => sql(`select public.job_fail('${id}'::uuid, ${dq(msg)}, ${needs ? "true" : "false"});`);
+const saveErr = e => (e && e.code === "tool_error") ? { dbmsg: dbMsg(e) } : { code: "save_unknown", msg: connMsg(e) };
+async function doWriteJob(j, plan, signal){
+  const p = j.post || null;
+  const S = cat.settings, C = ctxC();
+  const ch = C.ch[(p && p.channel_id) || S.default_channel] || C.ch.naver_blog || activeChannels()[0];
+  const pids = (p && Array.isArray(p.program_ids)) ? p.program_ids : (S.default_programs || []);
+  const progs = pids.map(id => C.prog[id]).filter(Boolean);
+  const title = p && p.title ? String(p.title) : "";
+  const input = {
+    keyword: j.keyword || title || "", titleHint: title && title !== j.keyword ? title : "", channel: ch, programs: progs, programIds: progs.map(x => x.id),
+    contentType: ch.kind === "sns" ? "sns_short" : (plan.ct || ""), len: (p && p.len) || S.len || "2500", category: (p && p.category) || "",
+    experience: String((p && p.experience) || j.experience || "").trim(), ref: j.ref || "", notes: (j.payload && j.payload.notes) || "",
+    products: (p && p.products) || [], link: safeUrl(j.link)
+  };
+  const { prompt, allowed } = promptFor(input);
+  const raw = await sample.json(prompt, { signal, cache: false });
+  const r = normalizePost(raw, { keyword: input.keyword, channel: ch, programs: cat.programs, allowed, fixedType: input.contentType });
+  const base = {
+    keyword: r.keyword, titles: r.titles, body: r.body, hashtags: r.hashtags, threads: r.threads, instagram: r.instagram,
+    content_type: r.content_type, category: r.category || input.category, summary: r.summary, sources: [], products: [],
+    needs_fact_check: r.needs_fact_check, notes: [r.notes, ARTIFACT_NOTE].filter(Boolean).join(" · ")
+  };
+  try {
+    if (p) await sql(`select public.fill_post('${j.post_id}'::uuid, ${dq(JSON.stringify(base))}::jsonb) as d;`);
+    else await sql(`select post_id::text as post_id from public.add_post(${dq(JSON.stringify({ ...base, channel_id: ch.id, program_ids: input.programIds, experience: input.experience, len: input.len, link: input.link, source: "request", request_id: j.id }))}::jsonb, 0);`);
+  } catch (e) { throw saveErr(e); }
+}
+async function doTopicJob(j, signal){
+  const pl = j.payload || {};
+  const mode = pl.mode === "performance" ? "performance" : "category";
+  const count = Math.max(3, Math.min(10, Number(pl.count) || 6));
+  const S = cat.settings, C = ctxC();
+  const ch = C.ch[S.default_channel] || activeChannels()[0];
+  const progs = (S.default_programs || []).map(id => C.prog[id]).filter(Boolean);
+  const category = str(pl.category, 60);
+  const hint = [str(pl.hint, 300), pl.keyword ? "기준 글 키워드: " + str(pl.keyword, 100) : ""].filter(Boolean).join(" / ");
+  const prompt = buildTopicPrompt({ category, count, mode, hint, channel: ch, programs: progs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date });
+  const raw = await sample.json(prompt, { signal, cache: false });
+  const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: ch.id, category, hasPerf: mode === "performance" && cat.perf.length > 0 });
+  try { await sql(`select public.add_topics('${j.id}'::uuid, ${dq(JSON.stringify(items))}::jsonb) as n;`); } catch (e) { throw saveErr(e); }
+}
+async function doReformatJob(j, signal){
+  const p = j.post || {};
+  const targets = (Array.isArray(j.payload && j.payload.targets) ? j.payload.targets : []).filter(k => VARIANT_RULES[k]);
+  if (!targets.length) throw { dbmsg: "만들 버전이 지정되지 않았어. 앱에서 다시 요청해줘." };
+  const raw = await sample.json(buildReformatPrompt({ title: p.title || j.keyword || "", body: p.body || "", sources: p.sources || [], targets }), { signal, cache: false });
+  const v = normalizeVariants(raw, targets, cat.programs);
+  try { await sql(`select public.set_variants('${j.post_id}'::uuid, '${j.id}'::uuid, ${dq(JSON.stringify(v))}::jsonb);`); } catch (e) { throw saveErr(e); }
+}
+$("#jRun").onclick = async () => {
+  if (busy()) return;
+  const st = $("#jStatus");
+  if (!sample){ st.textContent = "여기서는 Claude 글쓰기를 쓸 수 없어."; return; }
+  jobsRunning = true; jobsStop = false; syncBusy();
+  st.textContent = "요청을 다시 확인하는 중…";
+  const fresh = await loadCatalog();
+  if (!fresh){ jobsRunning = false; syncBusy(); st.textContent = conn.msg || "앱과 연결하지 못했어."; return; }
+  const list = cat.jobs.map(j => ({ j, plan: jobPlan(j) })).filter(x => x.plan.ok).slice(0, 5);
+  const tally = { done: 0, failed: 0, written: 0, write: 0, topics: 0, reformat: 0, errs: [] };
+  let stopMsg = "";
+  for (let i = 0; i < list.length; i++){
+    if (jobsStop){ stopMsg = "멈췄어."; break; }
+    const { j, plan } = list[i];
+    setJob(j.id, "run", `${i + 1}/${list.length}`);
+    st.textContent = `${i + 1}/${list.length} 처리 중 · ${jobTitle(j)}`;
+    try { await sql(`select public.job_start('${j.id}'::uuid) as r;`); }
+    catch (e) {
+      if (e && e.code === "tool_error"){ setJob(j.id, "skip", dbMsg(e), j); continue; }
+      stopMsg = connMsg(e); setJob(j.id, "wait", "앱과 연결이 끊겨서 못 했어", j); break;
+    }
+    try {
+      if ((Number(j.attempts) || 0) >= 3){
+        await jobFail(j.id, "세 번 시도했는데 실패했어. 요청 내용을 확인하고 다시 요청해줘.", false);
+        tally.failed++; setJob(j.id, "fail", "세 번 넘게 실패한 요청이라 멈췄어", j); continue;
+      }
+      if (plan.needsInput){ await jobFail(j.id, plan.needsInput, true); tally.failed++; setJob(j.id, "fail", plan.needsInput, j); continue; }
+      jobCtl = new AbortController();
+      if (j.kind === "write"){ await doWriteJob(j, plan, jobCtl.signal); tally.written++; tally.write++; }
+      else if (j.kind === "topics"){ await doTopicJob(j, jobCtl.signal); tally.topics++; }
+      else { await doReformatJob(j, jobCtl.signal); tally.reformat++; }
+      tally.done++; setJob(j.id, "done", "앱에 저장했어", j);
+    } catch (e) {
+      const code = e && e.code;
+      if (code === "save_unknown"){ setJob(j.id, "wait", "저장됐는지 확인을 못 했어 — 앱에서 확인해줘", j); stopMsg = e.msg || ""; break; }
+      if (code === "cancelled" || (code && SAMPLE_PAUSE.includes(code))){
+        const why = code === "cancelled" ? "멈췄어" : errMsg(e);
+        setJob(j.id, "wait", `${why} — 30분 뒤 자동 작가가 다시 처리해`, j);
+        stopMsg = code === "cancelled" ? "멈췄어." : errMsg(e);
+        break;
+      }
+      const msg = (e && e.dbmsg) ? e.dbmsg : (code === "refused" ? "이 요청으로는 쓸 수 없었어. 키워드나 메모를 바꿔서 다시 요청해줘." : "만들지 못했어. 다시 요청해줘.");
+      try { await jobFail(j.id, msg, false); } catch (x) {}
+      tally.failed++; tally.errs.push(msg); setJob(j.id, "fail", msg, j);
+    } finally { jobCtl = null; }
+  }
+  if (tally.done || tally.failed){
+    const status = tally.failed === 0 ? "성공" : (tally.done === 0 ? "실패" : "일부 실패");
+    const note = `Claude 안에서 처리 · 원고 ${tally.write} · 주제 ${tally.topics} · 변환 ${tally.reformat} · 실패 ${tally.failed}`;
+    try { await sql(`select public.log_run('artifact', ${dq(status)}, ${tally.done}, ${tally.failed}, ${tally.written}, ${dq(note)}, ${dq(tally.errs.slice(0, 3).join(" / "))});`); } catch (e) {}
+  }
+  jobsRunning = false; syncBusy();
+  await loadCatalog();
+  const parts = [];
+  if (tally.done) parts.push(`${tally.done}개 처리했어 (원고 ${tally.write} · 주제 ${tally.topics} · 변환 ${tally.reformat}). 앱에서 확인해줘.`);
+  if (tally.failed) parts.push(`실패 ${tally.failed}개는 앱의 작업 기록에 이유가 남아 있어.`);
+  if (stopMsg) parts.push(stopMsg);
+  if (!list.length) parts.push("여기서 처리할 요청이 없어.");
+  st.textContent = parts.join(" ");
+};
+$("#jStop").onclick = () => { jobsStop = true; if (jobCtl) jobCtl.abort(); };
+$("#jRefresh").onclick = () => { loadCatalog(); };
+
+/* ---------- 바쁨 상태 ---------- */
+function syncBusy(){
+  const b = busy();
+  $("#gen").disabled = b; $("#stop").hidden = !genRunning;
+  $("#tBtn").disabled = b;
+  renderTopicBar(); renderJobs(); renderConn();
+}
+
+/* ---------- 보관함 ---------- */
+function renderCounts(){
+  const jc = $("#jobCount"), dc = $("#draftCount");
+  const jn = cat.live ? (cat.jobs || []).length : 0;
+  jc.textContent = String(jn); jc.hidden = !jn;
+  const dn = posts.filter(p => !p.sent).length;
+  dc.textContent = String(dn); dc.hidden = !dn;
+}
+function draftRow(p){
+  const C = ctxC();
+  const r = el("div", "item" + (p.id === viewing ? " on" : ""));
+  const b = el("button", "main"); b.type = "button";
+  const ch = C.ch[chIdOf(p)];
+  b.append(el("b", null, (p.titles && p.titles[0]) || p.keyword || "제목 없음"),
+    el("small", null, [p.keyword, ch ? ch.name : p.platform, p.createdAt ? fmtTime(p.createdAt) : ""].filter(Boolean).join(" · ")));
+  b.onclick = () => { viewing = p.id; renderDrafts(); renderOut(); scrollToEl($("#out")); };
+  const side = el("div", "side");
+  const me = countMe(p.body);
+  if (me && !p.sent){ const c = el("span", "mini", "✏️" + me); c.title = `빈 [내 경험] 칸 ${me}곳`; side.append(c); }
+  side.append(el("span", "pill " + (p.sent ? "done" : (p.sendUnknown ? "today" : "late")), p.sent ? (p.appDate ? "앱 " + fmtDate(p.appDate).replace(/ \(.\)$/, "") : "앱으로 보냄") : (p.sendUnknown ? "확인 필요" : "못 보냄")));
+  r.append(b, side);
+  return r;
+}
+function renderDrafts(){
+  const box = $("#draftList"); box.textContent = "";
+  if (!loaded){ box.append(el("p", "hint", "불러오는 중…")); return; }
+  if (!posts.length){ box.append(el("p", "hint", "아직 여기서 쓴 원고가 없어. 글쓰기 탭에서 쓰면 앱 검수함으로 가고, 여기에도 사본이 남아.")); return; }
+  const un = posts.filter(p => !p.sent).sort(byNew);
+  const sentL = posts.filter(p => p.sent).sort(byNew);
+  box.append(el("h4", null, `앱으로 못 보낸 원고 ${un.length}개`));
+  if (!un.length) box.append(el("p", "hint", "다 앱으로 보냈어. 링크·검사·복사는 홈 화면 앱에서 해."));
+  else {
+    box.append(el("p", "hint", "원고를 열어서 '앱으로 보내기'를 누르거나, 여기서 바로 복사해."));
+    const l = el("div", "list"); un.forEach(p => l.append(draftRow(p))); box.append(l);
+  }
+  if (sentL.length){
+    const det = el("details", "donegrp"); if (!un.length) det.open = true;
+    det.append(el("summary", null, `앱으로 보낸 원고 ${sentL.length}개 (사본)`));
+    const l = el("div", "list"); sentL.slice(0, 60).forEach(p => l.append(draftRow(p))); det.append(l);
+    box.append(det);
+  }
+}
+
+/* ---------- 원고 보기 ---------- */
+function noteOut(msg){
+  outMsg = msg; outMsgAt = Date.now();
+  const n = $("#outNote"); if (n) n.textContent = msg;
+}
+function chkLi(cls, label, text){ const li = el("li", cls); li.append(el("b", null, label), el("span", null, text)); return li; }
+function copyBlockReason(d, C){
+  const pids = progIdsOf(d);
+  const needs = pids.some(id => { const p = C.prog[id]; return p && ["affiliate", "sponsor", "cpa"].includes(p.kind); });
+  if (!cat.fromApp) return needs ? "앱에서 고지문을 아직 못 불러와서 복사를 막아뒀어. 앱과 연결되면 공식 고지문을 붙여서 복사할 수 있어." : "";
+  const disc = disclosureFor(pids, C.prog);
+  if (disc.missing.length) return `${disc.missing.map(p => p.name).join(", ")} 고지문이 비어 있어. 앱 설정 > 수익 모델에서 공식 문구를 넣은 뒤 복사해줘.`;
+  if (disc.text && VAGUE_DISCLOSURE.test(disc.text)) return "고지문이 '수수료를 받을 수 있습니다'처럼 애매해. 앱 설정 > 수익 모델에서 '…수수료를 제공받습니다'처럼 분명하게 고쳐줘.";
+  return "";
+}
+function copySection(d, C){
+  const s = sect("블로그에 붙여넣기");
+  const block = copyBlockReason(d, C);
+  if (block){ s.append(el("p", "notice", block)); return s; }
+  const acts = el("div", "acts");
+  acts.append(
+    mkBtn("서식 그대로 복사", "btn sm", e => copyRich(exportHtml(d, C.prog), exportPlain(d, C.prog), e.currentTarget)),
+    mkBtn("HTML 코드", "btn sm ghost", e => copyPlain(exportHtml(d, C.prog), e.currentTarget)),
+    mkBtn("텍스트만", "btn sm ghost", e => copyPlain(exportPlain(d, C.prog), e.currentTarget)));
+  s.append(acts);
+  const disc = disclosureFor(progIdsOf(d), C.prog).text;
+  s.append(el("p", "hint", (disc ? "맨 위에 이 글의 고지문이 자동으로 들어가. " : "이 글의 수익 모델엔 넣을 고지문이 없어. ") + "앱으로 보내면 링크 여러 개·발행 전 검사까지 앱에서 할 수 있어."));
+  const tags = d.hashtags || [];
+  if (tags.length){
+    const ta = el("div", "acts");
+    ta.append(mkBtn("#해시태그 복사", "btn sm ghost", e => copyPlain(tags.map(h => "#" + h).join(" "), e.currentTarget)),
+      mkBtn("쉼표 태그 복사", "btn sm ghost", e => copyPlain(tags.join(", "), e.currentTarget)));
+    s.append(ta);
+  }
+  const th = threadsShare(d, C.prog);
+  const pa = el("div", "acts");
+  const a = el("a", "btn sm ghost", "쓰레드에 올리기 ↗"); a.href = th.url; a.target = "_blank"; a.rel = "noopener noreferrer";
+  pa.append(a, mkBtn("인스타 캡션 복사", "btn sm ghost", e => copyPlain(instagramText(d, C.prog), e.currentTarget)));
+  s.append(pa, el("p", "hint", (th.linked ? "링크가 같이 붙어." : "링크가 없어서 글만 올라가.") + (th.added ? " 맨 앞에 고지문을 넣었어." : "") + " 제휴 링크는 받은 그대로 쓰고 바꾸지 않아."));
+  return s;
+}
+async function resend(d, btn){
+  if (!mcp){ noteOut("여기서는 앱으로 보낼 수 없어."); return; }
+  btn.disabled = true; btn.textContent = "보내는 중…";
+  try {
+    if (d.sendUnknown){
+      let found = null;
+      try { found = await findSent(d); } catch (e) { noteOut(connMsg(e)); btn.disabled = false; btn.textContent = "확인하고 보내기"; return; }
+      if (found){
+        await store.update(d.id, { sent: true, sendUnknown: false, sendError: "", appPostId: found.id || "", appDate: found.publish_date || "", sentAt: Date.now() });
+        noteOut("앱에 이미 들어가 있었어. 다시 보내지 않았어."); renderLists(); return;
+      }
+    }
+    const sent = await sendToApp(d, 0);
+    if (sent.ok){
+      await store.update(d.id, { sent: true, sendUnknown: false, sendError: "", appPostId: sent.postId, appDate: sent.date, sentAt: Date.now() });
+      noteOut(`앱 검수함에 넣었어${sent.date ? " · 발행일 " + fmtDate(sent.date) : ""}.`);
+    } else {
+      try { await store.update(d.id, { sendUnknown: !!sent.unknown, sendError: sent.msg }); } catch (e) {}
+      noteOut(sent.msg);
+    }
+  } catch (e) {
+    noteOut("저장이 안 됐어. 다시 눌러줘.");
+  }
+  renderLists();
+}
+async function clearMe(d, btn){
+  btn.disabled = true;
+  try { await store.update(d.id, { body: removeEmptyMe(d.body) }); noteOut("빈 칸을 지웠어."); }
+  catch (e) { noteOut("저장이 안 됐어. 다시 눌러줘."); btn.disabled = false; }
+  renderLists();
+}
+function deleteSection(d){
+  const del = el("div", "sect delrow");
+  const ask = () => {
+    del.textContent = "";
+    del.append(el("span", "hint", d.sent ? "이 페이지 보관함에서만 지워. 앱에 보낸 원고는 앱에 그대로 있어." : "앱으로 안 보낸 원고라 지우면 되돌릴 수 없어."),
+      mkBtn("지우기", "btn sm danger-solid", async () => {
+        const id = d.id; viewing = null; if (lastWritten === id) lastWritten = null;
+        try { await store.remove(id); } catch (e) {}
+        renderLists();
+      }),
+      mkBtn("취소", "btn sm ghost", () => { del.textContent = ""; del.append(mkBtn("여기서 지우기", "btn sm danger", ask)); }));
+  };
+  del.append(mkBtn("여기서 지우기", "btn sm danger", ask));
+  return del;
+}
+function renderOut(){
+  const out = $("#out"); out.textContent = "";
+  let d = null, ex = false;
+  if (curTab === "write"){ d = lastWritten ? posts.find(p => p.id === lastWritten) : null; if (!d){ d = EXAMPLE; ex = true; } }
+  else if (curTab === "drafts") d = viewing ? posts.find(p => p.id === viewing) : null;
+  if (!d){ out.hidden = true; return; }
+  out.hidden = false;
+  const C = ctxC();
+  const pids = progIdsOf(d), ch = C.ch[chIdOf(d)];
+  const ct = typeOf(d);
+
+  const head = el("div", "out-head");
+  head.append(el("span", "tag", ex ? "예시 원고 · 직접 쓰면 여기에 열려" : (d.sent ? "앱 검수함으로 보낸 원고" : (d.sendUnknown ? "앱에 들어갔는지 확인이 필요한 원고" : "앱으로 못 보낸 원고"))));
+  if (!ex && !d.sent){
+    const sb = mkBtn(d.sendUnknown ? "확인하고 보내기" : "앱으로 보내기", "btn sm", () => resend(d, sb));
+    sb.disabled = !mcp || busy();
+    head.append(sb);
+  }
+  out.append(head);
+
+  const s0 = el("div", "sect");
+  s0.append(el("p", "meta", [d.keyword, ch ? ch.name : (d.platform || ""), pids.length ? pids.map(id => (C.prog[id] || { name: id }).name).join(" + ") : "수익 모델 없음", CONTENT_TYPES[ct] ? CONTENT_TYPES[ct].label : (d.style || ""), d.category].filter(Boolean).join(" · ")));
+  if (ex) s0.append(el("p", "hint", "위에서 키워드를 넣고 '원고 쓰기'를 누르면 이 자리에 진짜 원고가 열려. 아래는 규칙대로 쓴 예시야."));
+  else if (d.sent) s0.append(el("p", "okline", `앱 검수함에 들어갔어${d.appDate ? " · 발행일 " + fmtDate(d.appDate) : ""}. 제휴 링크 넣기·발행 전 검사·복사·게시는 홈 화면 앱 > 콘텐츠 > 검수 필요에서 해.`));
+  else s0.append(el("p", "notice", d.sendUnknown
+    ? "앱에 들어갔는지 확인을 못 했어. '확인하고 보내기'를 누르면 앱에 이미 있는지 먼저 보고, 없을 때만 보내."
+    : `앱으로 못 보냈어${d.sendError ? ": " + d.sendError : ""}. 앱과 연결되면 '앱으로 보내기'를 눌러줘.`));
+  if (d.unsaved) s0.append(el("p", "notice", "이 원고는 저장이 안 됐어. 페이지를 닫기 전에 복사해 둬."));
+  const note = el("p", "outnote"); note.id = "outNote"; note.setAttribute("aria-live", "polite");
+  if (outMsg && Date.now() - outMsgAt < 8000) note.textContent = outMsg;
+  s0.append(note);
+  out.append(s0);
+
+  const r = quickCheck(d, C);
+  if (r.errors.length || r.warns.length || r.todos.length){
+    const s1 = sect(ex ? "앱 발행 전 검사에서 보는 것" : (d.sent ? "앱에서 할 일" : "올리기 전에 볼 것"));
+    const ul = el("ul", "checks");
+    r.errors.forEach(t => ul.append(chkLi("e", "고칠 것", t)));
+    r.todos.forEach(t => ul.append(chkLi("t", "할 일", t)));
+    r.warns.forEach(t => ul.append(chkLi("w", "확인", t)));
+    s1.append(ul);
+    if (!ex && !d.sent && countMe(d.body)){
+      const acts = el("div", "acts");
+      acts.append(mkBtn("빈 [내 경험] 칸 모두 지우기", "btn sm ghost", e => clearMe(d, e.currentTarget)));
+      s1.append(acts);
+    }
+    out.append(s1);
+  }
+
+  if (!ex && !d.sent) out.append(copySection(d, C));
+
+  const st = sect("제목 후보");
+  const ul2 = el("ul", "titles");
+  (d.titles || []).forEach(t => {
+    const li = el("li"); li.append(el("span", null, t));
+    if (!ex && !d.sent) li.append(mkBtn("복사", "copy", e => copyPlain(t, e.currentTarget)));
+    ul2.append(li);
+  });
+  st.append(ul2); out.append(st);
+
+  const sb = sect("본문 미리보기", el("span", "count-n", `${String(d.body || "").length.toLocaleString()}자`));
+  const post = el("div", "post");
+  const disc = cat.fromApp ? disclosureFor(pids, C.prog).text : "";
+  if (disc) post.append(el("p", "disc", disc));
+  post.insertAdjacentHTML("beforeend", viewHtml(d));
+  sb.append(post);
+  if (disc) sb.append(el("p", "hint", "맨 위 회색 칸은 복사할 때 자동으로 들어가는 고지문이야 (앱 설정 > 수익 모델의 문구)."));
+  out.append(sb);
+
+  if (d.summary){ const ss = sect("3줄 요약"); ss.append(el("p", "sns", d.summary)); out.append(ss); }
+  if (d.notes && !ex){ const sn = sect("작가 메모"); sn.append(el("p", "hint", d.notes)); out.append(sn); }
+  if (ex || d.sent){
+    const tags = d.hashtags || [];
+    if (tags.length){ const sh = sect("태그"); const chips = el("div", "chips"); tags.forEach(h => chips.append(el("span", "chip", "#" + h))); sh.append(chips); out.append(sh); }
+    if (d.threads){ const sp = sect("쓰레드 홍보 글"); sp.append(el("p", "sns", d.threads), el("p", "hint", "제휴 글이면 앱에서 올릴 때 맨 앞에 공식 고지문이 붙어.")); out.append(sp); }
+  }
+  if (!ex) out.append(deleteSection(d));
+}
+function renderLists(){ renderDrafts(); renderCounts(); renderOut(); }
+
+/* ---------- 카탈로그가 바뀌면 ---------- */
+let defaultsApplied = false;
+function onCatalog(){
+  if (cat.fromApp && !formTouched && !defaultsApplied){ applyDefaults(); defaultsApplied = true; }
+  renderChannels(); renderPrograms(); renderTypes(); renderLinkField(); renderCats(); renderKwNote();
+  renderTopics(); renderJobs(); renderCounts(); renderConn(); renderOut();
+}
+
+/* ---------- 시작 ---------- */
+$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.1.1 기준`;
+(() => {
+  const seen = LS.get("bgf-ver", null);
+  const returning = seen || LS.get("bgf-tab", null) || LS.get("bgf-settings", null);
+  if (returning && seen !== APP_VER){ $("#updText").textContent = "업데이트됨 · " + WHATS_NEW; $("#upd").hidden = false; }
+  LS.set("bgf-ver", APP_VER);
+})();
+$("#updOk").onclick = () => { $("#upd").hidden = true; };
+if (form){
+  const lenSel = $("#len");
+  if ([...lenSel.options].some(o => o.value === String(form.len))) lenSel.value = String(form.len);
+  if (form.cat) $("#cat").value = String(form.cat).slice(0, 60);
+}
+renderChannels(); renderPrograms(); renderTypes();
+if (form && form.ctype && [...$("#ctype").options].some(o => o.value === form.ctype && !o.disabled)) $("#ctype").value = form.ctype;
+renderLinkField(); renderCats();
+showTab(LS.get("bgf5-tab", "write"));
+renderConn(); renderTopics(); renderJobs(); renderCounts();
+
+(async () => {
+  let c = null; try { c = window.claude; } catch (e) {}
+  const use = name => { try { return (c && typeof c.use === "function") ? Promise.resolve(c.use(name)).catch(() => null) : Promise.resolve(null); } catch (e) { return Promise.resolve(null); } };
+  [sample, db, mcp, perms] = await Promise.all([use("sample"), use("db"), use("mcp"), use("permissions")]);
+  if (!sample){ $("#unavail").hidden = false; $("#tUnavail").hidden = false; }
+  if (db){
+    let first = true;
+    db.collection("posts").orderBy("createdAt", "desc").limit(300).onSnapshot(snap => {
+      posts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+      unsaved.forEach((d, id) => { if (!posts.some(p => p.id === id)) posts.unshift({ id, ...d, unsaved: true }); });
+      loaded = true;
+      if (first){ first = false; migrateOld(); if (curTab === "drafts" && !viewing){ const f = posts.filter(p => !p.sent).sort(byNew)[0]; viewing = f ? f.id : null; } }
+      renderLists();
+    }, () => { loaded = true; renderLists(); });
+    loadCatalogCache();
+  } else {
+    const saved = LS.get("bgf-posts", []);
+    posts = Array.isArray(saved) ? saved : [];
+    loaded = true;
+    renderLists(); migrateOld();
+  }
+  if (!mcp){ conn.state = "none"; renderConn(); syncBusy(); return; }
+  let st = "prompt";
+  if (perms){ try { st = await perms.state("mcp:" + SERVER); } catch (e) { st = "unavailable"; } }
+  if (st === "granted") loadCatalog();
+  else if (st === "denied"){ conn.state = "denied"; conn.msg = "Supabase 연결이 꺼져 있어. 켜야 홈 화면 앱과 주고받을 수 있어."; renderConn(); }
+  else { conn.state = "need"; renderConn(); }
+  syncBusy();
+})();
+</script>

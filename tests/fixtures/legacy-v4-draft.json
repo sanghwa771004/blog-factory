@@ -1,0 +1,20 @@
+{
+  "keyword": "예시 키워드",
+  "money": "쿠팡파트너스",
+  "platform": "네이버 블로그",
+  "style": "구매 가이드(고르는 법)형",
+  "len": "2500",
+  "titles": ["예시 원고 제목 (테스트용으로 만든 가짜 글)"],
+  "body": "## 테스트용 소제목\n이 글은 테스트를 위해 만든 가짜 원고야. 실제 사용자 원고가 아니야.\n[내 경험: 테스트용 빈 칸]\n- 항목 하나\n- 항목 둘\n[링크: 가격 보기]\n## 정리\n테스트용 마무리 문장이야.",
+  "hashtags": ["테스트"],
+  "threads": "테스트용 쓰레드 글",
+  "instagram": "테스트용 인스타 글",
+  "link": "",
+  "blogUrl": "",
+  "date": "2026-10-28",
+  "status": "planned",
+  "createdAt": 1792500000000,
+  "publishedAt": null,
+  "sent": true,
+  "sendUnknown": false
+}

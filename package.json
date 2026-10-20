@@ -5,7 +5,8 @@
   "description": "글공장 — 블로그 원고·발행·수익 관리 앱",
   "scripts": {
     "test": "node --test tests/*.test.js",
-    "test:ui": "python3 tests/ui/app_ui_test.py"
+    "test:ui": "python3 tests/ui/app_ui_test.py",
+    "test:artifact": "python3 tests/artifact/run_check.py"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.3.7"
