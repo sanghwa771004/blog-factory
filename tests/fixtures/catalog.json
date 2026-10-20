@@ -1,0 +1,586 @@
+{
+ "compat": [
+  {
+   "reason": "쿠팡 파트너스 이용가이드에 SNS 허용 (글마다 고지 필요). 캡션 링크는 안 눌려서 프로필·스토리 링크로",
+   "verdict": "가능",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "coupang_partners",
+   "source_url": "https://partners.coupangcdn.com/partners-guide/partners-guide-20260611145240.pdf"
+  },
+  {
+   "reason": "쿠팡 파트너스 이용가이드에 블로그 허용. 네이버 블로그 쪽 제휴 링크 규정은 조사 도구로 못 열어봤어 — 네이버 블로그 운영정책을 직접 확인해줘",
+   "verdict": "확인 필요",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "coupang_partners",
+   "source_url": "https://partners.coupangcdn.com/partners-guide/partners-guide-20260611145240.pdf"
+  },
+  {
+   "reason": "쿠팡 파트너스 이용가이드에 SNS 허용 (글마다 고지 필요). 메타 '유료 파트너십' 표시가 필요한지는 확인 필요",
+   "verdict": "가능",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "coupang_partners",
+   "source_url": "https://partners.coupangcdn.com/partners-guide/partners-guide-20260611145240.pdf"
+  },
+  {
+   "reason": "쿠팡 파트너스 이용가이드에 블로그 허용. 티스토리 공지에 제휴 링크 금지 조항 없음",
+   "verdict": "가능",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "coupang_partners",
+   "source_url": "https://partners.coupangcdn.com/partners-guide/partners-guide-20260611145240.pdf"
+  },
+  {
+   "reason": "쿠팡 파트너스 이용가이드: 링크가 있는 모든 페이지를 채널로 등록해야 함",
+   "verdict": "가능",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "coupang_partners",
+   "source_url": "https://partners.coupangcdn.com/partners-guide/partners-guide-20260611145240.pdf"
+  },
+  {
+   "reason": "캠페인별로 다르고 Meta 쪽 규정은 확인 못 함",
+   "verdict": "확인 필요",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "cpa",
+   "source_url": ""
+  },
+  {
+   "reason": "네트워크·캠페인마다 허용 매체가 다르고 네이버 정책은 못 열어봄",
+   "verdict": "확인 필요",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "cpa",
+   "source_url": "https://tenping.kr/"
+  },
+  {
+   "reason": "캠페인별로 다르고 Meta 쪽 규정은 확인 못 함",
+   "verdict": "확인 필요",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "cpa",
+   "source_url": ""
+  },
+  {
+   "reason": "티스토리 공식: 텐핑 등 외부 플랫폼 연동 가능. 캠페인별 허용 매체는 따로 확인",
+   "verdict": "가능",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "cpa",
+   "source_url": "https://notice.tistory.com/2701"
+  },
+  {
+   "reason": "사이트 쪽 제약은 없지만 네트워크·캠페인별로 다름 (유력: 가능)",
+   "verdict": "확인 필요",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "cpa",
+   "source_url": "https://wordpress.com/support/affiliate-links/"
+  },
+  {
+   "reason": "판매 홍보에 대한 Meta 정책은 확인 못 함",
+   "verdict": "확인 필요",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "digital_product",
+   "source_url": "https://about.instagram.com/blog/announcements/expanding-sharing-links-in-stories-to-everyone"
+  },
+  {
+   "reason": "네이버 블로그 상업 게시물 규정을 못 열어봄",
+   "verdict": "확인 필요",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "digital_product",
+   "source_url": ""
+  },
+  {
+   "reason": "링크는 올릴 수 있지만 판매 홍보에 대한 Meta 정책은 확인 못 함",
+   "verdict": "확인 필요",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "digital_product",
+   "source_url": "https://developers.facebook.com/docs/threads/posts"
+  },
+  {
+   "reason": "티스토리 운영정책을 못 열어봄",
+   "verdict": "확인 필요",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "digital_product",
+   "source_url": ""
+  },
+  {
+   "reason": "자체 사이트는 플랫폼 제약 없음 (통신판매업 신고 등 법적 의무는 따로 확인)",
+   "verdict": "가능",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "digital_product",
+   "source_url": ""
+  },
+  {
+   "reason": "HTML 소스에 접근할 수 있는 사이트만 대상이라 SNS 글에는 넣을 수 없음",
+   "verdict": "불가",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "google_adsense",
+   "source_url": "https://support.google.com/adsense/answer/9724?hl=ko"
+  },
+  {
+   "reason": "구글 요건: 사이트 HTML 소스에 접근할 수 있어야 함. 네이버 쪽 공식 문서는 못 열어봄 (업계에서는 불가로 알려짐)",
+   "verdict": "확인 필요",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "google_adsense",
+   "source_url": "https://support.google.com/adsense/answer/9724?hl=ko"
+  },
+  {
+   "reason": "HTML 소스에 접근할 수 있는 사이트만 대상이라 SNS 글에는 넣을 수 없음",
+   "verdict": "불가",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "google_adsense",
+   "source_url": "https://support.google.com/adsense/answer/9724?hl=ko"
+  },
+  {
+   "reason": "구글 공식 티스토리 가입 도움말 + 티스토리 공지(2026-05-28)로 연동 유지. 앵커·오퍼월 광고는 2025-06-01부터 금지",
+   "verdict": "가능",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "google_adsense",
+   "source_url": "https://support.google.com/adsense/answer/7287082?hl=ko"
+  },
+  {
+   "reason": "HTML에 접근할 수 있는 자체 사이트면 신청 가능(승인 필요, 만 19세 이상)",
+   "verdict": "가능",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "google_adsense",
+   "source_url": "https://support.google.com/adsense/answer/9724?hl=ko"
+  },
+  {
+   "reason": "네이버 공식(2026-08-07): 블로그 콘텐츠에 노출되는 광고 수익을 나누는 구조라 인스타 글에는 광고가 붙지 않음",
+   "verdict": "불가",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_adpost",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=10034578"
+  },
+  {
+   "reason": "네이버 블로그 대상 서비스(공식 2009·2010), 2026-08에도 운영 중(보도)",
+   "verdict": "가능",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_adpost",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=27910"
+  },
+  {
+   "reason": "네이버 공식(2026-08-07): 블로그 콘텐츠에 노출되는 광고 수익을 나누는 구조라 쓰레드 글에는 광고가 붙지 않음",
+   "verdict": "불가",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_adpost",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=10034578"
+  },
+  {
+   "reason": "네이버 매체 전용으로 보이지만 적용 매체 목록은 못 열어봄 (유력: 불가)",
+   "verdict": "확인 필요",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_adpost",
+   "source_url": "https://byline.network/2026/08/07_naver_2/"
+  },
+  {
+   "reason": "적용 매체 목록은 못 열어봄 (유력: 불가)",
+   "verdict": "확인 필요",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_adpost",
+   "source_url": "https://byline.network/2026/08/07_naver_2/"
+  },
+  {
+   "reason": "네이버 공식(2025-03-13): \"네이버 블로그, 유튜브, 인스타그램 등 자신이 활동하는 채널\"",
+   "verdict": "가능",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_shopping_connect",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=32355"
+  },
+  {
+   "reason": "네이버 공식: 블로그 창작자가 판매 링크를 받아 홍보",
+   "verdict": "가능",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_shopping_connect",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=33116"
+  },
+  {
+   "reason": "공식 자료에 쓰레드 언급 없음",
+   "verdict": "확인 필요",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_shopping_connect",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=33116"
+  },
+  {
+   "reason": "공식 자료엔 \"네이버 블로그, 유튜브, 인스타그램 등\"만 나옴",
+   "verdict": "확인 필요",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_shopping_connect",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=32355"
+  },
+  {
+   "reason": "공식 자료에 독립 사이트 언급 없음 (가능하다는 2차 주장만 있음)",
+   "verdict": "확인 필요",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "naver_shopping_connect",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=32355"
+  },
+  {
+   "reason": "인스타 공식: 브랜디드 콘텐츠 태그 필수. 공정위 표시(사진 안, 첫 부분, 첫 해시태그)도 필요",
+   "verdict": "가능",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "sponsorship",
+   "source_url": "https://business.instagram.com/blog/tools-to-disclose-instagram-partnerships"
+  },
+  {
+   "reason": "네이버 브랜드 커넥트가 블로그 창작자 협업을 공식 지원. 제목이나 첫 부분에 표시",
+   "verdict": "가능",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "sponsorship",
+   "source_url": "https://navercorp.com/media/pressReleasesDetail?seq=32355"
+  },
+  {
+   "reason": "Meta: 쓰레드 브랜디드 콘텐츠는 유료 파트너십 도구로 표시. 공정위 표시도 따로 필요",
+   "verdict": "가능",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "sponsorship",
+   "source_url": "https://help.instagram.com/2467529163409127"
+  },
+  {
+   "reason": "공정위 표시 의무는 같음. 티스토리 협찬 게시물 규정은 못 찾음 (유력: 가능)",
+   "verdict": "확인 필요",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "sponsorship",
+   "source_url": "https://www.law.go.kr/LSW/admRulInfoR.do?admRulSeq=2100000280130"
+  },
+  {
+   "reason": "자체 사이트는 제약 없음 (WordPress.com은 협찬이 대부분인 사이트만 불허)",
+   "verdict": "가능",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "sponsorship",
+   "source_url": "https://wordpress.com/support/affiliate-links/"
+  },
+  {
+   "reason": "토스 공식 고지 가이드에 인스타그램·숏폼 표시 위치 규정 있음",
+   "verdict": "가능",
+   "channel_id": "instagram",
+   "checked_at": "2026-10-21",
+   "program_id": "toss_sharelink",
+   "source_url": "https://sharelink-docs.toss.im/disclosure/disclosure.md"
+  },
+  {
+   "reason": "토스 공식 블로그 표시 규정 있음. 네이버 운영정책은 못 열어봄 (유력: 가능)",
+   "verdict": "확인 필요",
+   "channel_id": "naver_blog",
+   "checked_at": "2026-10-21",
+   "program_id": "toss_sharelink",
+   "source_url": "https://sharelink-docs.toss.im/disclosure/disclosure.md"
+  },
+  {
+   "reason": "토스 공식: SNS에서 공유하면 그 주소를 채널로 등록 (쓰레드 이름은 문서에 없음)",
+   "verdict": "가능",
+   "channel_id": "threads",
+   "checked_at": "2026-10-21",
+   "program_id": "toss_sharelink",
+   "source_url": "https://sharelink-docs.toss.im/start/channels.md"
+  },
+  {
+   "reason": "토스 공식: 블로그 허용(채널 등록 필수). 티스토리 공지에 제휴 링크 금지 조항 없음",
+   "verdict": "가능",
+   "channel_id": "tistory",
+   "checked_at": "2026-10-21",
+   "program_id": "toss_sharelink",
+   "source_url": "https://sharelink-docs.toss.im/start/channels.md"
+  },
+  {
+   "reason": "토스 공식: 블로그 허용(공유 채널 등록 필수)",
+   "verdict": "가능",
+   "channel_id": "website",
+   "checked_at": "2026-10-21",
+   "program_id": "toss_sharelink",
+   "source_url": "https://sharelink-docs.toss.im/start/channels.md"
+  }
+ ],
+ "channels": [
+  {
+   "id": "naver_blog",
+   "kind": "blog",
+   "name": "네이버 블로그",
+   "sort": 10,
+   "notes": "글쓰기 API가 없어서 복사해서 붙여넣기로 올려. 블로그 운영정책 원문은 조사 도구로 열리지 않아서 확인 필요. 대가성 표시가 흐리면 검색 노출이 제한될 수 있어(2020 보도). 네이버 공식 수익 프로그램: 애드포스트, 브랜드 커넥트(쇼핑 커넥트·공동구매), 네이버 메이트(선정형 베타).",
+   "active": true,
+   "builtin": true,
+   "max_chars": null,
+   "checked_at": "2026-10-21",
+   "created_at": "2026-10-20T15:19:47.586969+00:00",
+   "html_paste": true,
+   "source_url": "",
+   "clickable_links": true
+  },
+  {
+   "id": "tistory",
+   "kind": "blog",
+   "name": "티스토리",
+   "sort": 20,
+   "notes": "Open API가 끝나서 복사해서 붙여넣기로 올려. 애드센스 등 외부 광고 연동은 가능(2026-05-28 공지). 앵커·오퍼월 광고는 2025-06-01부터 금지이고 어기면 블로그 접근이 제한돼 (티스토리 공지). 카카오 애드핏 신규 연동은 2026-06-29에 끝났어.",
+   "active": true,
+   "builtin": true,
+   "max_chars": null,
+   "checked_at": "2026-10-21",
+   "created_at": "2026-10-20T15:19:47.586969+00:00",
+   "html_paste": true,
+   "source_url": "https://notice.tistory.com/2701",
+   "clickable_links": true
+  },
+  {
+   "id": "website",
+   "kind": "site",
+   "name": "워드프레스 등 독립 사이트",
+   "sort": 30,
+   "notes": "자체 사이트. 제휴 링크에는 rel=\"sponsored\"를 붙이라는 게 구글 권장이고, 앱 복사본에 이미 들어가 있어. 판매자 설명만 옮긴 빈약한 제휴 글, 가치 없이 AI로 대량 생성한 글은 구글 스팸 정책 위반이고, 올리기 전에 사람이 사실 확인하라는 게 구글 안내야.",
+   "active": true,
+   "builtin": true,
+   "max_chars": null,
+   "checked_at": "2026-10-21",
+   "created_at": "2026-10-20T15:19:47.586969+00:00",
+   "html_paste": true,
+   "source_url": "https://developers.google.com/search/docs/crawling-indexing/qualify-outbound-links?hl=ko",
+   "clickable_links": true
+  },
+  {
+   "id": "threads",
+   "kind": "sns",
+   "name": "쓰레드",
+   "sort": 40,
+   "notes": "글은 500자까지, 링크는 5개까지 (Meta 공식 API 문서). 긴 글은 텍스트 첨부로 1만 자까지. 공정위 지침에 쓰레드 기준은 따로 없어서 문자 매체 기준(첫 부분 표시)을 따르는 게 안전해. Meta 정책상 브랜디드 콘텐츠는 '유료 파트너십' 도구를 써야 하는데, 제휴 수수료 글도 해당하는지는 확인 필요.",
+   "active": true,
+   "builtin": true,
+   "max_chars": 500,
+   "checked_at": "2026-10-21",
+   "created_at": "2026-10-20T15:19:47.586969+00:00",
+   "html_paste": false,
+   "source_url": "https://developers.facebook.com/docs/threads/posts",
+   "clickable_links": true
+  },
+  {
+   "id": "instagram",
+   "kind": "sns",
+   "name": "인스타그램",
+   "sort": 50,
+   "notes": "캡션 2,200자·해시태그 30개 (Meta 공식 API 문서). 캡션 링크는 기본적으로 안 눌림(보도) → 프로필 링크나 스토리 링크 스티커로 안내. 광고 표시는 사진 안이나 글 첫 부분, 해시태그면 첫 번째 (공정위 지침). Meta 정책상 브랜디드 콘텐츠는 '유료 파트너십' 표시가 필요한데, 제휴 수수료 글도 해당하는지는 확인 필요.",
+   "active": true,
+   "builtin": true,
+   "max_chars": 2200,
+   "checked_at": "2026-10-21",
+   "created_at": "2026-10-20T15:19:47.586969+00:00",
+   "html_paste": false,
+   "source_url": "https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media",
+   "clickable_links": false
+  }
+ ],
+ "programs": [
+  {
+   "id": "coupang_partners",
+   "kind": "affiliate",
+   "name": "쿠팡파트너스",
+   "sort": 10,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": true,
+   "policy_url": "https://partners.coupangcdn.com/partners-guide/partners-guide-20260611145240.pdf",
+   "unverified": "단축 URL·리디렉션 허용 여부(가이드에 언급 없음, 약관 원문은 못 열어봄), 리포트 파일 형식·열 이름, 인스타·쓰레드별 표시 위치, 활동 금지 사이트 목록은 확인 필요 — 파트너스 사이트는 조사 도구로 열리지 않았어. 2025-10 쿠팡이 강제 이동(납치) 광고를 한 파트너들을 형사 고소했다는 보도가 있어.",
+   "updated_at": "2026-10-20T21:43:09.980899+00:00",
+   "data_source": "파트너스 사이트 리포트: 기간별(일·월), 실적 상세(최대 90일, 상품·링크 형태·채널 ID·하위 ID·주문 건수), 수익 요약·정산·지급. 다음 날 오후 반영, 내려받기 가능 (이용가이드). 리포트 API는 최종 승인 뒤에만 쓸 수 있고 앱에는 연결 안 했어 → 직접 입력하거나 내려받은 파일을 올려줘.",
+   "needs_signup": "필요",
+   "commission_note": "수수료율은 상품마다 다르고 바뀔 수 있어서 앱 계산에 넣지 않았어 (가이드: 따로 정하지 않은 상품은 결제금액의 3%). 클릭 후 24시간 안 구매만 집계, 본인 구매나 쿠팡 주소를 그대로 복사한 링크는 집계 안 됨. 발생한 달 다음 달 25일 확정, 다다음 달 15일 지급 (월 1만 원 이상, 모자라면 최대 6개월 이월). 누적 판매 15만 원이 넘으면 최종 승인 심사. 금지: 자동 실행·플로팅·커버형 배너, 무분별한 댓글, 허위·과장 (모두 이용가이드).",
+   "disclosure_where": "파트너스 링크가 있는 모든 게시물의 제목 또는 첫 부분에, 추천과 같은 언어로. 제목에 넣으면 잘리지 않게 (쿠팡 파트너스 이용가이드·공정위 지침). 가이드의 문구는 '권장 문구'야.",
+   "needs_disclosure": "필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": "이 게시물은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다."
+  },
+  {
+   "id": "toss_sharelink",
+   "kind": "affiliate",
+   "name": "토스쇼핑 쉐어링크",
+   "sort": 20,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": true,
+   "policy_url": "https://sharelink-docs.toss.im/help/operations/policy.md",
+   "unverified": "쓰레드라는 이름은 문서에 없어(SNS는 채널을 등록하면 가능한 것으로 읽힘). 네이버 블로그만 따로 다룬 규정, 실적 파일 내려받기, 링크별 통계, 단축 URL·리디렉션 허용 여부(링크 임의 수정 금지 조항만 있음)는 확인 필요. 만 19세 이상, 외국인은 가입 불가 (토스 공식).",
+   "updated_at": "2026-10-20T21:43:09.980899+00:00",
+   "data_source": "쉐어링크 실적 대시보드(클릭·판매·환불·예상 수익금, 약 30분마다 집계, 한 번에 31일까지)와 정산 내역(확정 수익금·세금·실 지급액). Open API는 승인제이고 지금은 신규 신청을 받지 않아 → 앱에는 직접 입력하거나 파일로 올려줘.",
+   "needs_signup": "필요",
+   "commission_note": "수수료율은 공지로 자주 바뀌어서 앱 계산에 넣지 않았어 (2026-10-21 확인한 공지: 2026-10-01 이후 구매확정 주문부터 8%). 클릭 후 24시간 안 결제·마지막 클릭 기준, 본인·가족·지인 교차 구매와 구매확정 전 취소·환불은 제외. 구매확정(배송완료 7일 뒤)된 달의 다음 달 25일 지급(잔액 10원 이상), 비사업자 3.3% 원천징수. 2026-11-02(월) 자정 이후 구매확정되는 앱인토스 미니앱 안 주문은 정산 제외 (모두 토스 공식 문서).",
+   "disclosure_where": "모든 게시물 필수. 블로그: 제목, 도입부 또는 상품 소개 바로 앞. 인스타·숏폼: 첫 화면에 보이는 앞부분(더보기 뒤는 안 됨). #ad·#sp·'제휴 링크'만 쓰는 건 안 됨. 짧은 공식 문구: [광고] 토스쇼핑 쉐어링크 활동으로, 링크 구매 시 수수료를 지급받습니다. (토스 공식 고지 가이드)",
+   "needs_disclosure": "필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": "이 콘텐츠는 토스쇼핑 쉐어링크 활동의 일환으로, 링크를 통한 구매가 발생하면 일정 수수료를 지급받습니다."
+  },
+  {
+   "id": "naver_shopping_connect",
+   "kind": "affiliate",
+   "name": "네이버 쇼핑 커넥트",
+   "sort": 30,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": true,
+   "policy_url": "https://navercorp.com/media/pressReleasesDetail?seq=33116",
+   "unverified": "공식 고지 문구를 확인하지 못해서 비워뒀어. 쇼핑 커넥트 화면의 안내 문구를 그대로 넣어줘 (참고로 사용자들이 쓰는 문구: \"이 포스팅은 네이버 쇼핑 커넥트 활동의 일환으로, 판매 발생 시 수수료를 제공받습니다.\"). 가입 자격, 티스토리·워드프레스·쓰레드 허용 여부, 정산 일정도 확인 필요.",
+   "updated_at": "2026-10-20T21:43:09.980899+00:00",
+   "data_source": "크리에이터 전용 대시보드에서 정산·성과(클릭수·판매 전환율 등) 확인 (네이버 공식 보도자료 2025). 파일 내려받기 여부는 확인 필요.",
+   "needs_signup": "필요",
+   "commission_note": "수익 쉐어 비율은 판매자가 상품마다 정해 → 대시보드에서 확인 (앱에 넣지 않음). 정산 일정은 확인 필요.",
+   "disclosure_where": "공정위 지침상 블로그는 제목이나 본문 첫 부분. 쇼핑 커넥트 자체 규정(위치·문구)은 확인 필요",
+   "needs_disclosure": "필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": ""
+  },
+  {
+   "id": "naver_adpost",
+   "kind": "ads",
+   "name": "네이버 애드포스트",
+   "sort": 40,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": false,
+   "policy_url": "https://navercorp.com/media/pressReleasesDetail?seq=10034578",
+   "unverified": "애드포스트 사이트가 조사 환경에서 막혀 있어서 가입 조건, 등록 가능한 매체 목록, 수입 리포트·지급 일정, 고지 필요 여부를 확인하지 못했어.",
+   "updated_at": "2026-10-20T21:43:09.980899+00:00",
+   "data_source": "애드포스트 수입 리포트(네이버 로그인). 앱에는 직접 입력해줘.",
+   "needs_signup": "필요",
+   "commission_note": "블로그 콘텐츠에 노출되는 광고 수익의 일부를 창작자와 나누는 구조 (네이버 공식 2026-08-07). 2026-06부터 '네이버 메이트'(선정형 베타, 블로그·카페 등 창작자 지원)도 따로 있어.",
+   "disclosure_where": "플랫폼 광고라 추천·보증 표시 대상이 아닐 수 있지만 공식 근거는 못 찾았어",
+   "needs_disclosure": "확인 필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": ""
+  },
+  {
+   "id": "google_adsense",
+   "kind": "ads",
+   "name": "Google 애드센스",
+   "sort": 50,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": false,
+   "policy_url": "https://support.google.com/adsense/answer/9724?hl=ko",
+   "unverified": "네이버 블로그에 설치할 수 없다는 네이버 쪽 공식 근거는 못 열어봤어 (업계에서는 설치가 안 된다고 알려져 있음).",
+   "updated_at": "2026-10-20T21:43:09.980899+00:00",
+   "data_source": "애드센스 보고서. 매월 3일에 이전 달 예상 수입이 확정되고, 지급 기준액을 넘으면 21~26일에 지급 (Google 공식 도움말). 수익 보고서 API가 있지만 앱에는 연결 안 했어.",
+   "needs_signup": "필요",
+   "commission_note": "만 19세 이상(한국어 도움말), 사이트 HTML 소스에 접근할 수 있어야 신청 가능, 사이트 승인 뒤에 광고가 나와 (보통 며칠, 길면 2~4주). 사람이 검토하지 않은 자동 생성 글이나 베낀 글에는 광고를 못 붙여 (Google 게시자 정책). 티스토리는 2025-06-01부터 앵커·오퍼월 광고 금지 (티스토리 공지).",
+   "disclosure_where": "디스플레이 광고라 추천·보증 표시 대상이 아닐 수 있지만 확인 필요",
+   "needs_disclosure": "확인 필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": ""
+  },
+  {
+   "id": "sponsorship",
+   "kind": "sponsor",
+   "name": "브랜드 협찬·제작비",
+   "sort": 60,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": false,
+   "policy_url": "https://www.law.go.kr/LSW/admRulInfoR.do?admRulSeq=2100000280130",
+   "unverified": "티스토리의 협찬 게시물 규정은 확인 필요.",
+   "updated_at": "2026-10-20T16:13:54.931163+00:00",
+   "data_source": "협찬 계약서·입금 내역 (직접 입력)",
+   "needs_signup": "불필요",
+   "commission_note": "'체험 후기', '선물', 영어 표기(AD·Sponsor)만 쓰는 건 명확한 표시가 아니야 (공정위 지침).",
+   "disclosure_where": "블로그: 제목이나 첫 부분, 본문과 구분되게. 인스타: 사진 안이나 글 첫 부분, 해시태그면 첫 번째. 영상: 제목이나 영상 안 (공정위 지침). 업체 이름과 받은 것을 구체적으로 적으면 더 좋아.",
+   "needs_disclosure": "필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": "이 글은 브랜드로부터 대가(제품·원고료 등)를 받고 작성한 광고입니다."
+  },
+  {
+   "id": "digital_product",
+   "kind": "product",
+   "name": "디지털 상품 판매",
+   "sort": 70,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": true,
+   "policy_url": "",
+   "unverified": "블로그·SNS 플랫폼별 판매 게시물 규정, 통신판매업 신고 같은 법적 의무는 확인 필요.",
+   "updated_at": "2026-10-20T16:13:54.931163+00:00",
+   "data_source": "판매 플랫폼의 판매 내역 (직접 입력)",
+   "needs_signup": "불필요",
+   "commission_note": "",
+   "disclosure_where": "",
+   "needs_disclosure": "확인 필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": ""
+  },
+  {
+   "id": "cpa",
+   "kind": "cpa",
+   "name": "CPA·리드 제휴",
+   "sort": 80,
+   "active": true,
+   "builtin": true,
+   "my_status": "미가입",
+   "needs_link": true,
+   "policy_url": "https://www.korea.kr/briefing/pressReleaseView.do?newsId=156660604",
+   "unverified": "네트워크·캠페인마다 허용 매체와 고지 문구가 달라서 비워뒀어. 쓰는 캠페인의 안내 문구를 넣어줘.",
+   "updated_at": "2026-10-20T16:13:54.931163+00:00",
+   "data_source": "참여한 CPA 네트워크의 리포트 (직접 입력·파일)",
+   "needs_signup": "필요",
+   "commission_note": "",
+   "disclosure_where": "공정위 지침상 제휴 수수료도 표시 대상. 네트워크·캠페인별 문구는 그 안내를 따라줘.",
+   "needs_disclosure": "필요",
+   "policy_checked_at": "2026-10-21",
+   "disclosure_template": ""
+  }
+ ],
+ "settings": {
+  "id": 1,
+  "len": "2500",
+  "money": "쿠팡파트너스",
+  "per_day": 1,
+  "platform": "네이버 블로그",
+  "updated_at": "2026-10-21T00:00:00+00:00",
+  "auto_topics": "겨울 가전, 디지털 기기",
+  "auto_enabled": true,
+  "score_weights": {
+   "demand": 2,
+   "effort": 1,
+   "intent": 2,
+   "competition": 1,
+   "monetization": 2,
+   "product_info": 1,
+   "differentiation": 1
+  },
+  "default_channel": "naver_blog",
+  "default_programs": [
+   "coupang_partners"
+  ]
+ }
+}
