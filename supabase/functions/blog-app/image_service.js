@@ -2,13 +2,14 @@
 // - OpenAI 이미지 생성·편집, 사진 공급자(지금은 Pexels만) 검색·한 장 가져오기, 이미지 내려받기
 // - 저장 흐름(생성 결과 저장·사진 고르기·파일 올리기)은 deps(DB 함수·파일 저장소)를 받아서 실행 → 테스트에서 가짜로 바꿔 끼움
 // 키는 서버 환경변수(Supabase Edge Function Secrets)로만 받음. 화면(app.js)으로는 키가 있는지 여부만 보냄.
-import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd } from './images.js';
+import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf } from './images.js';
 
 export const OPENAI_URL = 'https://api.openai.com/v1';
 export const PEXELS_URL = 'https://api.pexels.com/v1';
 export const BUCKET = 'post-images';
-export const MAX_AI_BYTES = 20 * 1024 * 1024;
-export const MAX_STOCK_BYTES = 15 * 1024 * 1024;
+// 저장소 버킷 한도(10MB, 012)와 같게 — 이보다 크면 받아도 저장하지 못함
+export const MAX_AI_BYTES = 10 * 1024 * 1024;
+export const MAX_STOCK_BYTES = 10 * 1024 * 1024;
 
 // 점검용 가짜 모델: 설정의 모델 이름을 이걸로 바꾸면 OpenAI를 부르지 않고 작은 회색 시험 이미지를 돌려줌 (비용 0, 실제 이미지 아님)
 // 서버 흐름(생성 시작 → 저장소 → 기록 → 연결)을 키 없이 점검할 때만 씀
@@ -39,11 +40,39 @@ export function storagePath(folder, ext, now = new Date(), id = crypto.randomUUI
   return `${folder}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}.${ext}`;
 }
 
-async function timed(fetchImpl, url, init, ms) {
+const isAbort = (e) => !!e && (e.name === 'AbortError' || e.name === 'TimeoutError' || /abort/i.test(String(e.message || '')));
+// 시간 제한은 응답 머리만이 아니라 본문을 다 읽을 때까지 (read 가 끝나야 타이머를 끔)
+async function timed(fetchImpl, url, init, ms, read) {
   const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), ms);
-  try { return await fetchImpl(url, { ...init, signal: ctrl.signal }); } finally { clearTimeout(t); }
+  const t = setTimeout(() => ctrl.abort(), Math.max(1, ms));
+  try {
+    const res = await fetchImpl(url, { ...init, signal: ctrl.signal });
+    return read ? { res, body: await read(res) } : { res, body: undefined };
+  } finally { clearTimeout(t); }
 }
+const jsonOrNull = async (r) => { try { return await r.json(); } catch (e) { if (isAbort(e)) throw e; return null; } };
+// 정해진 크기까지만 읽음 (넘으면 null — 끝까지 받지 않음)
+async function readCapped(res, max) {
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const b = new Uint8Array(await res.arrayBuffer());
+    return b.length > max ? null : b;
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let n = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.length;
+    if (n > max) { try { await reader.cancel(); } catch { /* 무시 */ } return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out;
+}
+const withTimeout = (p, ms) => Promise.race([p, new Promise((resolve) => setTimeout(() => resolve({ ok: false, timeout: true }), Math.max(1, ms)))]);
 
 // ───────── OpenAI ─────────
 // 오류를 앱이 알아듣는 코드로. billed: 'no' = 청구 안 됐을 것, 'maybe' = 됐을 수도 있음(확인 필요)
@@ -57,10 +86,23 @@ export function classifyOpenAIError(status, body) {
   if (status === 401) return { code: 'openai_key_invalid', message: 'OpenAI API 키가 맞지 않아. Supabase Secrets의 OPENAI_API_KEY를 확인해줘.', billed: 'no', retryable: false };
   if (status === 403 && /verif/.test(m)) return { code: 'openai_org_unverified', message: 'OpenAI 조직 인증(Organization Verification)을 해야 이 모델을 쓸 수 있어.', billed: 'no', retryable: false };
   if (status === 403) return { code: 'openai_forbidden', message: '이 키로는 이 기능을 쓸 수 없어. ' + msg, billed: 'no', retryable: false };
-  if (status === 404 || code === 'model_not_found' || (status === 400 && /model/.test(m) && /(not|invalid|exist|support)/.test(m))) {
+  const param = String(e.param || '');
+  if (status === 404 || code === 'model_not_found' || param === 'model') {
     return { code: 'model_unavailable', message: '이 계정에서 쓸 수 없는 모델이야. 설정 > 이미지에서 다른 모델 이름으로 바꿔줘.', billed: 'no', retryable: false };
   }
-  if (status === 429 && (code === 'insufficient_quota' || type === 'insufficient_quota' || /quota|billing|credit|balance/.test(m))) {
+  // 모델은 되는데 그 크기·품질을 못 받는 경우 (모델을 바꾸라고 하면 헛돎 → 크기·품질 문제라고 알려줌)
+  const opt = param === 'size' || param === 'quality' ? param : status === 400 && /(support|invalid|allowed|must be)/.test(m) ? (/\bquality\b/.test(m) ? 'quality' : /\bsize\b|\d+x\d+/.test(m) ? 'size' : '') : '';
+  if (status === 400 && opt) {
+    return { code: 'openai_unsupported_option', param: opt, message: `이 모델이 ${opt === 'size' ? '이 크기를' : '이 품질을'} 지원하지 않아. 설정 > 이미지에서 모델이나 품질을 바꿔줘.`, billed: 'no', retryable: false };
+  }
+  if (status === 400 && /model/.test(m) && /(not|invalid|exist|support)/.test(m)) {
+    return { code: 'model_unavailable', message: '이 계정에서 쓸 수 없는 모델이야. 설정 > 이미지에서 다른 모델 이름으로 바꿔줘.', billed: 'no', retryable: false };
+  }
+  // OpenAI에 직접 걸어둔 한 달 한도(hard spend limit)·등급 한도: 기다려도 안 풀림 (OpenAI 문서 'Spend limits', 2026-10-22 확인)
+  if (status === 429 && (/spend_limit_exceeded|usage_limit_exceeded/.test(code) || /spend limit|usage limit/.test(m))) {
+    return { code: 'openai_spend_limit', message: 'OpenAI에 걸어둔 사용 한도(Spend limit)에 닿았어. OpenAI 설정의 Limits에서 한도를 올리거나 다음 달까지 기다려줘.', billed: 'no', retryable: false };
+  }
+  if (status === 429 && (code === 'insufficient_quota' || code === 'credit_balance_exhausted' || type === 'insufficient_quota' || /quota|billing|credit|balance/.test(m))) {
     return { code: 'openai_quota', message: 'OpenAI 잔액·한도가 부족해. OpenAI 결제(Billing) 화면을 확인해줘.', billed: 'no', retryable: false };
   }
   if (status === 429) return { code: 'openai_rate_limited', message: 'OpenAI가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.', billed: 'no', retryable: true };
@@ -77,7 +119,7 @@ export function classifyOpenAIError(status, body) {
 }
 // OpenAI가 만들기 전에 거절한 오류 → 하루 생성 횟수에 안 셈
 export const NOT_COUNTED = new Set(['openai_key_missing', 'openai_key_invalid', 'openai_org_unverified', 'openai_forbidden', 'model_unavailable',
-  'openai_quota', 'openai_rate_limited', 'openai_bad_request', 'bad_base_image']);
+  'openai_unsupported_option', 'openai_quota', 'openai_spend_limit', 'openai_rate_limited', 'openai_bad_request', 'bad_base_image', 'server_busy_late']);
 
 // 한 장 만들기(generate) 또는 고치기(edit). 성공하면 base64 이미지와 사용량을 돌려줌
 export async function openaiImage({ fetchImpl, key, mode = 'generate', model, prompt, size, quality, outputFormat = 'jpeg', compression = 90, image, safetyId, timeoutMs = 115000 }) {
@@ -86,7 +128,7 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
       usage: { input_tokens: 0, input_tokens_details: { text_tokens: 0, image_tokens: 0 }, output_tokens: 0, total_tokens: 0 } };
   }
   if (!key) return { ok: false, code: 'openai_key_missing', message: 'OpenAI API 키가 설정되지 않았어.', billed: 'no' };
-  let res;
+  let res, j = null;
   try {
     if (mode === 'edit') {
       if (!image || !image.bytes) return { ok: false, code: 'bad_base_image', message: '고칠 이미지를 찾지 못했어.', billed: 'no' };
@@ -101,22 +143,19 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
       if (safetyId) form.append('safety_identifier', safetyId);
       const mime = image.mime || 'image/png';
       form.append('image[]', new Blob([image.bytes], { type: mime }), 'base.' + (mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]));
-      res = await timed(fetchImpl, OPENAI_URL + '/images/edits', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: form }, timeoutMs);
+      ({ res, body: j } = await timed(fetchImpl, OPENAI_URL + '/images/edits', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: form }, timeoutMs, jsonOrNull));
     } else {
       const body = { model, prompt, size, quality, output_format: outputFormat, n: 1, moderation: 'auto' };
       if (outputFormat !== 'png') body.output_compression = compression;
       if (safetyId) body.safety_identifier = safetyId;
-      res = await timed(fetchImpl, OPENAI_URL + '/images/generations', { method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs);
+      ({ res, body: j } = await timed(fetchImpl, OPENAI_URL + '/images/generations', { method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs, jsonOrNull));
     }
   } catch (e) {
-    const aborted = e && (e.name === 'AbortError' || /abort/i.test(String(e.message || '')));
-    return aborted
+    return isAbort(e)
       ? { ok: false, code: 'openai_timeout', message: '응답이 너무 오래 걸려서 멈췄어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', retryable: true }
       : { ok: false, code: 'openai_network', message: 'OpenAI에 연결하지 못했어. 조금 뒤에 다시 해줘.', billed: 'maybe', retryable: true };
   }
   const requestId = scrub(res.headers && res.headers.get ? res.headers.get('x-request-id') || '' : '', 120);
-  let j = null;
-  try { j = await res.json(); } catch { j = null; }
   if (!res.ok) return { ok: false, status: res.status, requestId, ...classifyOpenAIError(res.status, j) };
   const item = j && Array.isArray(j.data) ? j.data[0] : null;
   if (!item || typeof item.b64_json !== 'string' || !item.b64_json) {
@@ -160,21 +199,17 @@ export async function pexelsSearch({ fetchImpl, key, query, orientation, page = 
   const q = new URLSearchParams({ query: String(query), page: String(page), per_page: String(perPage) });
   if (['landscape', 'portrait', 'square'].includes(orientation)) q.set('orientation', orientation);
   q.set('locale', /[ㄱ-힝]/.test(String(query)) ? 'ko-KR' : 'en-US');
-  let res;
-  try { res = await timed(fetchImpl, PEXELS_URL + '/search?' + q, { headers: { Authorization: key } }, timeoutMs); } catch { return { ok: false, code: 'pexels_network', message: 'Pexels에 연결하지 못했어.' }; }
+  let res, j = null;
+  try { ({ res, body: j } = await timed(fetchImpl, PEXELS_URL + '/search?' + q, { headers: { Authorization: key } }, timeoutMs, (r) => (r.ok ? jsonOrNull(r) : null))); } catch { return { ok: false, code: 'pexels_network', message: 'Pexels에 연결하지 못했어.' }; }
   if (!res.ok) return { ok: false, status: res.status, ...pexelsError(res.status) };
-  let j = null;
-  try { j = await res.json(); } catch { j = null; }
   const photos = (j && Array.isArray(j.photos) ? j.photos : []).map(normalizePexels).filter(Boolean);
   return { ok: true, status: res.status, photos, total: Number(j && j.total_results) || 0, page: Number(j && j.page) || page, hasNext: !!(j && j.next_page), remaining: remainingOf(res) };
 }
 export async function pexelsPhoto({ fetchImpl, key, id, timeoutMs = 15000 }) {
   if (!key) return { ok: false, code: 'pexels_key_missing', message: 'Pexels API 키가 설정되지 않았어.' };
-  let res;
-  try { res = await timed(fetchImpl, PEXELS_URL + '/photos/' + encodeURIComponent(String(id)), { headers: { Authorization: key } }, timeoutMs); } catch { return { ok: false, code: 'pexels_network', message: 'Pexels에 연결하지 못했어.' }; }
+  let res, j = null;
+  try { ({ res, body: j } = await timed(fetchImpl, PEXELS_URL + '/photos/' + encodeURIComponent(String(id)), { headers: { Authorization: key } }, timeoutMs, (r) => (r.ok ? jsonOrNull(r) : null))); } catch { return { ok: false, code: 'pexels_network', message: 'Pexels에 연결하지 못했어.' }; }
   if (!res.ok) return { ok: false, status: res.status, ...pexelsError(res.status) };
-  let j = null;
-  try { j = await res.json(); } catch { j = null; }
   const photo = normalizePexels(j);
   return photo ? { ok: true, status: res.status, photo, remaining: remainingOf(res) } : { ok: false, code: 'pexels_error', message: 'Pexels 사진 정보를 읽지 못했어.' };
 }
@@ -188,23 +223,29 @@ export const PHOTO_PROVIDERS = {
 // 허용한 주소(사진 공급자 이미지 서버)에서만, 크기 제한을 지키며 내려받음 (다른 곳으로 넘겨주는 주소는 따라가지 않음)
 export async function downloadImage({ fetchImpl, url, hosts, maxBytes, timeoutMs = 20000 }) {
   if (!okHost(url, hosts)) return { ok: false, code: 'bad_source', message: '허용하지 않은 주소야.' };
-  let res;
-  try { res = await timed(fetchImpl, url, { redirect: 'error' }, timeoutMs); } catch { return { ok: false, code: 'download_failed', message: '사진을 내려받지 못했어.' }; }
+  let res, buf = null;
+  try {
+    ({ res, body: buf } = await timed(fetchImpl, url, { redirect: 'error' }, timeoutMs, async (r) => {
+      if (!r.ok) return null;
+      const len = Number(r.headers && r.headers.get ? r.headers.get('content-length') : 0);
+      if (len && len > maxBytes) return 'too_big';
+      return (await readCapped(r, maxBytes)) || 'too_big';
+    }));
+  } catch { return { ok: false, code: 'download_failed', message: '사진을 내려받지 못했어.' }; }
   if (!res.ok) return { ok: false, code: 'download_failed', message: '사진을 내려받지 못했어. (' + res.status + ')' };
-  const len = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0);
-  if (len && len > maxBytes) return { ok: false, code: 'too_big', message: '사진이 너무 커.' };
-  const buf = new Uint8Array(await res.arrayBuffer());
-  if (buf.length > maxBytes) return { ok: false, code: 'too_big', message: '사진이 너무 커.' };
+  if (buf === 'too_big' || !buf) return { ok: false, code: 'too_big', message: '사진이 너무 커.' };
   return { ok: true, bytes: buf };
 }
 
 // ───────── 저장 흐름 ─────────
-// deps: { rpc(name, args) → {data, error}, upload(path, bytes, mime) → {error}, remove(paths), download(path) → {ok, bytes},
+// deps: { rpc(name, args) → {data, error}, upload(path, bytes, mime, {upsert}) → {error}, remove(paths), download(path) → {ok, bytes},
 //         findImage({provider, source_id} | {sha256}) → 행 또는 null, logCall(provider, kind, status), fetchImpl, now(), uuid() }
-const linkArg = (post, slot, purpose) => (post && slot ? { post_id: post.id, slot_key: slot.key, slot_index: slot.index ?? 0, slot_text: slot.text || '', purpose: purpose || '' } : null);
+const linkArg = (post, slot, purpose) => (post && slot
+  ? { post_id: post.id, slot_key: slot.key, slot_index: slot.index ?? 0, slot_text: slot.text || '', slot_ctx: ctxOf(slot), purpose: purpose || '' } : null);
+// 처음 올리기가 실제로는 됐는데 응답만 실패한 경우를 위해, 다시 할 때는 덮어쓰기 허용 (경로는 매번 새 무작위 값이라 다른 파일을 덮지 않음)
 async function uploadWithRetry(d, path, bytes, mime) {
-  let up = await d.upload(path, bytes, mime);
-  if (up && up.error) up = await d.upload(path, bytes, mime);
+  let up = await d.upload(path, bytes, mime, { upsert: false });
+  if (up && up.error) up = await d.upload(path, bytes, mime, { upsert: true });
   return !(up && up.error);
 }
 async function linkExisting(d, link, image) {
@@ -215,14 +256,17 @@ async function linkExisting(d, link, image) {
 }
 
 // AI 생성 실행 (image_gen_begin 으로 '생성 중' 한 줄을 만든 다음). 끝나면 성공·실패를 기록하고 결과를 돌려줌
-// opt: { key, prices, safetyId, timeoutMs, base: {path, mime} (편집일 때), description }
+// opt: { key, prices, safetyId, timeoutMs, deadline(이 서버 일꾼이 꺼지기 전 마지막 시각, ms), base: {path, mime} (편집일 때), description }
+// 시간 제한은 OpenAI를 부르기 바로 직전에 남은 시간으로 다시 계산 (편집 원본 받기 등 앞 단계에서 쓴 시간을 뺌)
+export const MIN_OPENAI_MS = 20000;
 export async function runGeneration(d, gen, opt = {}) {
+  const leftMs = () => (opt.deadline ? opt.deadline - d.now().getTime() : Infinity);
   const fail = async (r) => {
     const fin = {
       provider_called: !NOT_COUNTED.has(r.code), error_code: r.code, error_message: scrub(r.message, 500),
       cost_status: r.billed === 'no' ? '청구 없음' : '확인 필요', request_id: r.requestId || '',
     };
-    if (r.usage) { fin.usage = r.usage; fin.usage_usd = usageUsd(r.usage, opt.prices); }
+    if (r.usage) { fin.usage = r.usage; fin.usage_usd = usageUsd(r.usage, opt.prices, gen.model); }
     const x = await d.rpc('image_gen_fail', { gen: gen.id, fin });
     return { ok: false, code: r.code, message: r.message, retryable: !!r.retryable, billed: r.billed, generation: x && x.data };
   };
@@ -230,12 +274,14 @@ export async function runGeneration(d, gen, opt = {}) {
   try {
     let image = null;
     if (gen.mode === 'edit') {
-      const dl = opt.base && opt.base.path ? await d.download(opt.base.path) : { ok: false };
+      const dl = opt.base && opt.base.path ? await withTimeout(d.download(opt.base.path), Math.min(20000, Math.max(1, leftMs() - MIN_OPENAI_MS))) : { ok: false };
       if (!dl.ok) return fail({ code: 'bad_base_image', message: '고칠 이미지를 불러오지 못했어.', billed: 'no' });
       image = { bytes: dl.bytes, mime: opt.base.mime };
     }
+    if (leftMs() < MIN_OPENAI_MS) return fail({ code: 'server_busy_late', message: '서버 준비 시간이 모자라서 시작하지 않았어 (청구 없음). 다시 눌러줘.', billed: 'no', retryable: true });
+    const timeoutMs = Math.min(opt.timeoutMs || 115000, leftMs());
     res = await openaiImage({ fetchImpl: d.fetchImpl, key: opt.key, mode: gen.mode, model: gen.model, prompt: gen.prompt, size: gen.size, quality: gen.quality,
-      outputFormat: gen.output_format || 'jpeg', image, safetyId: opt.safetyId, timeoutMs: opt.timeoutMs || 115000 });
+      outputFormat: gen.output_format || 'jpeg', image, safetyId: opt.safetyId, timeoutMs });
   } catch (e) {
     res = { ok: false, code: 'server_error', message: '서버에서 문제가 생겼어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', detail: scrub(e && e.message) };
   }
@@ -251,11 +297,15 @@ export async function runGeneration(d, gen, opt = {}) {
   const text = opt.description || gen.slot_text || '';
   const img = {
     origin_post_id: gen.post_id || '', origin_slot_index: gen.slot_index ?? '', origin_slot_key: gen.slot_key || '',
-    kind: 'ai', provider: 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
+    kind: 'ai', provider: res.test ? '' : 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
     description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
-    sha256: await sha256Hex(bytes), license: 'AI 생성 이미지 (OpenAI 이용 약관을 따름)', attribution_text: '',
+    sha256: await sha256Hex(bytes), license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)', attribution_text: '',
   };
-  const r = await d.rpc('image_save', { img, link: null, gen: gen.id, fin: { usage: res.usage, usage_usd: usageUsd(res.usage, opt.prices), revised_prompt: res.revisedPrompt, request_id: res.requestId } });
+  // 점검용 가짜 모델은 청구가 없고 하루 횟수에도 안 셈
+  const fin = res.test
+    ? { usage: res.usage, usage_usd: 0, cost_status: '청구 없음', provider_called: false, request_id: res.requestId }
+    : { usage: res.usage, usage_usd: usageUsd(res.usage, opt.prices, gen.model), revised_prompt: res.revisedPrompt, request_id: res.requestId };
+  const r = await d.rpc('image_save', { img, link: null, gen: gen.id, fin });
   if (r.error) {
     await d.remove([path]);
     return fail({ code: 'save_failed', message: '만든 이미지를 기록하지 못했어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', usage: res.usage, requestId: res.requestId });
@@ -278,7 +328,7 @@ export async function saveStockPhoto(d, a) {
   const dl = await downloadImage({ fetchImpl: d.fetchImpl, url: photo.download, hosts: P.hosts, maxBytes: MAX_STOCK_BYTES });
   if (!dl.ok) return { ok: false, status: 502, code: dl.code, message: dl.message };
   const chk = sniffImage(dl.bytes);
-  if (!chk || chk.animated) return { ok: false, status: 502, code: 'bad_image', message: '사진 파일을 읽지 못했어.' };
+  if (!chk || chk.animated) return { ok: false, status: 502, code: 'stock_bad_image', message: '사진 파일을 읽지 못했어.' };
   const bytes = stripMetadata(dl.bytes).bytes;
   const path = storagePath('stock', chk.ext, d.now(), d.uuid());
   if (!(await uploadWithRetry(d, path, bytes, chk.mime))) return { ok: false, status: 502, code: 'storage_failed', message: '사진을 저장하지 못했어.' };
@@ -296,10 +346,11 @@ export async function saveStockPhoto(d, a) {
 }
 
 // 직접 올린 파일(또는 앱에서 만든 카드뉴스 PNG)을 검사 → 숨은 정보 지우기 → 저장 (같은 파일이면 다시 저장하지 않음)
-// a: { bytes, declaredMime, kind: 'upload'|'card', rights, post, slot, purpose, description, link }
+// a: { bytes, declaredMime, kind: 'upload'|'card', rights, post, slot, purpose, description, link, bg(카드뉴스 배경 이미지 행) }
 export async function saveUploaded(d, a) {
-  const kind = a.kind === 'card' ? 'card' : 'upload';
   const chk = checkImageFile(a.bytes, a.declaredMime);
+  // 카드뉴스는 앱이 캔버스로 그린 PNG만 (다른 형식이면 일반 올리기처럼 권한 확인을 받음)
+  const kind = a.kind === 'card' && chk.ok && chk.mime === 'image/png' ? 'card' : 'upload';
   if (!chk.ok) return { ok: false, status: chk.code === 'too_big' ? 413 : 400, code: 'bad_image', reason: chk.code, message: chk.msg };
   if (kind === 'upload' && a.rights !== true) return { ok: false, status: 400, code: 'rights_required', message: '쓸 권한이 있는 사진인지 확인해줘.' };
   const bytes = stripMetadata(a.bytes).bytes;
@@ -310,11 +361,17 @@ export async function saveUploaded(d, a) {
   const path = storagePath(kind, chk.ext, d.now(), d.uuid());
   if (!(await uploadWithRetry(d, path, bytes, chk.mime))) return { ok: false, status: 502, code: 'storage_failed', message: '파일을 저장하지 못했어.' };
   const desc = String(a.description || (a.slot && a.slot.text) || '').slice(0, 500);
+  // 카드뉴스 배경으로 쓴 이미지의 출처를 같이 남김 (Pexels 사진가·AI 여부가 사라지지 않게)
+  const bg = kind === 'card' && a.bg ? a.bg : null;
+  const bgNote = bg ? (bg.kind === 'ai' ? 'AI 생성 이미지' : bg.provider === 'pexels' ? `Pexels 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
   const img = {
     origin_post_id: a.post ? a.post.id : '', origin_slot_index: a.slot ? a.slot.index ?? '' : '', origin_slot_key: a.slot ? a.slot.key : '',
     kind, provider: kind === 'card' ? 'cardnews' : 'upload', purpose: a.purpose || '', description: desc, alt_text: altTextFor(desc),
     storage_path: path, mime: chk.mime, bytes: bytes.length, width: chk.width, height: chk.height, sha256: sha,
-    license: kind === 'card' ? '카드뉴스 (앱에서 직접 만듦)' : '직접 올림 (사용 권한 확인함)', rights_confirmed: true,
+    license: kind === 'card' ? '카드뉴스 (앱에서 직접 만듦)' + (bgNote ? ' · 배경: ' + bgNote : '') : '직접 올림 (사용 권한 확인함)',
+    rights_confirmed: kind === 'card' ? !bg || !!bg.rights_confirmed || bg.kind !== 'upload' : true,
+    source_url: bg ? bg.source_url || '' : '', author_name: bg ? bg.author_name || '' : '', author_url: bg ? bg.author_url || '' : '',
+    attribution_text: bg ? bg.attribution_text || (bg.kind === 'ai' ? '배경: AI로 만든 예시 이미지' : '') : '',
   };
   const r = await d.rpc('image_save', { img, link, gen: null, fin: null });
   if (r.error) { await d.remove([path]); return { ok: false, status: 500, code: 'server', error: r.error }; }

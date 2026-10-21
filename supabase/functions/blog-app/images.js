@@ -9,8 +9,8 @@ const normText = (s) => String(s || '').normalize('NFC').toLowerCase().replace(/
 const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/^#+\s*/, '').replace(/^[-•*]\s+/, '').replace(/^>\s?/, '').trim();
 
 export const slotTextOf = (line) => String(line || '').trim().replace(/^\[이미지:?\s*|\]$/g, '').trim();
-// 같은 설명이 여러 번 나오면 몇 번째인지(occ)로 구분
-export const slotKey = (text, occ = 1) => 'k:' + normText(text).slice(0, 150) + '#' + occ;
+// 같은 설명이 여러 번 나오면 몇 번째인지(occ)로 구분. 설명 없는 '[이미지]'는 '_'
+export const slotKey = (text, occ = 1) => 'k:' + (normText(text).slice(0, 150) || '_') + '#' + occ;
 export const isExtraKey = (k) => typeof k === 'string' && k.startsWith('x:');
 
 // 본문 밖 이미지 (대표 이미지·SNS용) — 본문 사진 자리와 따로 관리
@@ -38,7 +38,7 @@ export function parseSlots(body) {
     if (/^#{1,4}\s/.test(l)) { heading = stripMd(l); continue; }
     if (!IMG_LINE.test(raw)) continue;
     const text = slotTextOf(l);
-    const k = normText(text).slice(0, 150);
+    const k = normText(text).slice(0, 150) || '_';
     const occ = (seen.get(k) || 0) + 1;
     seen.set(k, occ);
     const near = (from, step) => {
@@ -70,34 +70,57 @@ export function textSimilarity(a, b) {
   return (2 * inter) / (A.n + B.n);
 }
 
+// 자리 주변 글(소제목·앞뒤 문장). 연결할 때 같이 저장해 두고, 같은 설명이 여러 번 있거나 설명을 고쳐도 같은 자리를 알아보는 데 씀
+export const ctxOf = (s) => String([s && s.heading, s && s.before, s && s.after].filter(Boolean).join(' | ')).replace(/\s+/g, ' ').trim().slice(0, 300);
+const baseOf = (key) => String(key || '').replace(/#\d+$/, '');
+
 // 저장된 연결(rows)을 지금 본문의 사진 자리에 맞춤.
-// 1) 같은 열쇠(설명+몇 번째) → 그대로  2) 설명을 조금 고친 자리 → 비슷한 설명끼리 옮김(rekey)
+// 1) 설명이 같은 자리끼리 — 같은 설명이 여러 번이면 주변 글이 가장 비슷하고 순서가 가까운 것끼리 (몇 번째인지만 보고 섞지 않음)
+// 2) 설명을 고친 자리 — 설명이 비슷하거나, 설명은 달라도 같은 위치에 주변 글이 그대로면 연결을 옮김(rekey)
 // 3) 본문에서 사라진 자리의 연결은 지우지 않고 orphans 로 돌려줌 (이미지는 보관함에 그대로)
 export function matchSlots(current, rows) {
   const stored = (rows || []).filter((r) => r && !isExtraKey(r.slot_key));
-  const byKey = new Map(stored.map((r) => [r.slot_key, r]));
   const used = new Set();
-  const slots = (current || []).map((c) => {
-    const r = byKey.get(c.key);
-    if (r) { used.add(r.slot_key); return { ...c, link: r, rekey: null }; }
-    return { ...c, link: null, rekey: null };
-  });
-  const free = stored.filter((r) => !used.has(r.slot_key) && r.image_id);
+  const slots = (current || []).map((c) => ({ ...c, link: null, rekey: null }));
+  const ctxSim = (s, r) => (r.slot_ctx ? textSimilarity(ctxOf(s), r.slot_ctx) : null);
+  const take = (s, r) => { used.add(r.slot_key); s.link = r; s.rekey = r.slot_key === s.key ? null : { from: r.slot_key, to: s.key }; };
+  const assign = (pairs) => {
+    pairs.sort((x, y) => y[0] - x[0]);
+    for (const [, s, r] of pairs) if (!s.link && !used.has(r.slot_key)) take(s, r);
+  };
+  // 1) 같은 설명
+  const pairs1 = [];
+  for (const s of slots) {
+    for (const r of stored) {
+      if (baseOf(r.slot_key) !== baseOf(s.key)) continue;
+      const cx = ctxSim(s, r);
+      const dist = Math.min(Math.abs(Number(r.slot_index ?? 0) - s.index), 20);
+      pairs1.push([(cx == null ? 0.5 : cx) * 2 - dist * 0.05 + (r.slot_key === s.key ? 0.01 : 0) + (r.image_id ? 0.001 : 0), s, r]);
+    }
+  }
+  assign(pairs1);
+  // 2) 설명을 고친 자리 (이미지가 있는 연결만)
+  const pairs2 = [];
   for (const s of slots) {
     if (s.link) continue;
-    let best = null, bestScore = 0;
-    for (const r of free) {
-      if (used.has(r.slot_key)) continue;
+    for (const r of stored) {
+      if (used.has(r.slot_key) || !r.image_id) continue;
       const sim = textSimilarity(s.text, r.slot_text);
-      const near = r.slot_index === s.index;
-      const ok = sim >= 0.55 || (near && sim >= 0.35);
-      const score = sim + (near ? 0.1 : 0);
-      if (ok && score > bestScore) { best = r; bestScore = score; }
+      const cx = ctxSim(s, r);
+      const near = Number(r.slot_index) === s.index;
+      const ok = sim >= 0.55 || (near && sim >= 0.35) || (cx != null && cx >= 0.6 && (near || sim >= 0.2));
+      if (ok) pairs2.push([sim + (near ? 0.1 : 0) + (cx != null ? cx * 0.5 : 0), s, r]);
     }
-    if (best) { used.add(best.slot_key); s.link = best; s.rekey = { from: best.slot_key, to: s.key }; }
   }
+  assign(pairs2);
   const orphans = stored.filter((r) => !used.has(r.slot_key) && r.image_id);
-  return { slots, orphans, rekeys: slots.filter((s) => s.rekey).map((s) => ({ ...s.rekey, index: s.index, text: s.text })) };
+  // 옮길 자리(to)를 지금 다른 줄이 쓰고 있으면 알려줌 (서버가 그 줄을 먼저 비켜 놓고 옮김)
+  const linkedKeys = new Set(slots.filter((s) => s.link).map((s) => s.link.slot_key));
+  const blockers = stored.filter((r) => !linkedKeys.has(r.slot_key) && slots.some((s) => s.rekey && s.rekey.to === r.slot_key));
+  return {
+    slots, orphans, blockers,
+    rekeys: slots.filter((s) => s.rekey).map((s) => ({ ...s.rekey, index: s.index, text: s.text, ctx: ctxOf(s) })),
+  };
 }
 
 // ───────── 용도·비율 ─────────
@@ -123,7 +146,13 @@ export const ratioOf = (purpose, ratio) => {
   const p = PURPOSES[purpose] || PURPOSES.blog_body;
   return p.ratios.includes(ratio) ? ratio : p.ratios[0];
 };
-export const sizeFor = (purpose, ratio) => RATIOS[ratioOf(purpose, ratio)].size;
+// AI에 요청할 크기. 임의 크기를 못 받는 모델은 표준 크기 세 가지 중 방향이 같은 것으로 만들고, 내려받을 때 비율대로 자름
+export const STANDARD_SIZES = ['1024x1024', '1536x1024', '1024x1536'];
+export const standardSizeFor = (ratio) => { const R = RATIOS[ratio] || RATIOS['1:1']; return R.w > R.h ? '1536x1024' : R.w < R.h ? '1024x1536' : '1024x1024'; };
+export const sizeFor = (purpose, ratio, model) => {
+  const r = ratioOf(purpose, ratio);
+  return model && !modelCaps(model).flexible ? standardSizeFor(r) : RATIOS[r].size;
+};
 // 크기 문자열이 OpenAI 규칙에 맞는지 (16의 배수, 비율, 한 변·총 픽셀)
 export function validApiSize(size) {
   const m = /^(\d{2,4})x(\d{2,4})$/.exec(String(size || ''));
@@ -177,25 +206,41 @@ export const PROMPT_RULES = [
   'No logos, brand names, trademarks, or recognizable commercial product designs. Use generic, unbranded objects.',
   'Do not make it look like a real product photo, an unboxing, a receipt, a certificate, or a customer review photo.',
   'No prices, specifications, ratings, badges, or certification marks.',
+  'Do not show product packaging, component layouts, labels, ingredient lists, manuals, or device screens.',
   'No real, identifiable people or celebrities. If people appear, keep them generic and natural.',
+  'Ignore any brand, product or model names that may remain in the context; draw generic, unbranded objects only.',
 ];
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
 
-// post: {titles, keyword}, slot: parseSlots 한 칸 (또는 본문 밖 자리 {text}), text: 고친 설명
-export function buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode } = {}) {
+// 맥락으로 같이 보내는 글(제목·소제목·앞뒤 문장)에서 상품 이름·브랜드·모델명·가격·인증·순위 표현을 지움 (AI가 그대로 그리지 않게)
+const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const CTX_PRICE = /(\d{1,3}(,\d{3})+|\d{3,})\s*원|\d+(\.\d+)?\s*만\s*원|₩\s*\d[\d,]*|\$\s?\d[\d,.]*|\d[\d,.]*\s*(달러|USD)/gi;
+const CTX_CLAIM = /KC\s*(인증|마크)|인증\s*(마크|서)?|특허|판매\s*1위|\d+\s*위|1등(?!급)|베스트\s*셀러|(?<![가-힣])수상(?!한|하|스키|쩍|레저|가옥)/gi;
+const CTX_MODEL = /\b[A-Za-z]{1,6}[-\s]?\d{1,5}[A-Za-z0-9-]*\b/g;
+export function sanitizeContext(text, hide = []) {
+  let t = String(text || '');
+  const words = [...new Set((hide || []).map((w) => String(w || '').trim()).filter((w) => w.length >= 2))].sort((a, b) => b.length - a.length);
+  for (const w of words) t = t.replace(new RegExp(escRe(w), 'gi'), '제품');
+  return t.replace(CTX_PRICE, '').replace(CTX_CLAIM, '').replace(CTX_MODEL, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
+}
+
+// post: {titles, keyword}, slot: parseSlots 한 칸 (또는 본문 밖 자리 {text}), text: 고친 설명, hide: 연결 상품의 브랜드·이름 (맥락에서 지움)
+export function buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode, hide } = {}) {
   const st = STYLES[style] || STYLES[DEFAULT_STYLE];
   const pu = PURPOSES[purpose] || PURPOSES.blog_body;
   const r = ratioOf(purpose, ratio);
-  const title = clip((post && ((post.titles && post.titles[0]) || post.keyword)) || '', 120);
+  const sc = (s, n) => clip(sanitizeContext(s, hide), n);
+  const title = sc((post && ((post.titles && post.titles[0]) || post.keyword)) || '', 120);
   const scene = clip(text != null && String(text).trim() ? text : (slot && slot.text) || '', 300);
   const lines = [];
   lines.push(mode === 'edit'
     ? 'Edit the provided image for a Korean blog post. Keep what works and apply the change below.'
     : 'Create an illustrative image for a Korean blog post.');
   if (title) lines.push(`Post topic (Korean): ${title}`);
-  if (slot && slot.heading) lines.push(`Section heading (Korean): ${clip(slot.heading, 120)}`);
-  const ctx = [slot && slot.before, slot && slot.after].filter(Boolean).map((x) => clip(x, 160)).join(' / ');
+  const heading = slot && slot.heading ? sc(slot.heading, 120) : '';
+  if (heading) lines.push(`Section heading (Korean): ${heading}`);
+  const ctx = [slot && slot.before, slot && slot.after].filter(Boolean).map((x) => sc(x, 160)).filter(Boolean).join(' / ');
   if (ctx) lines.push(`Nearby text for context only (Korean, do not render it): ${ctx}`);
   lines.push(`${mode === 'edit' ? 'Change to make' : 'Scene to show'} (Korean): ${scene}`);
   lines.push(`Style: ${st.prompt}`);
@@ -210,19 +255,34 @@ export function buildPrompt({ post, slot, text, style, purpose, ratio, extra, mo
 // ───────── 위험 표현 검사 ─────────
 // 이미지에 넣으면 안 되는 요청. block = 생성을 막음, warn = 알려만 줌. brands: 이 글에 연결된 상품 브랜드
 const PROMPT_RISKS = [
-  ['block', /(로고|상표|트레이드\s*마크|브랜드\s*(이름|명|로고|마크))|\blogo|\btrademark/i, 'logo', '상표·로고는 이미지로 만들 수 없어. 실제 상품 이미지는 공식 이미지나 직접 찍은 사진을 써줘.'],
-  ['block', /\d[\d,.]*\s*(원|만\s*원|₩)|₩\s*\d|가격\s*(표|표시|태그)|최저가|할인율|\bprice\s*tag/i, 'price', '이미지에 가격을 넣으면 안 돼. 가격은 본문에 확인한 날짜와 함께 써줘.'],
+  ['block', /(로고|상표|트레이드\s*마크|브랜드\s*(이름|명|로고|마크))|\blogos?\b|\btrademarks?\b/i, 'logo', '상표·로고는 이미지로 만들 수 없어. 실제 상품 이미지는 공식 이미지나 직접 찍은 사진을 써줘.'],
+  ['block', /(\d{1,3}(,\d{3})+|\d{3,})\s*원|\d+(\.\d+)?\s*만\s*원|₩\s*\d|가격\s*(표|표시|태그)|최저가|할인율|\bprice\s*tags?\b/i, 'price', '이미지에 가격을 넣으면 안 돼. 가격은 본문에 확인한 날짜와 함께 써줘.'],
   ['warn', /가격/, 'price_word', "'가격'이 들어 있어. 이미지에는 가격이 그려지지 않게 할게 (가격은 본문에만)."],
-  ['block', /(인증\s*(마크|서)|KC\s*마크|특허|판매\s*1위|1위|1등|베스트\s*셀러|수상|\bcertified|\baward)/i, 'claim', '인증·순위·수상 같은 표시는 이미지로 만들면 안 돼.'],
-  ['block', /(후기\s*사진|리뷰\s*사진|실사용\s*(사진|샷)|내돈내산|구매\s*인증|언박싱|\bunboxing)/i, 'review', '실제로 써본 것처럼 보이는 후기 사진은 만들 수 없어.'],
-  ['block', /(글자|문구|텍스트|자막|제목을?\s*넣|타이포|\btext\b|\bcaption|\btypography)/i, 'text', "이미지 안에 글자는 넣지 않아. 글자는 '카드뉴스 만들기'에서 따로 얹어줘."],
+  ['block', /(인증\s*(마크|서)|KC\s*마크|특허|판매\s*1위|1위|1등(?!급)|베스트\s*셀러|(?<![가-힣])수상(?!한|하|스키|쩍|레저|가옥)|\bcertified\b|\bawards?\b)/i, 'claim', '인증·순위·수상 같은 표시는 이미지로 만들면 안 돼.'],
+  ['block', /(후기\s*사진|리뷰\s*사진|실사용\s*(사진|샷)|내돈내산|구매\s*인증|언박싱|\bunboxing\b)/i, 'review', '실제로 써본 것처럼 보이는 후기 사진은 만들 수 없어.'],
+  ['block', /(글자|문구(?!점)|텍스트|자막|제목을?\s*넣|타이포|\btext\b|\bcaptions?\b|\btypography\b)/i, 'text', "이미지 안에 글자는 넣지 않아. 글자는 '카드뉴스 만들기'에서 따로 얹어줘."],
 ];
+// '글자 없이', '로고 빼고', 'no text' 처럼 넣지 말라는 뜻이면 막지 않음
+const NEG_AFTER = /^\s*(이|가|은|는|을|를|도|이나)?\s*(없이|없는|없게|빼고|빼서|말고|제외|금지|넣지|안\s*(넣|보이|들어|나오)|X(?![A-Za-z]))/;
+const NEG_BEFORE = /\b(no|without|not|non|zero)[\s-]*$/i;
+function riskHit(re, t) {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+  let m;
+  while ((m = g.exec(t))) {
+    if (!m[0]) { g.lastIndex++; continue; }
+    const after = t.slice(m.index + m[0].length, m.index + m[0].length + 14);
+    const before = t.slice(Math.max(0, m.index - 12), m.index);
+    if (NEG_AFTER.test(after) || NEG_BEFORE.test(before)) continue;
+    return true;
+  }
+  return false;
+}
 export function promptRisk(text, brands = []) {
   const t = String(text || '');
   const out = [];
   for (const [level, re, code, msg] of PROMPT_RISKS) {
     if (code === 'price_word' && out.some((x) => x.code === 'price')) continue;
-    if (re.test(t)) out.push({ level, code, msg });
+    if (riskHit(re, t)) out.push({ level, code, msg });
   }
   const hit = (brands || []).map((b) => String(b || '').trim()).filter((b) => b.length >= 2).find((b) => t.toLowerCase().includes(b.toLowerCase()));
   if (hit) out.push({ level: 'block', code: 'brand', msg: `'${hit}' 같은 실제 브랜드 이름은 AI 이미지에 넣을 수 없어.` });
@@ -265,6 +325,39 @@ export const QUALITY_LABEL = { low: '낮음(초안)', medium: '보통', high: '�
 export const EDIT_INPUT_TOKENS_EST = 1500;
 export const DEFAULT_PRICES = { image_output_per_m: 30, image_input_per_m: 8, text_input_per_m: 5 };
 const priceOf = (prices, k) => { const n = Number(prices && prices[k]); return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PRICES[k]; };
+
+// ───────── 모델별로 되는 것·가격 (OpenAI 공식 문서, 2026-10-22 확인) ─────────
+// 크기: API 레퍼런스 — 임의 WIDTHxHEIGHT는 gpt-image-2·2.5 계열만, 나머지는 1024x1024·1536x1024·1024x1536
+// 품질: API 레퍼런스 — xhigh·max는 2.5 계열만, 나머지는 low·medium·high
+// 가격: 2.5 계열은 설정의 가격표(기본 = 가격 페이지 Standard), 1.5·1·1-mini는 각 모델 페이지의 장당 가격표와 토큰 가격.
+// gpt-image-2는 가격 페이지 Standard 표에서 확인하지 못해서, 모르는 모델처럼 넉넉하게 잡음
+export const MODEL_CHECKED = '2026-10-22';
+const Q3 = ['low', 'medium', 'high'];
+const per = (a, b) => ({ '1024x1024': a, '1536x1024': b, '1024x1536': b });
+const MODEL_FAMILIES = [
+  { id: 'gpt-image-2.5', re: /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: QUALITIES, settingsPrices: true },
+  { id: 'gpt-image-2', re: /^gpt-image-2(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: Q3, conservative: true },
+  { id: 'gpt-image-1.5', re: /^gpt-image-1\.5(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
+    prices: { image_output_per_m: 32, image_input_per_m: 8, text_input_per_m: 5 },
+    perImage: per({ low: 0.009, medium: 0.034, high: 0.133 }, { low: 0.013, medium: 0.05, high: 0.2 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1.5' },
+  { id: 'gpt-image-1-mini', re: /^gpt-image-1-mini(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
+    prices: { image_output_per_m: 8, image_input_per_m: 2.5, text_input_per_m: 2 },
+    perImage: per({ low: 0.005, medium: 0.011, high: 0.036 }, { low: 0.006, medium: 0.015, high: 0.052 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1-mini' },
+  { id: 'gpt-image-1', re: /^gpt-image-1(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
+    prices: { image_output_per_m: 40, image_input_per_m: 10, text_input_per_m: 5 },
+    perImage: per({ low: 0.011, medium: 0.042, high: 0.167 }, { low: 0.016, medium: 0.063, high: 0.25 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1' },
+];
+// 가격을 모르는 모델: 확인한 모델 중 가장 비싼 값(gpt-image-1)으로 넉넉히 잡고, 사용량으로 계산하지 않음(청구액은 직접 확인)
+const CONSERVATIVE = { prices: { image_output_per_m: 40, image_input_per_m: 10, text_input_per_m: 5 }, perImage: MODEL_FAMILIES.find((f) => f.id === 'gpt-image-1').perImage };
+export function modelCaps(model) {
+  const m = String(model || '').trim();
+  const f = MODEL_FAMILIES.find((x) => x.re.test(m));
+  if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false };
+  return { id: f.id, known: true, flexible: f.flexible, qualities: f.qualities, conservative: !!f.conservative, settingsPrices: !!f.settingsPrices, deprecated: !!f.deprecated, prices: f.prices || null, perImage: f.perImage || null, url: f.url || '' };
+}
+export const qualitiesFor = (model) => (model ? modelCaps(model).qualities : QUALITIES);
+// 모델이 못 받는 품질이면 가까운 것으로 (xhigh·max → high, 그 밖 → medium)
+export const normQuality = (model, q) => { const qs = qualitiesFor(model); return qs.includes(q) ? q : qs.includes('high') && (q === 'xhigh' || q === 'max') ? 'high' : 'medium'; };
 // 프롬프트 토큰 수 어림: 영어·숫자는 약 3.5글자에 1토큰, 한글 등은 1글자에 1.2토큰으로 넉넉하게 (실제 사용량이 오면 그걸로 다시 계산)
 export function estimateTokens(text) {
   const t = String(text || '');
@@ -272,18 +365,42 @@ export function estimateTokens(text) {
   for (const ch of t) { if (ch.charCodeAt(0) < 128) ascii++; else other++; }
   return Math.ceil(ascii / 3.5 + other * 1.2);
 }
-/** @param {{ quality?: string, size?: string, promptChars?: number, promptTokens?: number, mode?: string, prices?: any }} [o] */
-export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode = 'generate', prices } = {}) {
-  const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
-  if (t == null) return null;
-  const out = (t * priceOf(prices, 'image_output_per_m')) / 1e6;
-  const tokens = promptTokens != null ? promptTokens : promptChars; // promptChars 만 주면 글자 수 = 토큰 수로 아주 넉넉히
-  const text = (Math.max(0, tokens) * priceOf(prices, 'text_input_per_m')) / 1e6;
-  const img = mode === 'edit' ? (EDIT_INPUT_TOKENS_EST * priceOf(prices, 'image_input_per_m')) / 1e6 : 0;
+// 임의 크기를 장당 가격표(표준 크기 세 가지)에 맞출 때: 픽셀 수가 1024x1024 이하면 그 값, 넘으면 1536x1024 값 (넉넉한 쪽)
+const perImageSize = (size) => {
+  if (STANDARD_SIZES.includes(size)) return size;
+  const m = /^(\d+)x(\d+)$/.exec(String(size || ''));
+  return m && Number(m[1]) * Number(m[2]) <= 1024 * 1024 ? '1024x1024' : '1536x1024';
+};
+/** @param {{ quality?: string, size?: string, promptChars?: number, promptTokens?: number, mode?: string, prices?: any, model?: string }} [o] */
+export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode = 'generate', prices, model } = {}) {
+  const tokens = Math.max(0, promptTokens != null ? promptTokens : promptChars); // promptChars 만 주면 글자 수 = 토큰 수로 아주 넉넉히
+  const caps = model ? modelCaps(model) : null;
+  if (!caps || caps.settingsPrices) {
+    const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
+    if (t == null) return null;
+    const out = (t * priceOf(prices, 'image_output_per_m')) / 1e6;
+    const text = (tokens * priceOf(prices, 'text_input_per_m')) / 1e6;
+    const img = mode === 'edit' ? (EDIT_INPUT_TOKENS_EST * priceOf(prices, 'image_input_per_m')) / 1e6 : 0;
+    return roundUsd(out + text + img);
+  }
+  if (!caps.qualities.includes(quality)) return null;
+  if (!caps.flexible && !STANDARD_SIZES.includes(size)) return null;
+  const src = caps.perImage ? caps : CONSERVATIVE;
+  const out = src.perImage[perImageSize(size)][quality];
+  const text = (tokens * src.prices.text_input_per_m) / 1e6;
+  const img = mode === 'edit' ? (EDIT_INPUT_TOKENS_EST * src.prices.image_input_per_m) / 1e6 : 0;
   return roundUsd(out + text + img);
 }
-export function usageUsd(usage, prices) {
+// 실제 사용량(usage) × 그 모델의 가격. 가격을 모르는 모델이면 null (예상치만 남기고 청구액은 직접 확인)
+export function usageUsd(usage, prices, model) {
   if (!usage || typeof usage !== 'object') return null;
+  if (model) {
+    const caps = modelCaps(model);
+    if (!caps.settingsPrices) {
+      if (!caps.prices) return null;
+      prices = caps.prices;
+    }
+  }
   const d = usage.input_tokens_details || {};
   const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
   const textIn = d.text_tokens != null || d.image_tokens != null ? n(d.text_tokens) : n(usage.input_tokens);
@@ -483,7 +600,9 @@ export function captionHint(img) {
 export const altTextFor = (text) => clip(String(text || '').replace(/\s*(사진|이미지)$/, ''), 120);
 // 내려받을 파일 이름: 본문 자리는 '키워드-01-blog_body.jpg' (사진 순서), 본문 밖 자리는 '키워드-cover.jpg'
 export function fileNameFor(post, n, purpose, ext) {
-  const base = String((post && (post.keyword || (post.titles && post.titles[0]))) || '글공장').replace(/[\\/:*?"<>|\s]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 30) || '글공장';
+  const base = String((post && (post.keyword || (post.titles && post.titles[0]))) || '글공장')
+    .replace(/[\u0000-\u001f\u007f​-‏‪-‮⁦-⁩﻿]/g, '') // 보이지 않는 글자·방향 바꾸는 글자
+    .replace(/[\\/:*?"<>|\s]+/g, '-').replace(/-+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 30) || '글공장';
   if (typeof n === 'string') return `${base}-${n.replace(/[^a-z0-9_-]/gi, '') || 'image'}.${ext || 'jpg'}`;
   return `${base}-${String(n).padStart(2, '0')}${purpose ? '-' + purpose : ''}.${ext || 'jpg'}`;
 }

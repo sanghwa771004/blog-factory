@@ -30,6 +30,9 @@
 | DB | 새 표 5개 모두 RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수 9개는 `search_path = ''`·service_role만 실행 | `012` 8번, `tests/sql_images.test.js` |
 | 지우기 | 이미지는 어느 원고(휴지통 포함)·카드뉴스에서 쓰면 못 지움. 원고를 지워도 이미지는 남음. DB에서 먼저 지움 표시 후 파일 삭제 | `012` image_delete, `index.ts` deleteImage |
 | 로그·오류 | OpenAI·Pexels 오류 문구에서 키처럼 생긴 글자를 가림. 생성 기록에 프롬프트는 남지만 키는 남지 않음 | `image_service.js` scrub |
+| AI에 보내는 내용 | 사용자가 쓴 설명은 로고·가격·인증·순위·후기 사진·글자·연결 상품 브랜드를 서버에서도 막음('없이·빼고·no' 같은 부정은 통과). 맥락(제목·소제목·앞뒤 문장)은 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄. 실제 구성품·라벨·화면이 필요한 자리는 '일반 장면' 확인 없이는 거절하고, 확인하면 그 사실을 생성 기록(risk_override)에 남김 | `images.js` promptRisk·sanitizeContext·slotRisk, `index.ts` generateImage |
+| 동시에 지우기·연결하기 | 연결할 때 이미지 줄을 잠그고(FOR SHARE) 다시 확인 → 지우는 중인 이미지에 연결되지 않음. 카드뉴스 배경은 저장 뒤 한 번 더 확인 | `012` image_slot_upsert, `index.ts` saveCards |
+| 서버 일꾼 시간 | 무료 요금제 일꾼은 켜진 뒤 150초까지만 일함 → 품질별로 기다릴 시간이 남았을 때만 OpenAI를 부르고(모자라면 돈이 나가기 전에 '잠깐 뒤에'), 시간 제한은 부르기 직전에 남은 시간으로 다시 계산, 응답 본문을 읽는 동안에도 적용 | `index.ts` DEADLINE·NEED_MS, `image_service.js` runGeneration·timed |
 
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)
 - 로그인 없이 `/state` → 401, 가짜 세션 → 401, 틀린 코드 로그인 → 401

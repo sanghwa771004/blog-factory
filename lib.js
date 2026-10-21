@@ -34,19 +34,26 @@ export const pct = (r) => (r == null ? '' : `${(r * 100).toFixed(r < 0.1 ? 2 : 1
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const safeUrl = (u) => { u = String(u || '').trim(); return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : ''; };
 // 미리보기에 띄울 이미지 주소: https(서명 주소)·blob(이 기기에서 만든 것)·같은 곳(테스트)만
-export const safeImgUrl = (u) => { u = String(u || ''); return /^(https:\/\/|blob:|\/|http:\/\/127\.0\.0\.1[:/])[^\s"'<>]*$/i.test(u) ? u : ''; };
+// (//로 시작하는 다른 곳 주소는 막음, http://127.0.0.1 은 이 기기에서 시험할 때만)
+const LOCAL_TEST = typeof location !== 'undefined' && location.hostname === '127.0.0.1';
+export const safeImgUrl = (u) => {
+  u = String(u || '');
+  if (/^(https:\/\/|blob:|\/(?!\/))[^\s"'<>]*$/i.test(u)) return u;
+  return LOCAL_TEST && /^http:\/\/127\.0\.0\.1[:/][^\s"'<>]*$/i.test(u) ? u : '';
+};
 
 // ───────── ZIP 만들기 (압축 없이 묶기만 — 사진은 이미 압축돼 있음) ─────────
 // files: [{ name, bytes: Uint8Array }] → ZIP 파일 바이트. 한글 파일 이름은 UTF-8 표시(0x0800)
 const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 export function crc32(b) { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+// 같은 이름이 있으면 -2, -3… (이미 그런 이름이 있으면 그다음 번호) — ZIP 안에서 파일이 겹치지 않게
 export function uniqueNames(names) {
-  const seen = new Map();
+  const used = new Set();
   return names.map((n) => {
-    const k = n.toLowerCase();
-    const c = (seen.get(k) || 0) + 1;
-    seen.set(k, c);
-    return c === 1 ? n : n.replace(/(\.[a-z0-9]+)?$/i, (ext) => `-${c}${ext}`);
+    let out = n, c = 1;
+    while (used.has(out.toLowerCase())) { c++; out = n.replace(/(\.[a-z0-9]+)?$/i, (ext) => `-${c}${ext}`); }
+    used.add(out.toLowerCase());
+    return out;
   });
 }
 export function makeZip(files, date = new Date()) {
@@ -139,7 +146,7 @@ export function exportHtml(post, { links, programs, images } = {}) {
       const n = b.full ? ++pic : 0;
       if (im && im.fileName) {
         // 앱이 블로그에 사진을 대신 올리지 않음 → 내려받은 파일 이름을 적어 두고, 붙여넣은 뒤 그 자리에 직접 넣음
-        out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 사진 ${n}: 내려받은 「${esc(im.fileName)}」을 여기에 넣어줘<br><small>${esc(b.text)}</small></p>`);
+        out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 사진 ${n}: 내려받은 「${esc(im.fileName)}」 파일을 여기에 넣어줘<br><small>${esc(b.text)}</small></p>`);
         if (im.caption) out.push(`<p style="text-align:center;color:#777;font-size:.85em;margin:-.6em 0 1.2em;">${esc(im.caption)}</p>`);
       } else out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 ${n ? '사진 ' + n + ': ' : ''}${esc(b.text)} (여기에 사진 넣기)</p>`);
     }

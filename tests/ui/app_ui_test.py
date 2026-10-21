@@ -147,6 +147,8 @@ class Mock:
         self.keys = {'openai': True, 'pexels': True}
         self.server_secret = SECRET_MARK
         self.images, self.slots, self.gens, self.decks, self.polls = [], [], [], {}, {}
+        self.min_est = None   # 서버 쪽 예상 비용이 더 크다고 답하게 (estimate_changed 시험)
+        self.busy_left = 0    # 이 횟수만큼 server_busy 로 답하게 (서버 일꾼 시간 부족 시험)
         self.settings.update({'image_gen_model': 'gpt-image-2.5-flare', 'image_edit_model': 'gpt-image-2.5-sunburst', 'image_quality': 'medium',
                               'image_daily_limit': 5, 'image_monthly_budget_usd': 2, 'image_fx_krw': 1400, 'image_fx_date': D(-1), 'image_fx_source': '테스트 환율',
                               'image_prices': {'image_output_per_m': 30, 'image_input_per_m': 8, 'text_input_per_m': 5, 'checked_at': '2026-10-22',
@@ -386,8 +388,13 @@ class Mock:
                 return 200, {'generation': dup, 'duplicate': True}
             if any(g['status'] == '생성 중' for g in self.gens):
                 return 409, {'error': 'image_busy'}
+            if self.busy_left > 0:
+                self.busy_left -= 1
+                return 503, {'error': 'server_busy', 'retry_after': 1}
             if not isinstance(body.get('confirm_usd'), (int, float)):
                 return 409, {'error': 'estimate_changed', 'est_usd': 0.0111}
+            if self.min_est and body['confirm_usd'] + 1e-9 < self.min_est:
+                return 409, {'error': 'estimate_changed', 'est_usd': self.min_est}
             g = {'id': self.new_id(), 'request_key': body['request_key'], 'post_id': body['post_id'], 'slot_key': body['slot_key'], 'mode': body.get('mode', 'generate'),
                  'model': self.settings['image_edit_model' if body.get('mode') == 'edit' else 'image_gen_model'], 'size': '1280x960', 'quality': body.get('quality', 'medium'),
                  'purpose': body.get('purpose'), 'style': body.get('style'), 'user_prompt': body.get('text', ''), 'status': '생성 중', 'provider_called': True,
@@ -675,7 +682,8 @@ def main():
             page.get_by_role('button', name='원고 요청하기').click()
             expect(page.locator('#toast')).to_contain_text('요청했어')
             # 요청하면 새 원고 화면으로 넘어감 (넘어간 걸 확인하고 다음 테스트로)
-            page.wait_for_function("location.hash.startsWith('#content/post/')")
+            # (CSP가 eval을 막아서 wait_for_function 문자열 대신 주소를 바깥에서 확인)
+            expect(page).to_have_url(re.compile(r'#content/post/'))
             expect(page.locator('.badge', has_text='원고 생성 대기').first).to_be_visible()
             req = [c for c in mock.calls if c['path'] == 'posts' and c['method'] == 'POST'][-1]['body']
             assert req['keyword'] == '원룸 가습기 고르는 법' and req['channel_id'] == 'naver_blog', req
@@ -768,7 +776,8 @@ def main():
             expect(sheet).to_contain_text('예상 $0.01')
             expect(sheet).to_contain_text('실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어')
             expect(sheet).to_contain_text('오늘 0/5번')
-            go_btn = sheet.get_by_role('button', name=re.compile('들여서 만들기'))
+            # 버튼에는 '예상' 비용이라고 밝힘 (실제 청구액과 다를 수 있음)
+            go_btn = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
             expect(go_btn).to_be_enabled()
             # 위험한 요청은 버튼이 잠김 (화면에서 먼저 막고, 서버도 다시 막음)
             extra = sheet.locator('label', has_text='더 원하는 것').locator('textarea')
@@ -1012,6 +1021,95 @@ def main():
             shot('17-library')
         check('설정 > 이미지(키 상태·한도 저장, 키는 화면에 없음), 수익 탭 이미지 비용(따로 셈), 보관함(쓰는 이미지는 못 지움)', t_img_settings_money_library)
 
+        # 따로 검토에서 재현된 문제들 (1.2.0 검토)
+        def t_review_regressions():
+            import zipfile
+            open_p8()
+            cards = page.locator('section.studio .slot')
+            sheet = page.locator('#sheet')
+            # H1: 검수 버튼으로 기록이 새로 바뀐 뒤에 자르는 곳을 저장해도, 다시 열면·모두 내려받기에서 그대로
+            cards.nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            expect(sheet.locator('.crop img')).to_be_visible()
+            sheet.get_by_role('button', name='검수 전', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('검수 전')
+            page.wait_for_timeout(300)
+            sheet.get_by_role('button', name='4:3').click()
+            sheet.get_by_role('button', name='자르는 곳 저장').click()
+            expect(page.locator('#toast')).to_contain_text('이대로 잘라')
+            sheet.get_by_role('button', name='닫기').click()
+            cards.nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            expect(sheet.get_by_role('button', name='4:3')).to_have_attribute('aria-pressed', 'true')
+            sheet.get_by_role('button', name='16:9').click()
+            sheet.get_by_role('button', name='자르는 곳 저장').click()
+            expect(page.locator('#toast')).to_contain_text('이대로 잘라')
+            sheet.get_by_role('button', name='사용 가능', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('사용 가능')
+            sheet.get_by_role('button', name='닫기').click()
+            cards.nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            expect(sheet.get_by_role('button', name='16:9')).to_have_attribute('aria-pressed', 'true')
+            sheet.get_by_role('button', name='닫기').click()
+            page.get_by_role('button', name=re.compile(r'모두 내려받기')).click()
+            zb = sheet.get_by_role('button', name=re.compile('ZIP으로 받기|내려받기|장 저장하기'))
+            expect(zb).to_be_enabled(timeout=10000)
+            with page.expect_download() as d:
+                zb.click()
+            path = OUT / ('review-' + d.value.suggested_filename)
+            d.value.save_as(str(path))
+            from PIL import Image
+            if str(path).endswith('.zip'):
+                with zipfile.ZipFile(path) as zf:
+                    first = sorted(n for n in zf.namelist() if '-01-' in n)[0]
+                    size = Image.open(io.BytesIO(zf.read(first))).size
+            else:
+                size = Image.open(path).size
+            assert size == (1280, 720), f'모두 내려받기가 저장한 16:9 자르기를 안 씀: {size}'
+            sheet.get_by_role('button', name='닫기').click()
+            # 실제 구성품이 보여야 하는 자리: '일반 장면' 확인을 해야만 AI 버튼이 눌리고, 서버에도 그 확인을 보냄
+            ai_sheet = lambda i: (cards.nth(i).get_by_role('button', name='바꾸기', exact=True).click(), sheet.get_by_role('button', name='AI로 새로 만들기').click())
+            ai_sheet(1)
+            expect(sheet).to_contain_text('실제 상품·화면이 보여야 하는 자리')
+            go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
+            expect(go).to_be_disabled()
+            sheet.get_by_label(re.compile('일반 장면으로 만들게')).check()
+            expect(go).to_be_enabled()
+            # 적던 내용이 있으면 창 밖을 눌러도 안 닫힘 ('닫기'만 닫음)
+            sheet.locator('label', has_text='더 원하는 것').locator('textarea').fill('위에서 내려다본 구도')
+            page.locator('#dim').click(position={'x': 20, 'y': 20}, force=True)
+            expect(page.locator('#toast')).to_contain_text('적던 내용이 있어서 안 닫았어')
+            expect(sheet).to_be_visible()
+            sheet.get_by_role('button', name='닫기').click()
+            expect(sheet).to_be_hidden()
+            # M2: '서버가 바빠'로 기다리는 중에 창을 닫으면, 누르지 않은 생성이 시작되지 않음
+            n0 = len(mock.gens)
+            mock.busy_left = 5
+            ai_sheet(0)
+            sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기')).click()
+            expect(sheet).to_contain_text('같은 요청으로 다시 보낼게')
+            sheet.get_by_role('button', name='닫기').click()
+            page.wait_for_timeout(3500)
+            assert len(mock.gens) == n0, '창을 닫았는데 생성이 시작됨'
+            assert not page.locator('#sheet').is_visible(), '닫은 뒤에 다른 창이 다시 열림'
+            mock.busy_left = 0
+            # H2: 서버가 더 큰 예상 비용을 알려주면 그 값을 보여주고, 다시 누르면 그 값으로 확인해서 만들어짐 (같은 값만 계속 보내지 않음)
+            mock.min_est = 0.05
+            ai_sheet(0)
+            sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기')).click()
+            expect(sheet).to_contain_text('서버에서 다시 계산한 예상 비용이 $0.0500')
+            go2 = sheet.get_by_role('button', name=re.compile(r'예상 \$0\.0500 · 만들기'))
+            expect(go2).to_be_enabled()
+            go2.click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=15000)
+            reqs = [c for c in mock.calls if c['path'] == 'images/generate']
+            assert reqs[-1]['body']['confirm_usd'] >= 0.05, reqs[-1]['body']
+            mock.min_est = None
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            # M3: 원고 요청의 수익 모델 줄(.prog)은 예전 모양 그대로 (이미지 진행 표시와 이름이 겹치지 않음)
+            goto_hash('content/new')
+            prog = page.locator('.prog').first
+            expect(prog).to_be_visible()
+            assert prog.evaluate('(e) => getComputedStyle(e).flexDirection') == 'column'
+        check('검토 회귀: 자르기 저장 유지·모두 내려받기, 실제 사진 자리 확인, 서버 바쁨 중 닫기, 서버 예상 비용 반영, 기존 화면 모양', t_review_regressions)
+
         def t_img_no_keys():
             mock.keys = {'openai': False, 'pexels': False}
             page.get_by_role('button', name='새로고침').click()
@@ -1021,7 +1119,7 @@ def main():
             page.locator('section.studio .slot').nth(0).get_by_role('button', name='바꾸기', exact=True).click()
             page.locator('#sheet').get_by_role('button', name='AI로 새로 만들기').click()
             expect(page.locator('#sheet')).to_contain_text('OpenAI 키가 없어서 아직 못 만들어')
-            expect(page.locator('#sheet').get_by_role('button', name=re.compile('들여서 만들기'))).to_be_disabled()
+            expect(page.locator('#sheet').get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))).to_be_disabled()
             page.locator('#sheet').get_by_role('button', name='닫기').click()
             page.locator('section.studio .slot').nth(0).get_by_role('button', name='바꾸기', exact=True).click()
             page.locator('#sheet').get_by_role('button', name='실제 사진 찾기 (Pexels)').click()

@@ -9,6 +9,7 @@ import {
   buildPrompt, PROMPT_RULES, promptRisk, blocksOf, slotRisk, descriptionMismatch, estimateUsd, usageUsd, OUTPUT_TOKENS, QUALITIES,
   sniffImage, checkImageFile, MAX_UPLOAD_BYTES, attributionFor, captionHint, altTextFor, fileNameFor, deckFromPost, EXTRA_SLOTS, isExtraKey, fmtUsd,
   stripMetadata, validSlotKey, slotPurpose, extraSlot, sameRatio, orientationFor, searchSuggestions, imageChecks, extOf, estimateTokens,
+  ctxOf, modelCaps, qualitiesFor, normQuality, sanitizeContext, STANDARD_SIZES,
 } from '../images.js';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
@@ -95,6 +96,50 @@ describe('연결 맞추기 (원고를 고치거나 다시 만들어도 연결이
     assert.equal(m.slots[0].link, null);
     assert.equal(m.orphans.length, 1);
   });
+  // 리뷰에서 재현된 경우들: 같은 설명이 여러 번 있을 때 몇 번째인지만 보고 섞거나, 설명을 다시 쓰면 연결이 떨어지던 것
+  const DUP = ['## 거실', '거실 창가에 두었어요.', '[이미지: 히터 사진]', '바람이 잘 퍼져요.', '## 침실', '침대 옆에 두었어요.', '[이미지: 히터 사진]', '조용해요.'].join('\n');
+  const rowsCtx = (s) => s.map((x, i) => ({ id: 'r' + i, slot_key: x.key, slot_index: x.index, slot_text: x.text, slot_ctx: ctxOf(x), image_id: 'IMG_' + (i + 1) }));
+  test('같은 설명 두 자리 중 첫째 설명만 고쳐도 이미지가 서로 바뀌지 않음 (주변 글로 구분)', () => {
+    const before = parseSlots(DUP);
+    const after = parseSlots(DUP.replace('[이미지: 히터 사진]', '[이미지: 히터 사진 두 개]'));
+    const m = matchSlots(after, rowsCtx(before));
+    assert.deepEqual(m.slots.map((x) => x.link && x.link.image_id), ['IMG_1', 'IMG_2']);
+    assert.equal(m.orphans.length, 0);
+    // 둘째 자리는 열쇠가 '#2' → '#1'로 바뀌고 첫째는 새 설명으로 → 서로 자리를 비켜야 하는 두 번 옮기기
+    assert.deepEqual(m.rekeys.map((r) => [r.from, r.to]).sort(), [[before[0].key, after[0].key], [before[1].key, after[1].key]].sort());
+  });
+  test('같은 설명 두 자리 중 첫째를 지우면, 남은 자리는 둘째 이미지를 그대로 (첫째 이미지는 사라진 자리로)', () => {
+    const before = parseSlots(DUP);
+    const after = parseSlots(DUP.replace('[이미지: 히터 사진]', ''));
+    const m = matchSlots(after, rowsCtx(before));
+    assert.equal(m.slots.length, 1);
+    assert.equal(m.slots[0].link.image_id, 'IMG_2');
+    assert.deepEqual(m.orphans.map((o) => o.image_id), ['IMG_1']);
+  });
+  test('같은 위치에서 설명만 새로 쓰면(주변 글은 그대로) 연결을 옮김, 원고를 통째로 다시 쓰면 함부로 옮기지 않음', () => {
+    const before = parseSlots(DUP);
+    const rewritten = parseSlots(DUP.replace('[이미지: 히터 사진]', '[이미지: 창가 바닥에 둔 작은 난방기]'));
+    const m = matchSlots(rewritten, rowsCtx(before));
+    assert.equal(m.slots[0].link.image_id, 'IMG_1', '주변 글이 그대로라 같은 자리로 봄');
+    const regen = parseSlots('## 고르는 법\n전기세가 걱정이면\n[이미지: 전기 요금 고지서와 계산기]\n## 보관\n여름에는\n[이미지: 옷장 위 보관 상자]');
+    const m2 = matchSlots(regen, rowsCtx(before));
+    assert.ok(m2.slots.every((x) => !x.link), '내용이 다 바뀌면 사라진 자리로 남겨서 사용자가 고르게');
+    assert.equal(m2.orphans.length, 2);
+  });
+  test('옮길 자리를 연결이 끊긴 다른 이미지 줄이 차지하고 있으면 알려줌 (서버가 먼저 비켜 놓음)', () => {
+    const before = parseSlots(DUP);
+    const r = rowsCtx(before);
+    // 첫째 줄의 열쇠를 가진 '사라진 자리' 이미지가 하나 더 있는 경우
+    const after = parseSlots(DUP.replace('[이미지: 히터 사진]', ''));
+    const m = matchSlots(after, r);
+    assert.equal(m.slots[0].rekey && m.slots[0].rekey.to, after[0].key);
+    assert.deepEqual(m.blockers.map((b) => b.image_id), ['IMG_1']);
+  });
+  test("설명 없는 '[이미지]' 자리도 연결할 수 있는 열쇠", () => {
+    const s = parseSlots('글\n[이미지]\n끝\n[이미지:  ]');
+    assert.deepEqual(s.map((x) => x.key), ['k:_#1', 'k:_#2']);
+    assert.ok(s.every((x) => validSlotKey(x.key)));
+  });
   test('본문 밖 이미지(x:)는 본문 자리와 섞지 않음', () => {
     const cur = parseSlots(BODY);
     const m = matchSlots(cur, [{ slot_key: 'x:cover', slot_index: 0, slot_text: '대표', image_id: 'c' }]);
@@ -171,6 +216,51 @@ describe('프롬프트', () => {
   });
 });
 
+describe('모델마다 되는 크기·품질·가격 (OpenAI 문서 2026-10-22)', () => {
+  test('2.5 계열: 원하는 비율 그대로, 품질 5단계 / 이전 모델: 표준 크기 세 가지, 품질 3단계', () => {
+    assert.equal(modelCaps('gpt-image-2.5-flare').flexible, true);
+    assert.equal(modelCaps('gpt-image-2.5-sunburst-2026-09-08').flexible, true);
+    assert.deepEqual(qualitiesFor('gpt-image-2.5-flare'), QUALITIES);
+    assert.deepEqual(qualitiesFor('gpt-image-1.5'), ['low', 'medium', 'high']);
+    assert.equal(modelCaps('gpt-image-2').flexible, true);
+    assert.equal(modelCaps('gpt-image-2').conservative, true, '가격을 확인 못 한 모델');
+    for (const m of ['gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'my-new-model']) assert.equal(modelCaps(m).flexible, false, m);
+    assert.equal(modelCaps('gpt-image-1-mini').id, 'gpt-image-1-mini', '1-mini 를 1로 잘못 읽지 않음');
+    assert.equal(sizeFor('blog_cover', '16:9', 'gpt-image-2.5-flare'), '1536x864');
+    assert.equal(sizeFor('blog_cover', '16:9', 'gpt-image-1.5'), '1536x1024');
+    assert.equal(sizeFor('ig_story', '9:16', 'gpt-image-1.5'), '1024x1536');
+    assert.equal(sizeFor('general', '1:1', 'gpt-image-1'), '1024x1024');
+    assert.ok(['1536x1024', '1024x1536', '1024x1024'].every((x) => STANDARD_SIZES.includes(x)));
+    assert.equal(normQuality('gpt-image-1.5', 'xhigh'), 'high');
+    assert.equal(normQuality('gpt-image-1.5', 'max'), 'high');
+    assert.equal(normQuality('gpt-image-2.5-flare', 'max'), 'max');
+  });
+  test('예상 비용: 1.5는 모델 페이지 장당 가격, 모르는 모델은 넉넉히(gpt-image-1 값), 사용량 비용은 그 모델 가격으로', () => {
+    const e15 = estimateUsd({ quality: 'medium', size: '1024x1024', promptTokens: 0, model: 'gpt-image-1.5' });
+    assert.equal(e15, 0.034, 'gpt-image-1.5 medium 1024² = $0.034 (2.5 계산이면 약 $0.013 → 2.6배 낮게 잡을 뻔)');
+    assert.equal(estimateUsd({ quality: 'high', size: '1536x1024', promptTokens: 0, model: 'gpt-image-1' }), 0.25);
+    assert.equal(estimateUsd({ quality: 'xhigh', size: '1024x1024', model: 'gpt-image-1.5' }), null, '못 받는 품질은 계산 안 함');
+    assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', model: 'gpt-image-1.5' }), null, '못 받는 크기');
+    assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0, model: 'gpt-image-2' }), 0.063, '가격 모르는 모델은 넉넉히');
+    assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0, model: 'gpt-image-2.5-flare' }), estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0 }));
+    const u = { input_tokens_details: { text_tokens: 100, image_tokens: 0 }, output_tokens: 1000 };
+    assert.equal(usageUsd(u, null, 'gpt-image-1.5'), 0.0325, '100×$5 + 1000×$32 (100만 토큰당)');
+    assert.equal(usageUsd(u, null, 'some-unknown-model'), null, '가격을 모르면 계산하지 않음');
+    assert.equal(usageUsd(u, { image_output_per_m: 30, image_input_per_m: 8, text_input_per_m: 5 }, 'gpt-image-2.5-flare'), 0.0305);
+  });
+});
+
+describe('맥락 글 정리 (AI에 보내기 전)', () => {
+  test('연결 상품 이름·브랜드·모델명·가격·인증 표현을 지움', () => {
+    const t = sanitizeContext('다이슨 V12 무선청소기 보관법 — 39,000원이고 KC 인증을 받았어요. 판매 1위', ['다이슨', 'V12 디텍트 슬림']);
+    assert.ok(!/다이슨|V12|39,000|KC|1위/.test(t), t);
+    assert.match(t, /무선청소기 보관법/);
+    const p = buildPrompt({ post: { titles: ['다이슨 V12 무선청소기 보관법'] }, slot: { text: '보관하는 모습', heading: '다이슨 정리', before: '이 히터는 39,000원이고 KC 인증을 받았어요.', after: '' }, text: '보관하는 모습', hide: ['다이슨'] });
+    assert.ok(!/다이슨|39,000|KC/.test(p), p);
+    assert.ok(PROMPT_RULES.some((r) => /packaging, component layouts, labels/.test(r)), '구성품·라벨 그리지 말라는 규칙');
+  });
+});
+
 describe('위험 표현', () => {
   test('막는 요청: 로고·가격 숫자·최저가·인증·순위·후기 사진·글자·연결 상품 브랜드', () => {
     const codes = (t, b) => blocksOf(promptRisk(t, b)).map((x) => x.code);
@@ -182,6 +272,17 @@ describe('위험 표현', () => {
     assert.deepEqual(codes('제목을 넣어서 글자 크게'), ['text']);
     assert.deepEqual(codes('다이슨 같은 무선청소기', ['다이슨']), ['brand']);
     assert.deepEqual(codes('원룸 책상 옆에 놓인 소형 히터 전경'), []);
+  });
+  test("'글자 없이'·'로고 빼고'·'no text' 처럼 넣지 말라는 말은 막지 않음, 보통 표현을 잘못 막지 않음 (리뷰 지적)", () => {
+    const codes = (t) => blocksOf(promptRisk(t)).map((x) => x.code);
+    for (const t of ['글자 없이 깔끔한 배경', '로고 없이 일반적인 청소기', 'no text, soft light', '글자는 빼고 그림만', 'without logos', '텍스트 없는 배경'])
+      assert.deepEqual(codes(t), [], t);
+    for (const t of ['에너지 소비효율 1등급 냉장고', '수상한 소리가 나는 세탁기', '원룸 3 원룸 구조', '문구점 앞 풍경'])
+      assert.deepEqual(codes(t), [], t);
+    assert.deepEqual(codes('수상 경력 트로피'), ['claim']);
+    assert.deepEqual(codes('1등 상품 표시'), ['claim']);
+    assert.deepEqual(codes('글자를 크게 넣어줘'), ['text'], '넣어달라는 건 그대로 막음');
+    assert.deepEqual(codes('3만원짜리 느낌'), ['price']);
   });
   test("'가격'만 있으면 막지 않고 알려만 줌", () => {
     const r = promptRisk('가격대가 다른 히터 세 개');

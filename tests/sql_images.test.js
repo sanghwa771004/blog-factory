@@ -107,6 +107,15 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       await val(db, `select public.image_gen_fail($1, '{"cost_status":"청구 없음"}'::jsonb)`, [ok.id]);
       await assert.rejects(begin(db, { request_key: '' }), /request_key/);
     });
+
+    test('예상 비용·모델이 빠진 요청은 거절 (예산 검사를 건너뛰지 않게), 사용자가 확인한 말은 기록', async () => {
+      await assert.rejects(begin(db, { request_key: KEY(8), est_usd: undefined }), /est_usd is required/);
+      await assert.rejects(begin(db, { request_key: KEY(8), est_usd: '' }), /est_usd is required/);
+      await assert.rejects(begin(db, { request_key: KEY(8), model: '' }), /model is required/);
+      const g = await begin(db, { request_key: KEY(8), est_usd: 0.001, risk_override: 'generic_ok:구성품' });
+      assert.equal(g.risk_override, 'generic_ok:구성품');
+      await val(db, `select public.image_gen_fail($1, '{"cost_status":"청구 없음","provider_called":false}'::jsonb)`, [g.id]);
+    });
   });
 
   describe('저장·연결', () => {
@@ -126,6 +135,25 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       assert.equal(r.generation.cost_status, '사용량 기준');
       assert.equal(r.generation.image_id, r.image.id);
       await assert.rejects(save(db, { kind: 'ai' }, null, gen.id, {}), /not running/, '이미 끝난 생성에 또 저장 못 함');
+    });
+
+    test('점검용 가짜 모델 결과: 청구 없음·하루 횟수에 안 셈 → 비용 통계의 청구 건수에도 안 들어감', async () => {
+      const g = await begin(db, { request_key: KEY(21), model: 'gf-test-fake', est_usd: 0 });
+      const r = await save(db, { kind: 'ai', provider: '', model: 'gf-test-fake', storage_path: 'ai/test.jpg' }, null, g.id,
+        { usage: { output_tokens: 0 }, usage_usd: 0, cost_status: '청구 없음', provider_called: false });
+      assert.deepEqual([r.generation.status, r.generation.cost_status, r.generation.provider_called], ['성공', '청구 없음', false]);
+      const c = await val(db, `select public.image_costs(null, null, $1)`, [postA]);
+      assert.equal(c.totals.billed, (c.totals.count - 1), '시험 생성은 청구 건수에서 빠짐');
+    });
+
+    test('자리 주변 글(slot_ctx)을 같이 저장하고, 옮길 때 새 자리의 주변 글로 바꿈', async () => {
+      await val(db, `select public.image_slot_upsert($1, $2::jsonb)`, [postB, JSON.stringify({ slot_key: 'k:ctx#1', slot_index: 3, slot_text: 'ctx', slot_ctx: '소제목 | 앞 문장', image_id: null })]);
+      assert.equal((await slotRow(db, postB, 'k:ctx#1')).slot_ctx, '소제목 | 앞 문장');
+      await val(db, `select public.image_slot_upsert($1, $2::jsonb)`, [postB, JSON.stringify({ slot_key: 'k:ctx#1', slot_index: 3, slot_text: 'ctx' })]);
+      assert.equal((await slotRow(db, postB, 'k:ctx#1')).slot_ctx, '소제목 | 앞 문장', '안 보내면 그대로');
+      const i = (await save(db, { storage_path: 'up/ctx.jpg' }, { post_id: postB, slot_key: 'k:ctx#1', slot_index: 3, slot_text: 'ctx' })).image;
+      const moved = await val(db, `select public.image_slot_rekey($1, $2::jsonb)`, [postB, JSON.stringify({ from: 'k:ctx#1', to: 'k:ctx2#1', index: 4, text: 'ctx2', ctx: '새 소제목' })]);
+      assert.deepEqual([moved.slot_key, moved.slot_ctx, moved.image_id], ['k:ctx2#1', '새 소제목', i.id]);
     });
 
     test('다른 이미지로 바꾸면 자르기·내려받음·사용 완료 표시가 초기화, 빼도 자리 줄은 남음', async () => {

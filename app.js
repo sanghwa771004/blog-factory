@@ -81,7 +81,10 @@ function noteDemoted(j) {
 
 // 아래에서 올라오는 창
 let sheetOnClose = null;
+// 창 밖을 누르거나 Esc를 눌렀을 때 닫아도 되는지 (적던 내용·고른 파일이 있으면 안 닫고 알려줌). '닫기' 버튼은 늘 닫음
+let sheetGuard = null;
 function openSheet(title, ...kids) {
+  sheetGuard = null;
   const box = $('#sheetIn');
   box.textContent = '';
   box.append(h('div', { class: 'split' }, h('h2', null, title), btn('닫기', 'sm ghost', closeSheet)), ...kids.flat(Infinity).filter((k) => k != null && k !== false && k !== ''));
@@ -94,8 +97,12 @@ function closeSheet() {
   const f = sheetOnClose; sheetOnClose = null; if (f) f();
   if (pendingRender) render(true); // 창이 열린 동안 미뤄둔 새 내용을 그림
 }
-$('#dim').addEventListener('click', closeSheet);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSheet(); });
+const softClose = () => {
+  if (sheetGuard && !$('#sheet').hidden && sheetGuard() === false) { toast("적던 내용이 있어서 안 닫았어. 닫으려면 '닫기'를 눌러줘."); return; }
+  closeSheet();
+};
+$('#dim').addEventListener('click', softClose);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') softClose(); });
 
 // ───────── 오류 문구 ─────────
 const FIELD = {
@@ -158,17 +165,21 @@ function showError(e) {
 
 // ───────── 서버 ─────────
 let session = LS.get('gf-session', '');
-async function api(path, { method = 'GET', body } = {}) {
+async function api(path, { method = 'GET', body, timeout } = {}) {
   const headers = {};
   if (session) headers['x-app-session'] = session;
   const form = typeof FormData !== 'undefined' && body instanceof FormData; // 파일 올리기 (경계 표시는 브라우저가 붙임)
   if (body !== undefined && !form) headers['content-type'] = 'application/json';
-  let r;
+  // timeout(ms)을 주면 그 안에 답이 없을 때 멈추고 'timeout'으로 알려줌 (응답 본문을 다 받을 때까지)
+  const ctrl = timeout && typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = ctrl ? setTimeout(() => ctrl.abort(), timeout) : null;
+  let r, j = {};
   try {
-    r = await fetch(API + path, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), cache: 'no-store' });
-  } catch { throw { code: 'network' }; }
-  let j = {};
-  try { j = await r.json(); } catch { /* 빈 응답 */ }
+    try {
+      r = await fetch(API + path, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+    } catch { throw { code: ctrl && ctrl.signal.aborted ? 'timeout' : 'network' }; }
+    try { j = await r.json(); } catch { if (ctrl && ctrl.signal.aborted) throw { code: 'timeout' }; /* 빈 응답 */ }
+  } finally { if (timer) clearTimeout(timer); }
   if (r.status === 401 && path !== '/login') { authLost(j.reason === 'expired' ? '오래 안 써서 로그아웃됐어. 접속 코드를 다시 넣어줘.' : ERR.auth); throw { code: 'auth' }; }
   if (!r.ok) throw { ...j, code: j.error || 'server', status: r.status };
   return j;
@@ -220,7 +231,7 @@ function checksFor(p, withOthers) {
 const ST = createStudio({
   h, btn, field, det, opt, L, api: (...a) => api(...a), run: (...a) => run(...a), toast: (...a) => toast(...a), openSheet: (...a) => openSheet(...a), closeSheet: () => closeSheet(),
   confirmBox: (...a) => confirmBox(...a), go: (x) => go(x), load: () => load(), markDirty, clearDirty: () => { dirty = false; },
-  setSheetOnClose: (f) => { sheetOnClose = f; }, copyPlain: (t, b) => copyPlain(t, b), errText: (e) => errText(e), titleOf,
+  setSheetOnClose: (f) => { sheetOnClose = f; }, setSheetGuard: (f) => { sheetGuard = f; }, copyPlain: (t, b) => copyPlain(t, b), errText: (e) => errText(e), titleOf,
   get S() { return S; }, post: (id) => M.post[id], productsOf, slotsOf: (id) => M.slotsBy[id] || [], programs: () => M.prog,
   onImages: (id) => refreshPreview(id), clearStats: () => { S.stats = {}; },
 });
@@ -550,7 +561,8 @@ function postList(ps, { showDate, flags } = {}) {
       const me = countMe(p.body);
       const ic = ST.slotCount(p);
       fl = h('span', { class: 'flags' }, r.errors.length ? h('span', { class: 'flag e' }, `고칠 것 ${r.errors.length}`) : null, me ? h('span', { class: 'flag w' }, `✏️${me}`) : null,
-        ic ? h('span', { class: 'flag ' + (ic.linked === ic.total ? 'ok' : 'i'), title: `사진 자리 ${ic.total}곳 중 ${ic.linked}곳 연결` }, `📷${ic.linked}/${ic.total}`) : null);
+        // 초록은 모든 자리에 '사용 가능'으로 검수한 이미지가 있을 때만 (검수 전·사용 안 함이 있으면 아직)
+        ic ? h('span', { class: 'flag ' + (ic.usable === ic.total ? 'ok' : 'i'), title: `사진 자리 ${ic.total}곳 중 ${ic.linked}곳 연결 · 검수 완료 ${ic.usable}곳` }, `📷${ic.linked}/${ic.total}`) : null);
     }
     return h('div', { class: 'item' },
       h('button', { type: 'button', class: 'main', onclick: () => go('content/post/' + p.id) }, h('b', null, titleOf(p)), h('small', null, meta.join(' · '))),

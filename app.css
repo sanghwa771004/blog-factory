@@ -228,7 +228,7 @@ img.big{display:block;width:100%;height:auto;max-height:50vh;object-fit:contain;
 .crop{position:relative;overflow:hidden;border-radius:10px;cursor:crosshair;line-height:0;background:var(--chip);touch-action:manipulation}
 .crop img{display:block;width:100%;height:auto}
 .crop .win{position:absolute;box-shadow:0 0 0 9999px rgba(0,0,0,.5);border:2px solid #fff;border-radius:4px;pointer-events:none}
-.prog{display:flex;align-items:center;gap:10px;background:var(--accent-soft);border-radius:10px;padding:10px 12px;font-size:14px}
+.genprog{display:flex;flex-direction:row;align-items:center;gap:10px;background:var(--accent-soft);border-radius:10px;padding:10px 12px;font-size:14px}
 .spin{width:18px;height:18px;border-radius:50%;border:2.5px solid var(--accent);border-right-color:transparent;display:inline-block;animation:spin .9s linear infinite;flex-shrink:0}
 @keyframes spin{to{transform:rotate(360deg)}}
 .costbox{display:flex;flex-direction:column;gap:3px;background:var(--bg);border-radius:10px;padding:10px 12px;font-size:14px}

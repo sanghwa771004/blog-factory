@@ -7,14 +7,19 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
 import {
-  parseSlots, matchSlots, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
-  validApiSize, buildPrompt, promptRisk, blocksOf, estimateUsd, estimateTokens, DEFAULT_PRICES, MAX_UPLOAD_BYTES, CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
+  parseSlots, matchSlots, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
+  validApiSize, buildPrompt, promptRisk, blocksOf, slotRisk, estimateUsd, estimateTokens, normQuality, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
+  CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
 } from "./images.js";
 import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes } from "./image_service.js";
 
 const VERSION = "1.2.0";
 const BOOT_AT = Date.now(); // 이 서버 일꾼(worker)이 켜진 때 — 무료 요금제는 켜진 뒤 150초까지만 일함
-const WALL_MS = 150_000;
+// 일꾼 하나가 일하는 최대 시간 (무료 150초, 유료 400초 — Supabase 문서). 요금제가 다르면 Secrets 에 EDGE_WALL_SECONDS 로 넣음
+const WALL_MS = Math.min(400, Math.max(60, Number(Deno.env.get("EDGE_WALL_SECONDS") ?? "150") || 150)) * 1000;
+const DEADLINE = BOOT_AT + WALL_MS - 12_000; // 이때까지 결과 저장까지 끝내야 함
+// 품질별로 OpenAI 응답을 기다릴 수 있어야 하는 시간 (이만큼 남아 있어야 시작함 — 모자라면 돈이 나가기 전에 '잠깐 뒤에')
+const NEED_MS: Record<string, number> = { low: 60_000, medium: 75_000, high: 100_000, xhigh: 115_000, max: 115_000 };
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 // 앱을 여는 주소(쉼표로 여러 개). 기본값은 GitHub Pages 주소
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "https://sanghwa771004.github.io")
@@ -265,12 +270,12 @@ async function runChecks(post: J) {
 }
 // PostgREST는 한 번에 최대 1000줄(Supabase 기본 설정)만 돌려줘서, 나눠서 끝까지 가져옴
 // deno-lint-ignore no-explicit-any
-async function fetchAll(table: string, order: [string, boolean][], build?: (q: any) => any): Promise<J[]> {
+async function fetchAll(table: string, order: [string, boolean][], build?: (q: any) => any, cols = "*"): Promise<J[]> {
   const out: J[] = [];
   const size = 1000;
   for (let from = 0; from < 200_000; from += size) {
     // deno-lint-ignore no-explicit-any
-    let q: any = sb.from(table).select("*");
+    let q: any = sb.from(table).select(cols);
     if (build) q = build(q);
     for (const [col, asc] of order) q = q.order(col, { ascending: asc });
     const { data, error } = await q.range(from, from + size - 1);
@@ -361,11 +366,12 @@ async function getState(c: Ctx) {
     fetchAll("products", [["updated_at", false], ["id", true]]),
     fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
     fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
-    // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (이미지 스튜디오 표가 아직 없으면 빈 목록)
-    sb.from("post_image_slots").select("post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description)")
-      .not("image_id", "is", null).limit(5000),
+    // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (1000줄이 넘어도 끝까지. 이미지 스튜디오 표가 아직 없으면 빈 목록)
+    fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null),
+      "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description)")
+      .then((data) => ({ data, error: null as unknown }), (error) => ({ data: [] as J[], error: error as unknown })),
   ]);
-  if (imageSlots.error) console.error("state image_slots:", imageSlots.error.message);
+  if (imageSlots.error) console.error("state image_slots:", String((imageSlots.error as Error)?.message ?? imageSlots.error));
   return json({
     version: VERSION, now: nowIso(), today: kstToday(), auth: c.auth.kind,
     posts: posts.data, trash: trash.data, jobs: jobs.data, settings: settings.data, runs: runs.data,
@@ -397,12 +403,22 @@ const EXPORT_TABLES: [string, [string, boolean][]][] = [
 async function getExport(_c: Ctx) {
   const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결)만 들어 있어." };
   const counts: J = {};
+  const missing: string[] = [];
   for (const [t, order] of EXPORT_TABLES) {
-    const rows = await fetchAll(t, order);
+    let rows: J[];
+    try { rows = await fetchAll(t, order); } catch (e) {
+      // 이미지 표가 아직 없는 DB(012 적용 전)여도 나머지 백업은 받을 수 있게 — 그 밖의 오류는 그대로 실패
+      const code = String((e as { code?: string })?.code ?? "");
+      if (t.startsWith("post_image") || t === "image_generations" || t === "post_card_decks") {
+        if (code === "PGRST205" || code === "42P01") { missing.push(t); out[t] = []; counts[t] = null; continue; }
+      }
+      throw e;
+    }
     out[t] = rows;
     counts[t] = rows.length;
   }
   out.counts = counts;
+  if (missing.length) out.missing_tables = missing;
   return json(out);
 }
 
@@ -1003,7 +1019,8 @@ async function patchSettings(c: Ctx) {
     const price = (k: string) => optNum(p[k], "image_prices", 0, 1000) ?? (DEFAULT_PRICES as Record<string, number>)[k];
     s.image_prices = {
       image_output_per_m: price("image_output_per_m"), image_input_per_m: price("image_input_per_m"), text_input_per_m: price("text_input_per_m"),
-      checked_at: optDate(p.checked_at, "image_prices") ?? kstToday(), source: optUrl(p.source, "image_prices"),
+      // 확인한 날을 비우면 비운 그대로 (서버가 오늘 날짜로 지어내지 않음)
+      checked_at: optDate(p.checked_at, "image_prices") ?? null, source: optUrl(p.source, "image_prices"),
     };
   }
   if (!Object.keys(s).length) fail(400, "empty");
@@ -1105,7 +1122,7 @@ const keyOpenAI = () => Deno.env.get("OPENAI_API_KEY") ?? "";
 const keysInfo = () => ({ openai: !!keyOpenAI(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? "") });
 const providersInfo = () => Object.entries(PHOTO_PROVIDERS).map(([id, p]) => ({ id, label: p.label, connected: !!(Deno.env.get(p.envKey) ?? ""), site: p.site, license_url: p.licenseUrl }));
 // 생성 기록을 화면에 보낼 때는 긴 프롬프트를 뺌 (이미지 정보에 따로 있음)
-const GEN_COLS = "id, request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality, output_format, purpose, style, user_prompt, base_image_id, status, provider_called, provider_request_id, error_code, error_message, est_usd, usage, usage_usd, actual_usd, actual_checked_at, cost_status, fx_krw, fx_date, fx_source, image_id, started_at, finished_at, created_at";
+const GEN_COLS = "id, request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality, output_format, purpose, style, user_prompt, base_image_id, status, provider_called, provider_request_id, risk_override, error_code, error_message, est_usd, usage, usage_usd, actual_usd, actual_checked_at, cost_status, auto_cost_status, fx_krw, fx_date, fx_source, image_id, started_at, finished_at, created_at";
 
 // 응답을 보낸 뒤에도 계속 일하게 (이미지 생성). 일꾼이 꺼지기 전에 못 끝나면 4분 뒤 '확인 필요'로 정리됨
 const RUNNING = new Set<string>();
@@ -1124,7 +1141,7 @@ function imageDeps() {
   const bucket = sb.storage.from(BUCKET);
   return {
     rpc: (name: string, args: J) => sb.rpc(name, args),
-    upload: (path: string, bytes: Uint8Array, mime: string) => bucket.upload(path, bytes, { contentType: mime, upsert: false, cacheControl: "3600" }),
+    upload: (path: string, bytes: Uint8Array, mime: string, o: { upsert?: boolean } = {}) => bucket.upload(path, bytes, { contentType: mime, upsert: !!o.upsert, cacheControl: "3600" }),
     remove: (paths: string[]) => bucket.remove(paths),
     download: async (path: string) => {
       const { data, error } = await bucket.download(path);
@@ -1208,13 +1225,34 @@ async function syncSlots(post: J) {
   let rows = await load();
   let m = matchSlots(cur, rows);
   let rekeyed = 0, changed = false;
-  for (const rk of m.rekeys) {
-    const r = await sb.rpc("image_slot_rekey", { p_post: post.id, p: rk });
-    if (!r.error) { rekeyed++; changed = true; }
+  const rekey = async (p: J) => {
+    const r = await sb.rpc("image_slot_rekey", { p_post: post.id, p });
+    if (r.error) console.error("slot rekey:", r.error.message);
+    return !r.error;
+  };
+  const tmpKey = (tag: string) => `k:~~${tag}${crypto.randomUUID().slice(0, 8)}#1`;
+  // 옮길 자리를 이미지가 있는 다른 줄(본문에서 사라진 자리)이 쓰고 있으면, 그 줄을 먼저 '사라진 자리' 이름으로 비켜 둠 (이미지·연결은 그대로)
+  for (const bl of m.blockers as J[]) {
+    if (bl.image_id && await rekey({ from: bl.slot_key, to: tmpKey("o") })) changed = true; // 빈 줄은 옮길 때 지워짐
   }
-  for (const s of m.slots) {
-    if (s.link && !s.rekey && Number(s.link.slot_index) !== s.index) {
-      const r = await sb.from("post_image_slots").update({ slot_index: s.index }).eq("id", s.link.id);
+  if (m.rekeys.length === 1) {
+    if (await rekey(m.rekeys[0])) { rekeyed++; changed = true; }
+  } else if (m.rekeys.length > 1) {
+    // 같은 설명이 여러 번인 자리끼리 서로 바뀌는 경우가 있어서 두 번에 나눠 옮김 (임시 이름 → 새 이름)
+    const moved: J[] = [];
+    for (const rk of m.rekeys as J[]) { const t = tmpKey("t"); if (await rekey({ from: rk.from, to: t })) moved.push({ ...rk, tmp: t }); }
+    for (const t of moved) if (await rekey({ from: t.tmp, to: t.to, index: t.index, text: t.text, ctx: t.ctx })) { rekeyed++; changed = true; }
+  }
+  // 순서만 바뀐 자리는 번호를, 주변 글이 바뀐 자리는 주변 글을 고쳐 둠 (다음에 알아보기 쉽게)
+  for (const s of m.slots as J[]) {
+    if (!s.link || s.rekey) continue;
+    const link = s.link as J;
+    const patch: J = {};
+    if (Number(link.slot_index) !== s.index) patch.slot_index = s.index;
+    const ctx = ctxOf(s);
+    if (ctx && link.slot_ctx !== ctx) patch.slot_ctx = ctx;
+    if (Object.keys(patch).length) {
+      const r = await sb.from("post_image_slots").update(patch).eq("id", link.id);
       if (!r.error) changed = true;
     }
   }
@@ -1243,9 +1281,13 @@ async function slotTarget(b: J, required: boolean) {
   const purpose = has(PURPOSES, b.purpose) ? String(b.purpose) : slotPurpose(key);
   return { post, slot, purpose };
 }
-async function linkedBrands(postId: string) {
-  const { data } = await sb.from("post_products").select("products(brand)").eq("post_id", postId);
-  return ((data ?? []) as J[]).map((x) => String((x.products as J | null)?.brand ?? "")).filter(Boolean);
+// 이 글에 연결된 상품의 브랜드(요청에 있으면 막음)와 브랜드·상품 이름·모델명(맥락 글에서 지움)
+async function linkedProducts(postId: string) {
+  const { data } = await sb.from("post_products").select("products(brand, name, model)").eq("post_id", postId);
+  const rows = ((data ?? []) as J[]).map((x) => ((x.products as J | null) ?? {}) as J);
+  const brands = rows.map((r) => String(r.brand ?? "").trim()).filter(Boolean);
+  const hide = rows.flatMap((r) => [r.brand, r.name, r.model]).map((v) => String(v ?? "").trim()).filter((v) => v.length >= 2);
+  return { brands, hide };
 }
 
 async function getImageConfig(_c: Ctx) {
@@ -1256,6 +1298,8 @@ async function getImageConfig(_c: Ctx) {
 // 원고 하나의 이미지 화면: 사진 자리(본문 순서) + 본문 밖 자리 + 사라진 자리 + 이미지(서명 주소) + 생성 기록 + 카드뉴스 + 비용
 async function getPostImages(c: Ctx) {
   const post = await getPost(c.params[0]);
+  // 이 글의 4분 넘게 끝나지 않은 생성은 실패(청구됐을 수 있음)로 정리 — 비용 목록에 '생성 중'으로 남지 않게
+  await sweepStale(post.id as string);
   const sy = await syncSlots(post);
   const linkIds = sy.rows.map((r) => r.image_id).filter(Boolean) as string[];
   const empty = { data: [] as J[], error: null };
@@ -1300,13 +1344,19 @@ async function generateImage(c: Ctx) {
   const extra = str(b.extra, 400).trim();
   if (!text) fail(400, "bad_field", { field: "text" });
   const s = await imageSettings();
-  const quality = (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality);
   const model = String(mode === "edit" ? s.image_edit_model : s.image_gen_model);
   const isTest = model === TEST_MODEL;
+  const capsModel = isTest ? "gpt-image-2.5-flare" : model; // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼
+  // 모델이 못 받는 품질은 가까운 것으로 (xhigh·max는 2.5 계열만 — OpenAI API 레퍼런스)
+  const quality = normQuality(capsModel, (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality));
   if (!isTest && !keyOpenAI()) fail(503, "openai_key_missing");
   // 상표·가격·인증·후기 사진·글자 요청은 서버에서도 막음 (화면에서 먼저 알려줌)
-  const risks = blocksOf(promptRisk(text + "\n" + extra, await linkedBrands(String(post!.id))));
+  const products = await linkedProducts(String(post!.id));
+  const risks = blocksOf(promptRisk(text + "\n" + extra, products.brands));
   if (risks.length) fail(400, "prompt_blocked", { risks });
+  // 실제 상품·화면이 보여야 하는 자리(구성품·라벨·화면 등)는 사용자가 '일반 장면'이라고 확인해야만 만들고, 확인한 말을 기록
+  const real = slotRisk(text + " " + extra);
+  if (real.real && b.generic_ok !== true) fail(400, "real_photo_needed", { word: real.word });
   let base: J | null = null;
   if (mode === "edit") {
     if (!isUuid(b.base_image_id)) fail(400, "bad_field", { field: "base_image_id" });
@@ -1316,21 +1366,29 @@ async function generateImage(c: Ctx) {
     if ((data as J).kind !== "ai") fail(400, "edit_ai_only");
     base = data as J;
   }
-  const size = sizeFor(purpose, ratio);
+  const size = sizeFor(purpose, ratio, capsModel);
   if (!validApiSize(size)) fail(400, "bad_field", { field: "ratio" });
-  const prompt = buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode });
-  const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices });
+  // 맥락(제목·소제목·앞뒤 문장)에서 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄
+  const prompt = buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode, hide: products.hide });
+  const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices, model });
   if (est == null) fail(400, "bad_field", { field: "quality" });
-  // 화면에서 보여준 예상 비용보다 비싸지면(설정·가격이 바뀐 경우) 다시 확인받음
+  // 화면에서 보여준 예상 비용보다 눈에 띄게 비싸지면(설정·가격·제목이 바뀐 경우) 다시 확인받음 — 토큰 몇 개 차이는 넘어감
   const seen = Number(b.confirm_usd);
-  if (!isTest && !(Number.isFinite(seen) && seen + 1e-9 >= Number(est))) fail(409, "estimate_changed", { est_usd: est });
-  // 이 일꾼이 꺼질 때까지 시간이 너무 적으면 잠깐 뒤에 다시 (돈이 나가기 전에)
-  const left = WALL_MS - (Date.now() - BOOT_AT) - 12_000;
-  if (left < 50_000) fail(503, "server_busy", { retry_after: 3 });
+  const tol = Math.max(0.0005, Number(est) * 0.02);
+  if (!isTest && !(Number.isFinite(seen) && seen + tol >= Number(est))) {
+    fail(409, "estimate_changed", { est_usd: est, model, quality, size, prices: s.image_prices });
+  }
+  await storageGuard(2 * 1024 * 1024);
+  // 이 일꾼이 꺼질 때까지 남은 시간이 그 품질을 기다리기에 모자라면, 돈이 나가기 전에 '잠깐 뒤에 다시' (그때는 새 일꾼이 받음)
+  const need = Math.min((NEED_MS[quality] ?? 115_000) + (mode === "edit" ? 10_000 : 0), WALL_MS - 30_000);
+  if (DEADLINE - Date.now() < need) {
+    fail(503, "server_busy", { retry_after: Math.min(150, Math.max(3, Math.ceil((BOOT_AT + WALL_MS - Date.now()) / 1000) + 2)) });
+  }
   const begin = await sb.rpc("image_gen_begin", {
     p: {
       request_key: requestKey, post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, mode, model, size, quality,
       output_format: "jpeg", purpose, style, user_prompt: [text, extra].filter(Boolean).join("\n"), prompt, base_image_id: base ? base.id : "", est_usd: est,
+      risk_override: real.real ? "일반 장면으로 만들기 확인: " + real.word : "",
     },
   });
   if (begin.error) rpcError(begin.error);
@@ -1339,8 +1397,10 @@ async function generateImage(c: Ctx) {
   if (gen.duplicate) return json({ generation: pub, duplicate: true });
   RUNNING.add(String(gen.id));
   const task = runGeneration(imageDeps(), gen, {
-    key: keyOpenAI(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), timeoutMs: Math.min(115_000, left),
-    base: base ? { path: String(base.storage_path), mime: String(base.mime) } : null, description: text,
+    key: keyOpenAI(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: 115_000,
+    base: base ? { path: String(base.storage_path), mime: String(base.mime) } : null,
+    // 고치기는 바뀐 내용(지시)이 아니라 원래 이미지 설명을 그대로 씀 (지시는 생성 기록의 user_prompt 에)
+    description: mode === "edit" ? String(base?.description || slot!.text || text) : text,
   }).catch(async (e) => {
     console.error("image generation:", String((e as Error)?.message ?? e).slice(0, 200));
     await sb.rpc("image_gen_fail", { gen: gen.id, fin: { error_code: "server_error", error_message: "서버에서 문제가 생겼어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.", cost_status: "확인 필요" } });
@@ -1348,12 +1408,20 @@ async function generateImage(c: Ctx) {
   inBackground(task);
   return json({ generation: pub, est_usd: est, model, size, quality }, 202);
 }
+// 4분 넘게 끝나지 않은 생성은 실패(청구됐을 수 있음 → 확인 필요)로 정리 (그 생성 하나 또는 그 글 전체)
+async function sweepStale(postId: string | null, genId?: string) {
+  // deno-lint-ignore no-explicit-any
+  let q: any = sb.from("image_generations").update({
+    status: "실패", error_code: "timeout", error_message: "응답이 끝나지 않아 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.",
+    cost_status: "확인 필요", auto_cost_status: "확인 필요", finished_at: nowIso(),
+  }).eq("status", "생성 중").lt("started_at", new Date(Date.now() - 240e3).toISOString());
+  q = genId ? q.eq("id", genId) : q.eq("post_id", postId);
+  const { error } = await q;
+  if (error) console.error("sweep:", error.message);
+}
 async function getGeneration(c: Ctx) {
   const id = c.params[0];
-  // 4분 넘게 끝나지 않은 생성은 실패(청구됐을 수 있음)로 정리
-  await sb.from("image_generations").update({
-    status: "실패", error_code: "timeout", error_message: "응답이 끝나지 않아 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.", cost_status: "확인 필요", finished_at: nowIso(),
-  }).eq("id", id).eq("status", "생성 중").lt("started_at", new Date(Date.now() - 240e3).toISOString());
+  await sweepStale(null, id);
   const { data: g, error } = await sb.from("image_generations").select(GEN_COLS).eq("id", id).maybeSingle();
   if (error) throw error;
   if (!g) fail(404, "not_found");
@@ -1367,7 +1435,7 @@ async function getGeneration(c: Ctx) {
 // 실제 청구액 넣기 (OpenAI 사용량 화면에서 확인한 값). 앱이 청구액을 직접 가져오지는 못함
 async function setGenerationCost(c: Ctx) {
   const b = await readJson(c.req, 5_000);
-  const { data: g, error: e1 } = await sb.from("image_generations").select("id, status, usage_usd").eq("id", c.params[0]).maybeSingle();
+  const { data: g, error: e1 } = await sb.from("image_generations").select("id, status, usage_usd, auto_cost_status").eq("id", c.params[0]).maybeSingle();
   if (e1) throw e1;
   if (!g) fail(404, "not_found");
   if ((g as J).status === "생성 중") fail(409, "bad_state");
@@ -1375,7 +1443,8 @@ async function setGenerationCost(c: Ctx) {
   let patch: J;
   if (st === "청구 없음") patch = { actual_usd: null, actual_checked_at: optDate(b.actual_checked_at, "actual_checked_at") ?? kstToday(), cost_status: "청구 없음" };
   else if (st === "확인 필요") patch = { actual_usd: null, actual_checked_at: null, cost_status: "확인 필요" };
-  else if (b.actual_usd === null || b.actual_usd === "" || b.actual_usd === undefined) patch = { actual_usd: null, actual_checked_at: null, cost_status: (g as J).usage_usd != null ? "사용량 기준" : "예상" };
+  // 넣은 값 지우기: 서버가 처음 매긴 상태로 되돌림 ('확인 필요'·'청구 없음'이 '예상'으로 바뀌지 않게)
+  else if (b.actual_usd === null || b.actual_usd === "" || b.actual_usd === undefined) patch = { actual_usd: null, actual_checked_at: null, cost_status: String((g as J).auto_cost_status || ((g as J).usage_usd != null ? "사용량 기준" : "예상")) };
   else patch = { actual_usd: optNum(b.actual_usd, "actual_usd", 0, 100), actual_checked_at: optDate(b.actual_checked_at, "actual_checked_at") ?? kstToday(), cost_status: "청구액 확인" };
   const { data, error } = await sb.from("image_generations").update(patch).eq("id", c.params[0]).select(GEN_COLS).single();
   if (error) throw error;
@@ -1453,9 +1522,15 @@ async function uploadImage(c: Ctx) {
   if (!meta || typeof meta !== "object") meta = {};
   const { post, slot, purpose } = await slotTarget(meta, false);
   await storageGuard(bytes.length);
+  // 카드뉴스 배경으로 쓴 이미지의 출처(사진가·AI 여부)를 카드 PNG 기록에도 남김
+  let bg: J | null = null;
+  if (meta.kind === "card" && isUuid(meta.bg_image_id)) {
+    const { data } = await sb.from("post_images").select("kind, provider, source_url, author_name, author_url, attribution_text, license, rights_confirmed").eq("id", meta.bg_image_id).maybeSingle();
+    bg = (data as J | null) ?? null;
+  }
   const r = await saveUploaded(imageDeps(), {
     bytes, declaredMime: declared, kind: meta.kind === "card" ? "card" : "upload", rights: meta.rights === true,
-    post, slot, purpose, description: str(meta.description, 300), link: meta.link === true && !!slot,
+    post, slot, purpose, description: str(meta.description, 300), link: meta.link === true && !!slot, bg,
   }) as J;
   if (!r.ok) { if (r.error) rpcError(r.error as { message?: string }); fail(Number(r.status ?? 500), String(r.code), r.reason ? { reason: r.reason } : {}); }
   return json({ image: (await withUrls([r.image as J]))[0], slot: r.slot ?? null, reused: !!r.reused });
@@ -1545,7 +1620,15 @@ async function linkSlot(c: Ctx) {
   }
   if (!isUuid(b.image_id)) fail(400, "bad_field", { field: "image_id" });
   const { slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
-  const { data, error } = await sb.rpc("image_slot_upsert", { p_post: postId, p: { slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, image_id: b.image_id, purpose } });
+  // 용도를 따로 안 보내면 그 자리에 저장해 둔 용도를 그대로 (연결할 때마다 기본값으로 돌아가지 않게)
+  let use = has(PURPOSES, b.purpose) ? String(b.purpose) : "";
+  if (!use) {
+    const { data: ex } = await sb.from("post_image_slots").select("purpose").eq("post_id", postId).eq("slot_key", slot!.key).maybeSingle();
+    use = String((ex as J | null)?.purpose ?? "") || purpose;
+  }
+  const { data, error } = await sb.rpc("image_slot_upsert", {
+    p_post: postId, p: { slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, slot_ctx: ctxOf(slot), image_id: b.image_id, purpose: use },
+  });
   if (error) rpcError(error);
   return json({ slot: data });
 }
@@ -1556,7 +1639,8 @@ async function swapSlots(c: Ctx) {
   const a = cur.find((s: J) => s.key === str(b.a, 220)), z = cur.find((s: J) => s.key === str(b.b, 220));
   if (!a || !z || a.key === z.key) fail(400, "bad_field", { field: "slot_key" });
   const { data, error } = await sb.rpc("image_slot_swap", {
-    p_post: post.id, a: { slot_key: a.key, slot_index: a.index, slot_text: a.text }, b: { slot_key: z.key, slot_index: z.index, slot_text: z.text },
+    p_post: post.id,
+    a: { slot_key: a.key, slot_index: a.index, slot_text: a.text, slot_ctx: ctxOf(a) }, b: { slot_key: z.key, slot_index: z.index, slot_text: z.text, slot_ctx: ctxOf(z) },
   });
   if (error) rpcError(error);
   return json(data);
@@ -1607,6 +1691,11 @@ async function saveCards(c: Ctx) {
   };
   const { data, error } = await sb.from("post_card_decks").upsert(row, { onConflict: "post_id" }).select().single();
   if (error) throw error;
+  // 그사이에 배경 이미지가 지워졌으면 배경을 빼고 알려줌 (지운 이미지를 가리키지 않게)
+  if (bg) {
+    const { data: still } = await sb.from("post_images").select("id").eq("id", bg).is("deleted_at", null).maybeSingle();
+    if (!still) { await sb.from("post_card_decks").update({ bg_image_id: null }).eq("post_id", post.id); fail(404, "not_found"); }
+  }
   return json({ deck: data });
 }
 

@@ -34,6 +34,11 @@ export const IMAGE_ERR = {
   bad_source: '허용하지 않은 주소의 사진이야.',
   too_big: '파일이 너무 커.',
   storage_failed: '파일을 저장하지 못했어. 다시 해줘.',
+  stock_bad_image: 'Pexels 사진 파일을 읽지 못했어. 다른 사진을 골라줘.',
+  real_photo_needed: '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.',
+  openai_unsupported_option: '이 모델이 그 크기·품질을 지원하지 않아. 설정 > 이미지에서 모델이나 품질을 바꿔줘.',
+  openai_spend_limit: 'OpenAI에 걸어둔 사용 한도(Spend limit)에 닿았어. OpenAI 설정의 Limits에서 한도를 올리거나 다음 달까지 기다려줘.',
+  timeout: '응답이 너무 늦어. 다시 눌러줘 (같은 요청이면 두 번 만들지 않아).',
 };
 export const IMAGE_FIELD = {
   request_key: '요청', slot_key: '사진 자리', text: '사진 설명', ratio: '비율', quality: '품질', photo_id: '사진', file: '파일', b64: '파일', q: '검색어',
@@ -45,7 +50,7 @@ export const IMAGE_REASON = {
   empty: '파일이 비어 있어.', too_big: '파일이 너무 커. 8MB까지 올릴 수 있어.', bad_type: 'JPEG·PNG·WebP 이미지만 올릴 수 있어. (이름만 바꾼 파일도 안 돼)',
   type_mismatch: '파일 내용과 형식이 달라. 원래 이미지 파일을 올려줘.', animated: '움직이는 이미지는 올릴 수 없어.', too_many_pixels: '가로·세로가 너무 큰 이미지야. 줄여서 올려줘.',
 };
-const RETRYABLE = new Set(['openai_timeout', 'openai_server', 'openai_network', 'openai_rate_limited', 'server_stopped', 'timeout', 'storage_failed', 'save_failed', 'server_error']);
+const RETRYABLE = new Set(['openai_timeout', 'openai_server', 'openai_network', 'openai_rate_limited', 'server_stopped', 'timeout', 'storage_failed', 'save_failed', 'server_error', 'server_busy_late']);
 
 const MOBILE = typeof navigator !== 'undefined' && (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)));
 const usd = (x) => IMG.fmtUsd(x);
@@ -89,6 +94,8 @@ export async function prepareUpload(file) {
   const sn = IMG.sniffImage(head);
   if (!sn) throw new Error('JPEG·PNG·WebP 이미지만 올릴 수 있어. (HEIC·GIF·SVG·이름만 바꾼 파일은 안 돼)');
   if (sn.animated) throw new Error('움직이는 이미지는 올릴 수 없어.');
+  // 머리 부분에서 읽은 가로·세로로 먼저 거름 (아주 큰 그림을 다 풀다가 휴대폰 브라우저가 멈추지 않게)
+  if (sn.width && sn.height && (sn.width > 12000 || sn.height > 12000 || sn.width * sn.height > 50_000_000)) throw new Error('가로·세로가 너무 큰 이미지야. 줄여서 올려줘.');
   const el = await loadImg(file);
   const W = el.naturalWidth, H = el.naturalHeight;
   if (!W || !H) throw new Error('이미지를 열지 못했어.');
@@ -136,13 +143,17 @@ function fileOf(blob, name, w, h) {
   f.w = w; f.h = h;
   return f;
 }
-// 내려받을 파일 만들기: 서명 주소에서 받아서 → (필요하면) 저장한 초점으로 자르고 → 용도 크기로 줄임 (늘리지는 않음)
-export async function renderOutput(img, o) {
+// 서명 주소에서 원본을 받아서 풀어 둠 (한 창에서 여러 번 자를 때 다시 받지 않게)
+export async function loadSource(img) {
   const res = await fetch(img.url, { mode: 'cors', credentials: 'omit', cache: 'no-store' });
   if (!res.ok) throw new Error('fetch ' + res.status);
   const blob = await res.blob();
   const el = await loadImg(blob);
-  const W = el.naturalWidth || img.width, H = el.naturalHeight || img.height;
+  return { blob, el, W: el.naturalWidth || img.width, H: el.naturalHeight || img.height };
+}
+// 내려받을 파일 만들기: (필요하면) 저장한 초점으로 자르고 → 용도 크기로 줄임 (늘리지는 않음)
+export async function renderOutput(img, o, src) {
+  const { blob, el, W, H } = src || (await loadSource(img));
   if (o.original) return fileOf(blob, String(o.name).replace(/\.[a-z0-9]+$/i, '') + '.' + IMG.extOf(blob.type), W, H);
   const need = o.ratio && !IMG.sameRatio(W, H, o.ratio);
   const rect = need ? IMG.cropRect(W, H, o.ratio, o.focus) : { x: 0, y: 0, w: W, h: H };
@@ -155,7 +166,9 @@ export async function renderOutput(img, o) {
   ctx.imageSmoothingQuality = 'high';
   if (type === 'image/jpeg') { ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, out.w, out.h); }
   ctx.drawImage(el, rect.x, rect.y, rect.w, rect.h, 0, 0, out.w, out.h);
-  return fileOf(await canvasToBlob(cv, type, 0.92), o.name, out.w, out.h);
+  const outBlob = await canvasToBlob(cv, type, 0.92);
+  cv.width = 0; cv.height = 0; // 휴대폰 메모리 아끼기
+  return fileOf(outBlob, o.name, out.w, out.h);
 }
 
 export function createStudio(ui) {
@@ -170,13 +183,21 @@ export function createStudio(ui) {
   const fresh = (c, p) => !!(c && c.data && Date.now() - c.at < 45 * 60e3 && (!p || c.body === p.body));
 
   // ── 서버에서 받기 ──
+  // 강제로 다시 받을 때는 진행 중인 요청(바꾸기 전 내용일 수 있음)을 기다리지 않고 새로 보냄. 늦게 온 예전 응답은 버림
+  let seqN = 0;
   function fetchPost(id, force) {
     const c = C[id];
     if (!force && fresh(c)) return Promise.resolve(c.data);
-    if (c && c.loading) return c.loading;
-    const p = api(`/posts/${id}/images`).then((d) => { C[id] = { at: Date.now(), data: d, loading: null, body: (ui.post(id) || {}).body }; return d; })
-      .finally(() => { if (C[id] && C[id].loading === p) C[id].loading = null; });
-    C[id] = { ...(c || {}), loading: p };
+    if (!force && c && c.loading) return c.loading;
+    const seq = ++seqN;
+    const body = (ui.post(id) || {}).body; // 보낼 때의 본문 (받을 때가 아니라)
+    const p = api(`/posts/${id}/images`).then((d) => {
+      const cur = C[id];
+      if (cur && cur.seq > seq) return cur.loading || cur.data || d; // 더 새 요청이 있었음
+      C[id] = { at: Date.now(), data: d, loading: null, body, seq };
+      return d;
+    }).finally(() => { if (C[id] && C[id].loading === p) C[id].loading = null; });
+    C[id] = { ...(c || {}), loading: p, seq };
     return p;
   }
   function redraw(id) {
@@ -254,7 +275,7 @@ export function createStudio(ui) {
     if (running) {
       const mine = running.post_id === p.id;
       const s = mine ? [...slots, ...extra].find((x) => x.key === running.slot_key) : null;
-      kids.push(h('div', { class: 'prog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }),
+      kids.push(h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }),
         h('span', null, mine ? `이미지 만드는 중${s ? ' (' + slotName(s) + ')' : ''} — 이 화면을 나가도 서버에서 계속 만들어.` : '다른 원고의 이미지를 만드는 중이야 (한 번에 하나씩).')));
       if (mine) schedulePoll(p.id);
     }
@@ -276,7 +297,8 @@ export function createStudio(ui) {
       }), h('p', { class: 'hint' }, '본문을 고치거나 다시 만들면서 사라진 자리야. 이미지는 지우지 않았어. 새 자리에 연결하거나 빼줘.')));
       kids.push(ob);
     }
-    const all = linked.length + extraLinked.length;
+    // '사용 안 함' 이미지는 모두 내려받기에서 빠지니까 개수에서도 뺌
+    const all = [...linked, ...extraLinked].filter((s) => imgs[s.row.image_id].review_status !== '사용 안 함').length;
     kids.push(h('div', { class: 'go' },
       all ? btn(`모두 내려받기 (${all})`, 'sm', () => downloadAllSheet(p)) : null,
       btn('카드뉴스 만들기', 'sm ghost', () => go(`content/post/${p.id}/cards`)),
@@ -329,18 +351,21 @@ export function createStudio(ui) {
     card.append(row2);
     return card;
   }
-  function schedulePoll(id) {
+  // 이미지 칸이 화면에 있는 동안 '만드는 중'을 확인. 한 번 실패해도 멈추지 않고 간격을 늘려서 다시 (최대 30초)
+  function schedulePoll(id, delay = 5000) {
     if (polls[id]) return;
     polls[id] = setTimeout(async () => {
       polls[id] = null;
+      const box = panels[id];
+      if (!box || !box.isConnected) return;
       const before = dataOf(id);
       const was = before && before.usage && before.usage.running && before.usage.running.post_id === id;
-      try { await fetchPost(id, true); } catch { return; }
+      try { await fetchPost(id, true); } catch (e) { if (!e || e.code !== 'auth') schedulePoll(id, Math.min(30000, delay * 2)); return; }
       const now = dataOf(id);
       const still = now && now.usage && now.usage.running && now.usage.running.post_id === id;
       redraw(id);
       if (was && !still) { toast('이미지 만들기가 끝났어. 사진 자리에서 확인해줘.'); ui.load(); }
-    }, 5000);
+    }, delay);
   }
   function costBlock(p, d) {
     const t = (d.costs && d.costs.totals) || {};
@@ -383,7 +408,9 @@ export function createStudio(ui) {
           send({ actual_usd: v, actual_checked_at: at.value || null }, ev.currentTarget, '청구액을 저장했어');
         }),
         btn('청구 없음으로', 'sm ghost', (ev) => send({ cost_status: '청구 없음', actual_checked_at: at.value || null }, ev.currentTarget, '청구 없음으로 표시했어')),
-        g.actual_usd != null || g.cost_status === '청구 없음' ? btn('넣은 값 지우기', 'sm ghost', (ev) => send({ actual_usd: null }, ev.currentTarget, '지웠어')) : null));
+        // 내가 넣은 값(청구액·청구 없음 표시)만 지울 수 있고, 지우면 서버가 처음 매긴 상태로 돌아감
+        g.actual_checked_at && (g.actual_usd != null || g.cost_status === '청구 없음')
+          ? btn('넣은 값 지우기', 'sm ghost', (ev) => send({ actual_usd: null }, ev.currentTarget, `지웠어 (${g.auto_cost_status || '처음 상태'}로)`)) : null));
   }
 
   // ── 연결·빼기·순서·사용 완료 ──
@@ -439,27 +466,36 @@ export function createStudio(ui) {
     const mode = base ? 'edit' : 'generate';
     const model = mode === 'edit' ? st.image_edit_model || 'gpt-image-2.5-sunburst' : st.image_gen_model || 'gpt-image-2.5-flare';
     const isTest = model === TEST_MODEL;
+    const capsModel = isTest ? 'gpt-image-2.5-flare' : model; // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼 (서버와 같게)
+    const caps = IMG.modelCaps(capsModel);
+    const qualities = IMG.qualitiesFor(capsModel);
     const keyOk = !!(d.keys && d.keys.openai) || isTest;
     const prevLines = prev ? String(prev.user_prompt || '').split('\n') : [];
     const purpose0 = (prev && prev.purpose) || (s.row && s.row.purpose) || IMG.slotPurpose(s.key);
     const f = {
       purpose: IMG.PURPOSES[purpose0] ? purpose0 : 'blog_body', ratio: '', style: (prev && IMG.STYLES[prev.style] && prev.style) || IMG.DEFAULT_STYLE,
       text: mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
-      quality: (prev && IMG.QUALITIES.includes(prev.quality) && prev.quality) || st.image_quality || 'medium',
+      quality: IMG.normQuality(capsModel, (prev && prev.quality) || st.image_quality || 'medium'),
     };
     if (base && base.width && base.height) f.ratio = (IMG.PURPOSES[f.purpose].ratios.find((r) => IMG.sameRatio(base.width, base.height, r))) || '';
-    const brands = (ui.productsOf(p.id) || []).map((x) => x.brand).filter(Boolean);
+    const prods = ui.productsOf(p.id) || [];
+    const brands = prods.map((x) => x.brand).filter(Boolean);
+    const hide = prods.flatMap((x) => [x.brand, x.name, x.model]).filter((v) => v && String(v).trim().length >= 2);
     const purposeSel = h('select', { value: f.purpose }, Object.entries(IMG.PURPOSES).map(([k, v]) => opt(k, v.label)));
     const ratioSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '비율' });
     const styleSel = h('select', { value: f.style }, Object.entries(IMG.STYLES).map(([k, v]) => opt(k, v.label)));
     const textTa = h('textarea', { value: f.text, maxlength: '300', style: 'min-height:70px', placeholder: mode === 'edit' ? '예: 배경을 더 밝게, 식물은 빼줘' : '' });
     const extraTa = h('textarea', { value: f.extra, maxlength: '400', style: 'min-height:56px', placeholder: '예: 밝은 오전 햇살, 위에서 내려다본 구도' });
-    const qualSel = h('select', { value: f.quality }, IMG.QUALITIES.map((q) => opt(q, IMG.QUALITY_LABEL[q])));
+    const qualSel = h('select', { value: f.quality }, qualities.map((q) => opt(q, IMG.QUALITY_LABEL[q])));
+    const f0 = { text: f.text };
+    const genericChk = h('input', { type: 'checkbox' });
+    const genericRow = h('label', { class: 'chk' }, genericChk, ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (AI 예시 이미지 — 실제 구성품·라벨·화면은 직접 찍은 사진으로)');
     const riskBox = h('div', { class: 'stack' });
     const costBox = h('div', { class: 'costbox' });
     const promptPre = h('pre', { class: 'prompt' });
     const msg = h('div');
-    let busy = false, lastEst = null, rk = newKey();
+    // serverEst: 서버가 '예상 비용이 바뀌었어'라며 알려준 값. 화면 계산보다 크면 그걸 보여주고 그걸로 확인을 보냄
+    let busy = false, lastEst = null, serverEst = null, rk = newKey();
     const goBtn = btn('만들기', 'wide', () => submit());
     const usage = () => (dataOf(p.id) || {}).usage || null;
     const update = () => {
@@ -467,22 +503,27 @@ export function createStudio(ui) {
       const ratios = IMG.PURPOSES[f.purpose].ratios;
       if (!ratios.includes(f.ratio)) f.ratio = ratios[0];
       put(ratioSeg, ...ratios.map((r) => h('button', { type: 'button', 'aria-pressed': String(r === f.ratio), onclick: () => { f.ratio = r; update(); } }, r)));
-      const size = IMG.sizeFor(f.purpose, f.ratio);
-      const prompt = IMG.buildPrompt({ post: p, slot: s, text: clean(f.text), style: f.style, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode });
+      const size = IMG.sizeFor(f.purpose, f.ratio, capsModel);
+      const prompt = IMG.buildPrompt({ post: p, slot: s, text: clean(f.text), style: f.style, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide });
       promptPre.textContent = prompt;
-      const est = isTest ? 0 : IMG.estimateUsd({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices() });
+      const clientEst = isTest ? 0 : IMG.estimateUsd({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices(), model });
+      const est = clientEst == null ? null : serverEst != null && serverEst > clientEst ? serverEst : clientEst;
       lastEst = est;
       const risks = IMG.promptRisk(f.text + '\n' + f.extra, brands);
       const blocks = IMG.blocksOf(risks);
-      const sr = s.n && mode === 'generate' ? IMG.slotRisk(s.text) : { real: false };
-      put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)), sr.real ? h('p', { class: 'notice' }, sr.msg) : '');
+      const sr = IMG.slotRisk(f.text + ' ' + f.extra);
+      put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)), sr.real ? h('p', { class: 'notice' }, sr.msg) : '', sr.real ? genericRow : '');
       const u = usage();
       const fx = Number(st.image_fx_krw) || 0;
       const over = u && est != null && Number(u.month_usd) + est > Number(u.budget_usd) + 1e-9;
       const limit = u && Number(u.today) >= Number(u.daily_limit);
-      put(costBox, 
+      put(costBox,
         h('span', null, `모델 ${model} · ${size} · 품질 ${IMG.QUALITY_LABEL[f.quality]}`),
         h('b', { class: 'num' }, est == null ? '예상 비용을 계산하지 못했어' : `예상 ${usd(est)}${fx && est ? ' ≈ ' + L.won(est * fx) : ''}`),
+        serverEst != null && est === serverEst ? h('span', { class: 'notice' }, `서버에서 다시 계산한 예상 비용이 ${usd(serverEst)}이야 (설정·가격·원고가 바뀐 것 같아). 확인하고 다시 눌러줘.`) : null,
+        !caps.flexible && !isTest ? h('span', { class: 'hint' }, `이 모델은 정해진 크기(${size})로만 만들어. 내려받을 때 ${f.ratio}로 잘라 줄게 (미리보기에서 자르는 곳을 고를 수 있어).`) : null,
+        caps.conservative && !isTest ? h('span', { class: 'notice' }, '이 모델은 공식 가격표에서 장당 가격을 확인하지 못해서 예상 비용을 넉넉하게 잡았어. 실제 청구액은 OpenAI 사용량 화면에서 확인해줘.') : null,
+        caps.deprecated ? h('span', { class: 'hint' }, 'OpenAI가 이전 모델(Deprecated)로 표시한 모델이야. 되도록 gpt-image-2.5-flare를 써줘.') : null,
         h('span', { class: 'hint' }, fx ? `환율 ${L.fmtNum(fx)}원/달러 (${st.image_fx_date || '날짜 없음'}${st.image_fx_source ? ' · ' + st.image_fx_source : ''})` : '환율을 넣으면 원화로도 보여줘 (설정 > 이미지)'),
         h('span', { class: 'hint' }, `예상 비용이야 (가격표 ${(prices().checked_at) || '확인일 없음'} 기준). 실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`),
         u ? h('span', { class: 'hint' }, usageLine(u)) : null);
@@ -490,16 +531,19 @@ export function createStudio(ui) {
       if (!keyOk) why = 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.';
       else if (!clean(f.text)) why = mode === 'edit' ? '바꿀 내용을 적어줘.' : '사진 설명을 적어줘.';
       else if (blocks.length) why = '빨간 내용을 고쳐야 만들 수 있어.';
+      else if (sr.real && !genericChk.checked) why = '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
       else if (limit) why = '오늘 만들 수 있는 횟수를 다 썼어. (설정 > 이미지에서 하루 한도)';
       else if (over) why = '이번 달 예산을 넘게 돼서 못 만들어. (설정 > 이미지에서 한 달 예산)';
       else if (u && u.running) why = '다른 이미지를 만드는 중이야. 끝나면 다시 해줘.';
-      goBtn.textContent = est == null ? '만들기' : `${usd(est)} 들여서 ${mode === 'edit' ? '고치기' : '만들기'}`;
+      goBtn.textContent = busy ? '보내는 중…' : est == null ? '만들기' : `예상 ${usd(est)} · ${mode === 'edit' ? '고치기' : '만들기'}`;
       goBtn.disabled = !!why || busy || est == null;
-      put(msg, why ? h('p', { class: 'hint' }, why) : '');
+      if (!busy) put(msg, why ? h('p', { class: 'hint' }, why) : '');
     };
     for (const el of [purposeSel, styleSel, qualSel]) el.addEventListener('change', update);
     for (const el of [textTa, extraTa]) el.addEventListener('input', update);
-    const form = () => openSheet(`${slotName(s)} — AI ${mode === 'edit' ? '이미지 고치기' : '이미지 만들기'}`,
+    genericChk.addEventListener('change', update);
+    const form = () => {
+      openSheet(`${slotName(s)} — AI ${mode === 'edit' ? '이미지 고치기' : '이미지 만들기'}`,
       s.n ? h('p', { class: 'hint' }, `사진 자리: ${s.text}`) : h('p', { class: 'hint' }, s.label || ''),
       base ? h('div', { class: 'stack' }, thumb(base, null), h('p', { class: 'hint' }, `이 이미지를 고쳐서 새로 만들어 (원본은 그대로 남아). 모델 ${model}`)) : null,
       field('어디에 쓸 이미지야?', purposeSel), h('p', { class: 'legend' }, '비율'), ratioSeg,
@@ -511,24 +555,48 @@ export function createStudio(ui) {
       (() => { const dd = det('gen-prompt', 'AI에 보낼 내용 보기', false, 'plain'); dd.append(promptPre); return dd; })(),
       costBox, msg, goBtn,
       h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 한 번에 한 장씩, 같은 요청은 한 번만 보내.'));
+      // 설명을 고쳤거나 더 원하는 것을 적었으면 창 밖을 눌러도 안 닫힘
+      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && !clean(extraTa.value));
+    };
+    // 창을 닫거나 다른 창을 열면(=만들기 버튼이 화면에서 사라지면) 기다리던 다시 보내기를 멈춤 — 사용자가 누르지 않은 생성이 시작되지 않게
+    const alive = () => goBtn.isConnected;
+    const wait = async (sec) => {
+      for (let t = Math.max(1, Math.round(sec)); t > 0; t--) {
+        if (!alive()) return false;
+        put(msg, h('p', { class: 'hint' }, `서버가 다른 일을 마무리하는 중이야. ${t}초 뒤에 같은 요청으로 다시 보낼게 (돈은 아직 안 나갔어). 창을 닫으면 멈춰.`));
+        await sleep(1000);
+      }
+      return alive();
+    };
     const submit = async () => {
       if (busy) return;
       busy = true; update();
-      const body = { request_key: rk, post_id: p.id, slot_key: s.key, mode, base_image_id: base ? base.id : undefined, purpose: f.purpose, ratio: f.ratio, style: f.style, text: clean(f.text), extra: clean(f.extra), quality: f.quality, confirm_usd: lastEst };
+      put(msg, h('p', { class: 'hint' }, '보내는 중…'));
+      const body = { request_key: rk, post_id: p.id, slot_key: s.key, mode, base_image_id: base ? base.id : undefined, purpose: f.purpose, ratio: f.ratio, style: f.style,
+        text: clean(f.text), extra: clean(f.extra), quality: f.quality, confirm_usd: lastEst, generic_ok: genericChk.checked || undefined };
       let j = null;
-      for (let attempt = 0; attempt < 5 && !j; attempt++) {
-        try { j = await api('/images/generate', { method: 'POST', body }); } catch (e) {
-          if (e && e.code === 'server_busy' && attempt < 4) { put(msg, h('p', { class: 'hint' }, '서버 준비 중… 잠깐만')); await sleep(3000); continue; }
+      for (let attempt = 0; attempt < 4 && !j; attempt++) {
+        try { j = await api('/images/generate', { method: 'POST', body, timeout: 40000 }); } catch (e) {
+          if (e && e.code === 'server_busy' && attempt < 3 && await wait(Number(e.retry_after) || 3)) continue;
           busy = false;
-          if (!e || e.code === 'auth') return;
-          if (e.code === 'estimate_changed') { lastEst = e.est_usd; toast(ui.errText(e), 4000); try { await fetchPost(p.id, true); } catch { /* 무시 */ } update(); return; }
+          if (!e || e.code === 'auth' || !alive()) return;
+          if (e.code === 'estimate_changed') {
+            serverEst = Number(e.est_usd);
+            toast(ui.errText(e), 4000);
+            ui.load(); // 다른 기기에서 바꾼 설정·가격을 다시 받음
+            update();
+            return;
+          }
           update();
-          put(msg, h('p', { class: 'badbox' }, ui.errText(e)), ...((e.risks || []).map((r) => h('p', { class: 'badbox' }, r.msg))));
+          const again = e.code === 'timeout' || e.code === 'network';
+          put(msg, h('p', { class: 'badbox' }, ui.errText(e)), ...((e.risks || []).map((r) => h('p', { class: 'badbox' }, r.msg))),
+            again ? h('p', { class: 'hint' }, '다시 누르면 같은 요청 번호로 보내서, 서버가 이미 받았으면 그 결과를 보여줘 (두 번 만들지 않아).') : null);
           return;
         }
       }
       busy = false;
-      if (!j) { update(); return; }
+      if (!j || !alive()) { update(); return; }
+      if (j.duplicate) toast('이미 받은 요청이야. 그 결과를 보여줄게.', 3000);
       progress(j.generation);
     };
     const progress = (gen) => {
@@ -536,7 +604,7 @@ export function createStudio(ui) {
       const timer = h('b', { class: 'num' }, '0초');
       let stop = false;
       openSheet(`${slotName(s)} — AI ${mode === 'edit' ? '고치기' : '만들기'}`,
-        h('div', { class: 'prog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, '만드는 중… '), timer),
+        h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, '만드는 중… '), timer),
         h('p', { class: 'hint' }, '보통 20초~1분, 길면 2분까지 걸려. 이 창을 닫아도 서버에서 계속 만들고, 끝나면 사진 자리에서 고를 수 있어.'));
       ui.setSheetOnClose(() => { stop = true; refresh(p.id); });
       const tick = setInterval(() => { if (!timer.isConnected) { clearInterval(tick); return; } timer.textContent = Math.round((Date.now() - t0) / 1000) + '초'; }, 1000);
@@ -548,7 +616,7 @@ export function createStudio(ui) {
         const g = r.generation;
         if (g.status === '생성 중') { setTimeout(poll, Date.now() - t0 > 60e3 ? 5000 : 3000); return; }
         clearInterval(tick);
-        rk = newKey();
+        rk = newKey(); serverEst = null;
         if (C[p.id] && C[p.id].data) C[p.id].data.usage = r.usage;
         if (g.status === '성공' && r.image) showResult(g, r.image); else showFail(g);
       };
@@ -587,7 +655,7 @@ export function createStudio(ui) {
     const title = `${slotName(s)} — 실제 사진 찾기`;
     if (d.keys && !d.keys.pexels) {
       openSheet(title, h('p', { class: 'notice' }, IMAGE_ERR.pexels_key_missing),
-        h('p', { class: 'hint' }, 'Pexels 키는 무료로 받을 수 있어. 설정 > 이미지에 넣는 방법이 있어.'),
+        h('p', { class: 'hint' }, 'Pexels는 지금 새 API 키 발급을 멈춰 둔 상태야 (2026-10-22 Pexels API 페이지 안내). 발급이 다시 열리면 설정 > 이미지 안내대로 넣으면 바로 돼.'),
         h('div', { class: 'go' }, btn('파일 올리기로', 'sm', () => uploadSheet(p, s)), btn('설정 보기', 'sm ghost', () => { closeSheet(); go('settings/images'); })));
       return;
     }
@@ -596,7 +664,7 @@ export function createStudio(ui) {
     let orientation = IMG.orientationFor(ratio);
     const orSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '사진 방향' });
     const results = h('div', { class: 'stack' });
-    let page = 1, items = [];
+    let page = 1, items = [], sseq = 0, searching = false;
     const drawOr = () => put(orSeg, ...[['', '전체'], ['landscape', '가로'], ['portrait', '세로'], ['square', '정사각형']].map(([k, l]) =>
       h('button', { type: 'button', 'aria-pressed': String(k === orientation), onclick: () => { orientation = k; drawOr(); search(1); } }, l)));
     drawOr();
@@ -610,21 +678,25 @@ export function createStudio(ui) {
       put(results, 
         h('div', { class: 'grid2' }, items.map((ph) => h('button', { type: 'button', class: 'pick', onclick: () => detail(ph) },
           h('img', { src: ph.thumb, alt: ph.alt || '사진', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer' }), h('small', null, ph.photographer)))),
-        j.has_next ? btn('더 보기', 'sm ghost', (ev) => { ev.currentTarget.disabled = true; search(page + 1); }) : null,
+        j.has_next ? btn('더 보기', 'sm ghost', (ev) => { if (searching) return; ev.currentTarget.disabled = true; search(page + 1); }) : null,
         h('p', { class: 'hint' }, `사진 ${j.total ? L.fmtNum(j.total) + '장 중 ' : ''}${items.length}장 · Pexels 남은 요청 ${j.remaining ?? '알 수 없음'}`));
     };
+    // 검색을 빨리 여러 번 눌러도 마지막 검색 결과만 보여줌 (예전 응답은 버림 — 결과가 섞이지 않게)
     const search = async (pg) => {
       const qq = q.value.trim();
       if (!qq) { toast('검색어를 넣어줘'); return; }
-      if (pg === 1) { items = []; put(results, h('p', { class: 'hint' }, '찾는 중…')); }
+      const my = ++sseq;
+      searching = true;
+      if (pg === 1) put(results, h('p', { class: 'hint' }, '찾는 중…'));
       try {
         const j = await api(`/stock/search?provider=pexels&q=${encodeURIComponent(qq)}&orientation=${encodeURIComponent(orientation)}&page=${pg}`);
-        page = pg; items = items.concat(j.photos || []);
+        if (my !== sseq) return;
+        page = pg; items = pg === 1 ? (j.photos || []) : items.concat(j.photos || []);
         drawResults(j);
       } catch (e) {
-        if (!e || e.code === 'auth') return;
+        if (my !== sseq || !e || e.code === 'auth') return;
         put(results, h('p', { class: 'badbox' }, ui.errText(e)), e.code === 'pexels_key_missing' ? btn('파일 올리기로', 'sm ghost', () => uploadSheet(p, s)) : null);
-      }
+      } finally { if (my === sseq) searching = false; }
     };
     const detail = (ph) => {
       openSheet('사진 고르기',
@@ -656,16 +728,18 @@ export function createStudio(ui) {
     const preview = h('div', { class: 'stack' });
     const rights = h('input', { type: 'checkbox' });
     const desc = h('input', { type: 'text', value: s.n ? IMG.altTextFor(s.text) : s.label || '', maxlength: '300' });
-    let ready = null;
+    let ready = null, prevUrl = null;
     const goBtn = btn(`올리고 ${slotName(s)}에 연결`, 'wide', () => send(), { disabled: true });
+    const dropUrl = () => { if (prevUrl) { URL.revokeObjectURL(prevUrl); prevUrl = null; } };
     input.addEventListener('change', async () => {
-      ready = null; goBtn.disabled = true;
+      ready = null; goBtn.disabled = true; dropUrl();
       const file = input.files && input.files[0];
       if (!file) return;
       pickLabel.textContent = '다른 사진 고르기';
       put(preview, h('p', { class: 'hint' }, '확인하는 중…'));
       try { ready = await prepareUpload(file); } catch (e) { put(preview, h('p', { class: 'badbox' }, (e && e.message) || '이 파일은 올릴 수 없어.')); return; }
       const url = URL.createObjectURL(ready.blob);
+      prevUrl = url;
       put(preview, h('img', { class: 'big', src: url, alt: '올릴 사진 미리보기' }),
         h('span', { class: 'hint' }, `${ready.w}×${ready.h} · ${fmtBytes(ready.blob.size)} · ${typeName(ready.blob.type)}${ready.resized ? ` · 원본 ${ready.original.w}×${ready.original.h}에서 줄였어` : ''} · 촬영 위치 같은 숨은 정보는 빼고 올려`));
       goBtn.disabled = false;
@@ -676,8 +750,10 @@ export function createStudio(ui) {
       const fd = new FormData();
       fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose, rights: true, description: desc.value.trim(), link: true }));
       fd.append('file', ready.blob, ready.name);
-      const j = await run(goBtn, () => api('/images/upload', { method: 'POST', body: fd }));
-      if (j) { toast(j.reused ? '같은 사진이 보관함에 있어서 그걸 연결했어' : `${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
+      const j = await run(goBtn, () => api('/images/upload', { method: 'POST', body: fd }).catch((e) => {
+        throw e && e.code === 'too_large' ? { code: 'bad_image', reason: 'too_big' } : e; // 이미지는 '나눠서 올려줘'가 아니라 크기 안내로
+      }));
+      if (j) { dropUrl(); toast(j.reused ? '같은 사진이 보관함에 있어서 그걸 연결했어' : `${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
     };
     openSheet(`${slotName(s)} — 파일 올리기`,
       h('p', { class: 'hint' }, 'JPEG·PNG·WebP만, 한 장 8MB까지 (큰 사진은 올리기 전에 자동으로 줄여). GIF·HEIC·SVG는 안 돼.'),
@@ -686,6 +762,8 @@ export function createStudio(ui) {
       h('p', { class: 'notice' }, '다른 사람 사진·인터넷에서 받은 사진은 저작권자 허락이 있어야 써. 상품 공식 이미지는 판매처·제조사의 이용 조건을 먼저 확인해줘.'),
       field('사진 설명 (대체 텍스트)', desc),
       goBtn);
+    ui.setSheetOnClose(dropUrl);
+    if (ui.setSheetGuard) ui.setSheetGuard(() => !ready);
   }
 
   // ═════════ 보관함에서 고르기 ═════════
@@ -695,20 +773,24 @@ export function createStudio(ui) {
     let tab = mine.length ? 'mine' : 'all';
     const seg = h('div', { class: 'seg', role: 'group' });
     const box = h('div', { class: 'stack' });
-    let next = null, all = [];
+    let next = null, all = [], lseq = 0;
     const choose = async (img, ev) => { const j = await linkTo(p, s, img, ev.currentTarget); if (j) closeSheet(); };
     const grid = (list) => (list.length ? h('div', { class: 'grid3' }, list.map((i) => pickThumb(i, (ev) => choose(i, ev)))) : h('p', { class: 'hint' }, '이미지가 없어.'));
-    const loadAll = async (more) => {
-      if (!more) { all = []; put(box, h('p', { class: 'hint' }, '불러오는 중…')); }
+    // 탭을 빨리 바꿔도 늦게 온 응답이 다른 탭을 덮지 않게
+    const loadAll = async (more, button) => {
+      const my = ++lseq;
+      if (button) button.disabled = true;
+      if (!more) put(box, h('p', { class: 'hint' }, '불러오는 중…'));
       try {
         const j = await api('/images' + (more && next ? '?before=' + encodeURIComponent(next) : ''));
-        all = all.concat(j.images); next = j.next;
-        put(box, grid(all), next ? btn('더 보기', 'sm ghost', () => loadAll(true)) : null);
-      } catch (e) { if (e && e.code !== 'auth') put(box, h('p', { class: 'hint' }, ui.errText(e))); }
+        if (my !== lseq || tab !== 'all') return;
+        all = more ? all.concat(j.images) : j.images; next = j.next;
+        put(box, grid(all), next ? btn('더 보기', 'sm ghost', (ev) => loadAll(true, ev.currentTarget)) : null);
+      } catch (e) { if (my === lseq && e && e.code !== 'auth') put(box, h('p', { class: 'hint' }, ui.errText(e))); }
     };
     const draw = () => {
       put(seg, ...[['mine', `이 글 이미지 ${mine.length}`], ['all', '보관함 전체']].map(([k, l]) => h('button', { type: 'button', 'aria-pressed': String(k === tab), onclick: () => { tab = k; draw(); } }, l)));
-      if (tab === 'mine') put(box, grid(mine)); else loadAll(false);
+      if (tab === 'mine') { lseq++; put(box, grid(mine)); } else loadAll(false);
     };
     openSheet(`${slotName(s)} — 보관함에서 고르기`, h('p', { class: 'hint' }, '같은 이미지를 여러 자리·여러 원고에 써도 돼.'), seg, box);
     draw();
@@ -741,13 +823,24 @@ export function createStudio(ui) {
       win.style.left = (r.x / W) * 100 + '%'; win.style.top = (r.y / H) * 100 + '%';
       win.style.width = (r.w / W) * 100 + '%'; win.style.height = (r.h / H) * 100 + '%';
     };
-    pic.addEventListener('load', () => { place(); prepare(); });
+    // 원본은 이 창에서 한 번만 받아서 풀어 둠 (자르는 곳을 바꿀 때마다 다시 받지 않게)
+    let srcP = null;
+    const source = () => (srcP ||= loadSource(img).catch((e) => { srcP = null; throw e; }));
+    let prepTimer = null;
+    const prepareSoon = () => { clearTimeout(prepTimer); prepTimer = setTimeout(() => prepare(), 250); };
+    pic.addEventListener('load', () => { place(); prepareSoon(); });
     let cropDirty = false;
-    const saveCrop = btn('자르는 곳 저장', 'sm ghost', async (ev) => {
-      const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/images/slot`, { method: 'POST', body: { slot_key: s.key, crop: { ratio, x: focus.x, y: focus.y }, purpose } }), '저장했어 — 내려받을 때 이대로 잘라');
-      if (j) { cropDirty = false; saveCrop.disabled = true; row.crop = j.slot.crop; row.purpose = j.slot.purpose; }
-    }, { disabled: true });
-    const dirtyCrop = () => { cropDirty = true; saveCrop.disabled = false; place(); prepare(); };
+    // 저장하면 지금 화면의 기록(캐시)에도 바로 넣음 — 다른 동작으로 기록이 새로 바뀌어도 잃지 않게
+    const applySlot = (sl) => {
+      if (!sl) return;
+      row.crop = sl.crop; row.purpose = sl.purpose;
+      const cur = dataOf(p.id) || {};
+      for (const x of [...(cur.slots || []), ...(cur.extra || [])]) if (x.key === s.key && x.row) { x.row.crop = sl.crop; x.row.purpose = sl.purpose; }
+    };
+    const saveSlot = () => api(`/posts/${p.id}/images/slot`, { method: 'POST', body: { slot_key: s.key, crop: { ratio, x: focus.x, y: focus.y }, purpose } })
+      .then((j) => { cropDirty = false; saveCrop.disabled = true; applySlot(j.slot); refresh(p.id); return j; });
+    const saveCrop = btn('자르는 곳 저장', 'sm ghost', (ev) => run(ev.currentTarget, saveSlot, '저장했어 — 내려받을 때 이대로 잘라'), { disabled: true });
+    const dirtyCrop = () => { cropDirty = true; saveCrop.disabled = false; place(); prepareSoon(); };
     wrap.addEventListener('click', (e) => {
       const b = pic.getBoundingClientRect();
       if (!b.width || !b.height) return;
@@ -792,7 +885,7 @@ export function createStudio(ui) {
       const my = ++seq;
       file = null; dlBtn.disabled = true; dlBtn.textContent = '파일 준비 중…';
       try {
-        const f = await renderOutput(img, { ratio, focus, purpose, name: fileName() });
+        const f = await renderOutput(img, { ratio, focus, purpose, name: fileName() }, await source());
         if (my !== seq) return;
         file = f;
         outInfo.textContent = `내려받을 파일: ${f.w}×${f.h} · ${fmtBytes(f.size)}`;
@@ -808,6 +901,8 @@ export function createStudio(ui) {
       const reviewNow = img.review_status === '검수 전';
       const pending = saveFiles([file], file.name); // 누른 순간에 바로 (휴대폰 공유 창은 바로 열어야 함)
       if (reviewNow) api('/images/' + img.id, { method: 'POST', body: { review_status: '사용 가능' } }).then(() => { img.review_status = '사용 가능'; drawReview(); syncDl(); }).catch(() => {});
+      // 저장 안 한 자르기·용도로 내려받았으면 그것도 저장 (복사한 글의 파일 이름·크기와 맞게)
+      if (cropDirty) saveSlot().catch(() => {});
       const r = await pending;
       if (r === 'cancelled') return;
       api('/images/downloaded', { method: 'POST', body: { items: [{ image_id: img.id, post_id: p.id, slot_key: s.key }] } }).then(() => refresh(p.id)).catch(() => {});
@@ -828,23 +923,32 @@ export function createStudio(ui) {
         ' on ', img.source_url ? h('a', { href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels') : 'Pexels'));
       info.push(h('p', { class: 'hint' }, `라이선스: ${img.license}`), h('div', { class: 'go' }, h('span', { class: 'sns' }, img.attribution_text), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(img.attribution_text, ev.currentTarget) }, '출처 문구 복사')));
     } else if (img.kind === 'upload') info.push(h('p', { class: 'hint' }, '직접 올린 사진 · 쓸 권한이 있다고 확인함'));
-    else info.push(h('p', { class: 'hint' }, '카드뉴스에서 만든 이미지'));
+    else info.push(h('p', { class: 'hint' }, `카드뉴스에서 만든 이미지${img.license && img.license.includes('배경') ? ' · ' + img.license.replace(/^카드뉴스 \(앱에서 직접 만듦\)\s*·\s*/, '') : ''}`));
     info.push(h('p', { class: 'hint' }, `원본 ${img.width}×${img.height} · ${fmtBytes(img.bytes)} · ${L.fmtTime(img.created_at)}${img.used_posts > 1 ? ` · 다른 원고 ${img.used_posts - 1}곳에서도 사용 중` : ''}`));
+    const altSaved = () => alt.value.trim() === String(img.alt_text || '').trim();
     openSheet(`${slotName(s)} 미리보기`,
-      wrap, cropNote,
+      // 내려받기 버튼을 사진보다 위에 (세로로 긴 사진이 휴대폰 화면을 다 덮어도 바로 보이게)
       dlBtn, outInfo,
+      wrap, cropNote,
       h('div', { class: 'row' }, field('용도', purposeSel)), h('p', { class: 'legend' }, '비율'), ratioSeg,
       h('div', { class: 'go' }, saveCrop),
       h('p', { class: 'legend' }, '검수'), reviewSeg,
       ...info,
-      field('대체 텍스트 (사진 설명)', alt, '블로그 에디터에 사진 설명을 넣는 칸이 있으면 이걸 넣어줘.'),
+      field('대체 텍스트 (사진 설명)', alt, '블로그 에디터에 사진 설명을 넣는 칸이 있으면 이걸 넣어줘. 고치고 창을 닫으면 저절로 저장돼.'),
       h('div', { class: 'go' }, btn('대체 텍스트 저장', 'sm ghost', async (ev) => {
         const j = await run(ev.currentTarget, () => api('/images/' + img.id, { method: 'POST', body: { alt_text: alt.value.trim() } }), '저장했어');
         if (j) img.alt_text = alt.value.trim();
       }), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(alt.value.trim(), ev.currentTarget) }, '복사')),
       h('div', { class: 'go' }, btn(row.used_at ? '사용 완료 취소' : '블로그에 넣었어 (사용 완료)', 'sm ghost', async (ev) => { await markUsed(p, s, !row.used_at, ev.currentTarget); closeSheet(); })));
-    ui.setSheetOnClose(() => { if (cropDirty) toast('자르는 곳은 저장하지 않았어'); });
-    if (pic.complete && pic.naturalWidth) { place(); prepare(); }
+    ui.setSheetOnClose(() => {
+      clearTimeout(prepTimer); seq++;
+      if (cropDirty) toast('자르는 곳은 저장하지 않았어');
+      if (!altSaved()) {
+        const v = alt.value.trim();
+        api('/images/' + img.id, { method: 'POST', body: { alt_text: v } }).then(() => { img.alt_text = v; toast('대체 텍스트도 저장했어'); }).catch(() => toast('대체 텍스트를 저장하지 못했어'));
+      }
+    });
+    if (pic.complete && pic.naturalWidth) { place(); prepareSoon(); }
   }
 
   // 파일 저장: 휴대폰은 공유 창(사진에 저장), 컴퓨터는 내려받기 (여러 장이면 ZIP)
@@ -883,6 +987,7 @@ export function createStudio(ui) {
     (async () => {
       let failed = 0;
       for (const [i, s] of list.entries()) {
+        if (!saveBtn.isConnected) return; // 창을 닫으면 그만 받음 (휴대폰 데이터 아끼기)
         status.textContent = `${i + 1}/${list.length} 준비 중…`;
         const img = imgs[s.row.image_id];
         const purpose = (s.row.purpose && IMG.PURPOSES[s.row.purpose]) ? s.row.purpose : IMG.slotPurpose(s.key);
@@ -898,7 +1003,11 @@ export function createStudio(ui) {
     const save = async () => {
       const r = await saveFiles(files.map((x) => x.file), IMG.fileNameFor(p, 'images', '', 'zip'));
       if (r === 'cancelled') return;
-      api('/images/downloaded', { method: 'POST', body: { items: files.map((x) => ({ image_id: x.img.id, post_id: p.id, slot_key: x.s.key })) } }).then(() => refresh(p.id)).catch(() => {});
+      // 서버는 한 번에 40개까지 받아서 나눠 보냄
+      const items = files.map((x) => ({ image_id: x.img.id, post_id: p.id, slot_key: x.s.key }));
+      const sends = [];
+      for (let i = 0; i < items.length; i += 40) sends.push(api('/images/downloaded', { method: 'POST', body: { items: items.slice(i, i + 40) } }));
+      Promise.all(sends).then(() => refresh(p.id)).catch(() => {});
       toast(r === 'shared' ? '저장했어. 순서대로 블로그 사진 자리에 넣어줘.' : '내려받았어', 4000);
     };
   }
@@ -935,10 +1044,19 @@ export function createStudio(ui) {
     drawSegs();
     const ad = h('input', { type: 'checkbox', checked: !!dk.ad_label, onchange: (e) => { dk.ad_label = e.target.checked; changed(); } });
     const bgBox = h('div', { class: 'grid3' });
-    const bgChoices = (d.images || []).filter((i) => i.kind !== 'card');
-    const drawBg = () => put(bgBox, 
-      h('button', { type: 'button', class: 'pick' + (!dk.bg_image_id ? ' sel' : ''), onclick: () => { dk.bg_image_id = null; drawBg(); changed(); } }, h('span', { class: 'ph' }, '배경 없음'), h('small', null, '표지 배경')),
-      ...bgChoices.map((i) => { const b = pickThumb(i, () => { dk.bg_image_id = i.id; drawBg(); changed(); }); if (dk.bg_image_id === i.id) b.classList.add('sel'); return b; }));
+    const bgNote = h('div');
+    // '사용 안 함'으로 표시한 이미지는 배경 후보에서 뺌
+    const bgChoices = (d.images || []).filter((i) => i.kind !== 'card' && (i.review_status !== '사용 안 함' || i.id === dk.bg_image_id));
+    const drawBg = () => {
+      put(bgBox,
+        h('button', { type: 'button', class: 'pick' + (!dk.bg_image_id ? ' sel' : ''), onclick: () => { dk.bg_image_id = null; drawBg(); changed(); } }, h('span', { class: 'ph' }, '배경 없음'), h('small', null, '표지 배경')),
+        ...bgChoices.map((i) => { const b = pickThumb(i, () => { dk.bg_image_id = i.id; drawBg(); changed(); }); if (dk.bg_image_id === i.id) b.classList.add('sel'); return b; }));
+      const cur = dk.bg_image_id ? imgs[dk.bg_image_id] : null;
+      put(bgNote,
+        cur && cur.kind === 'ai' ? h('p', { class: 'notice' }, "AI로 만든 배경이야. 인스타에 올릴 때 캡션에 'AI로 만든 이미지'라고 같이 적어줘 (실제 사진처럼 보이지 않게).") : null,
+        cur && cur.kind === 'stock' ? h('p', { class: 'hint' }, `배경 사진: ${cur.attribution_text || 'Pexels'} — 캡션에 출처를 같이 적으면 좋아.`) : null,
+        cur && cur.review_status === '사용 안 함' ? h('p', { class: 'badbox' }, "'사용 안 함'으로 표시한 이미지야. 다른 배경을 골라줘.") : null);
+    };
     drawBg();
     const list = h('div', { class: 'stack' });
     const drawList = () => {
@@ -969,32 +1087,43 @@ export function createStudio(ui) {
       return bgEl;
     };
     const adText = () => '광고';
+    const allText = () => dk.slides.map((x) => `${x.title}${x.text}`).join('');
+    // 장마다 캔버스를 하나씩 두고 다시 씀 (글자를 칠 때마다 새로 만들지 않게 — 휴대폰 메모리)
+    const figs = [];
     const paint = async () => {
-      await ensureFonts();
+      await ensureFonts(allText());
       const bg = await getBg();
       const deck = { ...dk };
       const over = [];
-      put(previews, ...dk.slides.map((sl, i) => {
-        const cv = document.createElement('canvas');
-        const r = renderSlide(cv, deck, i, { scale: 0.5, bg, adText: adText() });
+      figs.length = Math.min(figs.length, dk.slides.length);
+      for (let i = 0; i < dk.slides.length; i++) {
+        if (!figs[i]) {
+          const cv = document.createElement('canvas');
+          figs[i] = { cv, el: h('figure', { class: 'card-prev' }, cv, h('figcaption', { class: 'go' }, h('span', { class: 'hint' }, `${i + 1}장`),
+            h('button', { type: 'button', class: 'copy', onclick: (ev) => saveSlideToLibrary(p, dk, i, ev.currentTarget) }, '이 장 보관함에 저장'))) };
+        }
+        const r = renderSlide(figs[i].cv, deck, i, { scale: 0.5, bg, adText: adText() });
         if (r.overflow) over.push(i + 1);
-        return h('figure', { class: 'card-prev' }, cv, h('figcaption', { class: 'go' }, h('span', { class: 'hint' }, `${i + 1}장`),
-          h('button', { type: 'button', class: 'copy', onclick: (ev) => saveSlideToLibrary(p, dk, i, ev.currentTarget) }, '이 장 보관함에 저장')));
-      }));
+      }
+      put(previews, ...figs.map((f) => f.el));
       put(overflowNote, over.length ? h('p', { class: 'notice' }, `${over.join(', ')}장은 글자가 많아서 잘렸어. 줄여줘.`) : '');
     };
+    // 글꼴이 늦게 내려오면 그때 다시 그림
+    const onFonts = () => { if (!previews.isConnected) { document.fonts.removeEventListener('loadingdone', onFonts); return; } schedule(); };
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', onFonts);
     const schedule = () => { clearTimeout(timer); timer = setTimeout(paint, 250); };
     const prepareAll = async () => {
       pngBtn.disabled = true; pngBtn.textContent = '만드는 중…';
       try {
-        await ensureFonts();
+        await ensureFonts(allText());
         const bg = await getBg();
         const files = [];
+        const cv = document.createElement('canvas');
         for (let i = 0; i < dk.slides.length; i++) {
-          const cv = document.createElement('canvas');
           renderSlide(cv, dk, i, { scale: 1, bg, adText: adText() });
           files.push(fileOf(await canvasToBlob(cv, 'image/png'), IMG.fileNameFor(p, `card-${String(i + 1).padStart(2, '0')}`, '', 'png'), cv.width, cv.height));
         }
+        cv.width = 0; cv.height = 0;
         if (!pngBtn.isConnected) return;
         prepared = files;
         pngBtn.disabled = false;
@@ -1016,7 +1145,7 @@ export function createStudio(ui) {
       h('section', { class: 'panel' }, h('h2', null, '모양'), h('p', { class: 'legend' }, '템플릿'), tplSeg, h('p', { class: 'legend' }, '비율'), ratioSeg,
         h('label', { class: 'chk' }, ad, '첫 장에 광고 표시'),
         disc ? h('p', { class: 'hint' }, '제휴·협찬 글이라 켜 두는 게 좋아. 인스타에 올릴 때 캡션 첫 줄에도 고지문을 넣어줘 (원고의 인스타 캡션 복사 버튼이 자동으로 넣어줘).') : null,
-        h('p', { class: 'legend' }, '표지 배경 (이 글의 이미지)'), bgBox),
+        h('p', { class: 'legend' }, '표지 배경 (이 글의 이미지)'), bgBox, bgNote),
       h('section', { class: 'panel' }, h('h2', null, `문구 (${dk.slides.length}장)`),
         !dk.saved && dk.source === 'body' && !d.deck ? h('p', { class: 'notice' }, '원고의 소제목·목록에서 뽑은 초안이야. 사실과 맞는지 보고 고쳐줘. 채널별 버전에서 카드뉴스 문구를 만들면 그걸로 시작해.') : null, list),
       h('section', { class: 'panel' }, h('h2', null, '미리보기'), overflowNote, previews,
@@ -1026,17 +1155,18 @@ export function createStudio(ui) {
   }
   async function saveSlideToLibrary(p, dk, i, button) {
     await run(button, async () => {
-      await ensureFonts();
+      await ensureFonts(dk.slides.map((x) => `${x.title}${x.text}`).join(''));
       const cv = document.createElement('canvas');
-      let bg = null; // 표지 배경이 있으면 미리보기와 같게 그림
-      if (dk.bg_image_id) {
+      let bg = null; // 표지 배경이 있으면 미리보기와 같게 그림 (배경은 1장에만)
+      if (dk.bg_image_id && i === 0) {
         const im = imgsOf(p.id)[dk.bg_image_id];
         if (im && im.url) { try { const r = await fetch(im.url, { mode: 'cors', credentials: 'omit' }); bg = await loadImg(await r.blob()); } catch { bg = null; } }
       }
       renderSlide(cv, dk, i, { scale: 1, bg, adText: '광고' });
       const blob = await canvasToBlob(cv, 'image/png');
       const fd = new FormData();
-      fd.append('meta', JSON.stringify({ kind: 'card', post_id: p.id, description: `카드뉴스 ${i + 1}장 · ${dk.slides[i].title || ''}`.trim() }));
+      // 배경으로 쓴 이미지를 알려줘서 출처(사진가·AI 여부)를 카드 기록에도 남김
+      fd.append('meta', JSON.stringify({ kind: 'card', post_id: p.id, description: `카드뉴스 ${i + 1}장 · ${dk.slides[i].title || ''}`.trim(), bg_image_id: i === 0 && bg ? dk.bg_image_id : undefined }));
       fd.append('file', blob, `card-${i + 1}.png`);
       const j = await api('/images/upload', { method: 'POST', body: fd });
       await fetchPost(p.id, true).catch(() => {});
@@ -1054,25 +1184,28 @@ export function createStudio(ui) {
     const usageP = h('p', { class: 'hint' });
     const grid = h('div', { class: 'grid2' });
     const more = h('div');
-    let items = [], next = null;
+    let items = [], next = null, lseq = 0;
     const drawSeg = () => put(seg, ...[['', '전체'], ['ai', 'AI 생성'], ['stock', '실제 사진'], ['upload', '직접 올림'], ['card', '카드뉴스']].map(([k, l]) =>
       h('button', { type: 'button', 'aria-pressed': String(k === libKind), onclick: () => { libKind = k; drawSeg(); loadLib(false); } }, l)));
     const card = (i) => h('button', { type: 'button', class: 'pick', onclick: () => imageSheet(i.id, () => loadLib(false)) },
       i.url ? h('img', { src: i.url, alt: i.alt_text || i.description || '이미지', loading: 'lazy', decoding: 'async' }) : h('span', { class: 'ph' }, '이미지'),
       h('small', null, [IMG.KIND_LABEL[i.kind], i.review_status, i.uses ? `${i.uses}곳에서 사용` : '안 쓰는 중'].join(' · ')));
+    // 종류를 빨리 바꿔도 마지막으로 고른 것만 보여줌 (늦게 온 응답은 버림)
     const loadLib = async (append) => {
-      if (!append) { items = []; put(grid, h('p', { class: 'hint' }, '불러오는 중…')); put(more, ); }
+      const my = ++lseq;
+      if (!append) { put(grid, h('p', { class: 'hint' }, '불러오는 중…')); put(more); } else put(more, h('p', { class: 'hint' }, '불러오는 중…'));
       try {
         const qs = new URLSearchParams();
         if (libKind) qs.set('kind', libKind);
         if (append && next) qs.set('before', next);
         const j = await api('/images' + (qs.toString() ? '?' + qs : ''));
-        items = items.concat(j.images); next = j.next;
+        if (my !== lseq) return;
+        items = append ? items.concat(j.images) : j.images; next = j.next;
         const u = j.usage || {};
         usageP.textContent = `보관함 ${L.fmtNum(u.image_count || 0)}장 · 저장 공간 ${fmtBytes(Number(u.storage_bytes || 0))} 사용 중 · ${usageLine(u)}`;
         put(grid, ...(items.length ? items.map(card) : [h('p', { class: 'hint' }, '이미지가 없어.')]));
         put(more, next ? btn('더 보기', 'sm ghost', () => loadLib(true)) : '');
-      } catch (e) { if (e && e.code !== 'auth') put(grid, h('p', { class: 'hint' }, ui.errText(e))); }
+      } catch (e) { if (my === lseq && e && e.code !== 'auth') put(grid, h('p', { class: 'hint' }, ui.errText(e))); }
     };
     drawSeg();
     pnl.append(h('h2', null, '이미지 보관함'), usageP, seg, grid, more,
@@ -1081,21 +1214,26 @@ export function createStudio(ui) {
     return box;
   }
   async function imageSheet(id, onChange) {
-    openSheet('이미지', h('p', { class: 'hint' }, '불러오는 중…'));
+    const marker = h('p', { class: 'hint' }, '불러오는 중…');
+    openSheet('이미지', marker);
     let j;
-    try { j = await api('/images/' + id); } catch (e) { if (e && e.code !== 'auth') openSheet('이미지', h('p', { class: 'hint' }, ui.errText(e))); return; }
+    try { j = await api('/images/' + id); } catch (e) { if (e && e.code !== 'auth' && marker.isConnected) openSheet('이미지', h('p', { class: 'hint' }, ui.errText(e))); return; }
+    if (!marker.isConnected) return; // 기다리는 사이에 창을 닫았으면 다시 열지 않음
     const img = j.image;
     const used = (j.used_in || []).map((u) => h('li', null, h('button', { type: 'button', class: 'copy', onclick: () => { closeSheet(); go('content/post/' + u.post_id); } },
       `${u.posts && u.posts.titles && u.posts.titles[0] ? u.posts.titles[0] : u.posts ? u.posts.keyword : '원고'}${u.posts && u.posts.deleted_at ? ' (휴지통)' : ''} · ${u.slot_key.startsWith('x:') ? (IMG.extraSlot(u.slot_key) || {}).label || '본문 밖' : '사진 ' + (Number(u.slot_index) + 1)}`)));
     const inUse = (j.used_in || []).length + (j.decks || []).length;
     const c = genCost(j.generation);
-    const dl = btn('원본 내려받기', 'sm ghost', async (ev) => {
-      const b = ev.currentTarget;
-      await run(b, async () => {
-        const f = await renderOutput(img, { original: true, name: IMG.fileNameFor({ keyword: (img.description || '이미지').slice(0, 20) }, 'original', '', outExt(img)) });
-        await saveFiles([f], f.name);
-      });
-    });
+    // 휴대폰 공유 창은 누른 순간에 열어야 해서, 창을 열 때 파일을 먼저 준비해 둠
+    let orig = null;
+    const dl = btn('원본 준비 중…', 'sm ghost', async () => {
+      if (!orig) return;
+      const r = await saveFiles([orig], orig.name);
+      if (r !== 'cancelled') toast(r === 'shared' ? '저장했어' : `내려받았어 (${orig.name})`);
+    }, { disabled: true });
+    renderOutput(img, { original: true, name: IMG.fileNameFor({ keyword: (img.description || '이미지').slice(0, 20) }, 'original', '', outExt(img)) })
+      .then((f) => { orig = f; if (dl.isConnected) { dl.disabled = false; dl.textContent = '원본 내려받기'; } })
+      .catch(() => { if (dl.isConnected) dl.textContent = '원본을 불러오지 못했어'; });
     openSheet(IMG.KIND_LABEL[img.kind] || '이미지',
       thumb(img, null), h('div', { class: 'chips' }, kindChip(img), reviewChip(img)),
       img.description ? h('p', null, img.description) : null,
@@ -1143,8 +1281,9 @@ export function createStudio(ui) {
     const guide = det('img-key-guide', '키 받는 방법·넣는 곳 (처음 한 번)', false, '');
     guide.append(h('ol', { class: 'steps' },
       h('li', null, 'OpenAI: platform.openai.com 에 로그인 → API keys → Create new secret key. 결제(Billing)에 크레딧이 있어야 하고, GPT Image 모델은 조직 인증(Organization Verification)이 필요할 수 있어.'),
-      h('li', null, 'Pexels: pexels.com/api 에서 가입 → 내 API 키 확인 (무료, 시간당 200번·월 20,000번).'),
-      h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 OPENAI_API_KEY, PEXELS_API_KEY 이름으로 붙여넣고 저장.'),
+      h('li', null, 'OpenAI 쪽 안전장치: OpenAI 설정 → Limits → Spend 에서 한 달 한도를 넣고 Enforce a hard limit 를 켜두면, 앱 한도와 별개로 그 금액에서 막혀.'),
+      h('li', null, 'Pexels: 지금(2026-10-22 확인)은 새 키 발급이 멈춰 있어. 다시 열리면 pexels.com/api → Get Started 로 받아 (무료, 시간당 200번·월 20,000번). 그 전까지는 직접 올리기를 써.'),
+      h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 OPENAI_API_KEY, PEXELS_API_KEY 이름으로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
       h('li', null, '이 화면을 다시 열어 "키 연결됨"이 보이면 끝. 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).')),
       h('div', { class: 'go' }, h('a', { class: 'copy', href: 'https://supabase.com/dashboard/project/oxewhsqmdkiasckvnyua/functions/secrets', target: '_blank', rel: 'noopener noreferrer' }, 'Supabase Secrets 열기 ↗'),
         h('a', { class: 'copy', href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI 키 ↗'),
@@ -1152,15 +1291,20 @@ export function createStudio(ui) {
     return [
       status, guide,
       h('h3', null, '모델'), field('생성 모델', f.gen), field('편집 모델 (고쳐서 만들기)', f.edit),
-      h('p', { class: 'hint' }, '계정에서 이 모델을 못 쓰면 OpenAI 문서에 있는 다른 이미지 모델 이름으로 바꿔줘 (예: gpt-image-2).'),
-      field('기본 품질', f.quality, '보통(medium) 1024×1024 한 장 예상 약 $0.013, 높음은 약 $0.05 (2026-10-22 가격표 기준).'),
+      h('p', { class: 'hint' }, '계정에서 이 모델을 못 쓰면 다른 이미지 모델 이름으로 바꿔줘. 앱이 아는 모델 (OpenAI 문서, 2026-10-22 확인):'),
+      h('ul', { class: 'lic' },
+        h('li', null, 'gpt-image-2.5-flare · gpt-image-2.5-sunburst — 기본. 원하는 비율 그대로, 품질 5단계, 가격은 아래 가격표'),
+        h('li', null, 'gpt-image-2 — 원하는 비율 그대로, 품질 3단계. 장당 가격을 확인 못 해서 예상 비용을 넉넉히 잡아'),
+        h('li', null, 'gpt-image-1.5 · gpt-image-1 · gpt-image-1-mini — 이전 모델(Deprecated). 정해진 크기 3가지로 만들고 내려받을 때 잘라, 품질 3단계, 모델 페이지의 장당 가격으로 계산'),
+        h('li', null, '그 밖의 이름 — 정해진 크기 3가지·품질 3단계로 보내고, 예상 비용은 넉넉히 잡고 사용량 계산은 안 해 (청구액은 직접 확인)')),
+      field('기본 품질', f.quality, '보통(medium) 1024×1024 한 장 예상 약 $0.013, 높음은 약 $0.05 (2.5 모델, 2026-10-22 가격표 기준). 모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내.'),
       h('h3', null, '비용 한도'),
       h('div', { class: 'row' }, field('하루 생성 한도 (번)', f.daily, '0이면 AI 생성을 막아.'), field('한 달 예산 (달러)', f.budget, '넘게 되면 새 생성을 멈춰.')),
       h('p', { class: 'hint' }, '예산은 실제 청구액 > 사용량 기준 > 예상 순으로 더해서 셈해. 청구됐는지 모르는 실패도 예상 비용으로 셈해서 넉넉하게 막아.'),
       h('h3', null, '환율 (원화로 볼 때)'),
       h('div', { class: 'row' }, field('원/달러', f.fx), field('기준 날짜', f.fxDate)), field('기준 (어디 환율)', f.fxSrc),
       h('p', { class: 'hint' }, '앱이 환율을 가져오지 않아. 확인한 환율과 날짜·출처를 넣으면, 그 뒤 생성 기록은 그 환율로 원화를 계산해.'),
-      h('h3', null, 'OpenAI 가격 (100만 토큰당 달러)'),
+      h('h3', null, 'OpenAI 가격 (100만 토큰당 달러 · gpt-image-2.5 모델)'),
       h('div', { class: 'row' }, field('이미지 출력', f.pOut), field('이미지 입력', f.pIn), field('텍스트 입력', f.pText)),
       h('div', { class: 'row' }, field('확인한 날', f.pAt), field('가격표 주소', f.pSrc)),
       btn('저장', 'sm', async (ev) => {
@@ -1191,11 +1335,13 @@ export function createStudio(ui) {
     const krwText = t.krw != null ? L.won(t.krw) : null;
     const kp = (label, value, sub) => h('div', { class: 'kpi' }, h('span', null, label), value == null ? h('b', { class: 'none' }, '데이터 없음') : h('b', null, value), sub ? h('small', null, sub) : null);
     const after = net != null && t.krw != null ? net - Number(t.krw) : null;
+    // 청구액을 다 확인한 게 아니면 '예상 포함'이라고 밝힘 (예상과 실제 청구액은 다를 수 있음)
+    const est = Number(t.n_actual || 0) < Number(t.billed || 0);
     return h('div', { class: 'stack' },
       h('div', { class: 'kpis' },
-        kp('이미지 생성 비용', t.count ? `${usd(t.usd)}${krwText && Number(t.usd) > 0 ? ' ≈ ' + krwText : ''}` : null, t.count ? `비용 반영 ${t.billed}번 / 기록 ${t.count}번` : null),
+        kp(est ? '이미지 생성 비용 (예상 포함)' : '이미지 생성 비용', t.count ? `${usd(t.usd)}${krwText && Number(t.usd) > 0 ? ' ≈ ' + krwText : ''}` : null, t.count ? `비용 반영 ${t.billed}번 / 기록 ${t.count}번` : null),
         kp('청구액 확인', t.count ? `${t.n_actual || 0}건` : null, t.count ? `사용량 기준 ${t.n_usage || 0}건 · 확인 필요 ${t.uncertain || 0}건` : null),
-        after != null ? kp('이미지 비용까지 뺀 확정 기준 순수익', L.won(after), '확정 수익 − 비용 − 이미지 비용(원화)') : null),
+        after != null ? kp(est ? '이미지 비용(예상 포함)까지 뺀 순수익' : '이미지 비용까지 뺀 확정 기준 순수익', L.won(after), '확정 수익 − 비용 − 이미지 비용(원화)') : null),
       h('p', { class: 'hint' }, '이미지 생성 비용은 위 실적의 비용과 따로 셈해 (두 번 더하지 않아). 실적 입력의 비용 칸에는 이미지 비용을 넣지 마.'),
       h('p', { class: 'hint' }, `예상·사용량 기준 금액은 계산값이고, OpenAI 사용량 화면에서 확인해 넣은 것만 청구액으로 표시해.${st.image_fx_krw ? '' : ' 환율을 넣으면 원화로도 보여줘 (설정 > 이미지).'}${t.fx_missing ? ` 환율이 없는 기록 ${t.fx_missing}건이 있어서 원화 합계는 비워뒀어.` : ''}`));
   }
@@ -1223,7 +1369,7 @@ export function createStudio(ui) {
     return slots.map((s) => {
       const r = rows[s.key];
       const im = r && r.image_id ? r.post_images : null;
-      if (!im) return null;
+      if (!im || im.review_status === '사용 안 함') return null; // '사용 안 함'은 내려받지 않으니 글에도 안 넣음
       const purpose = (r.purpose && IMG.PURPOSES[r.purpose]) ? r.purpose : 'blog_body';
       return { fileName: IMG.fileNameFor(p, s.n, purpose, outExt(im)), caption: IMG.captionHint({ kind: im.kind, provider: im.provider, author_name: im.author_name }) };
     });
@@ -1232,10 +1378,13 @@ export function createStudio(ui) {
   function slotCount(p) {
     const slots = IMG.parseSlots(p.body);
     if (!slots.length) return null;
-    const keys = new Set(ui.slotsOf(p.id).map((r) => r.slot_key));
-    return { total: slots.length, linked: slots.filter((s) => keys.has(s.key)).length };
+    const rows = Object.fromEntries(ui.slotsOf(p.id).map((r) => [r.slot_key, r]));
+    const linked = slots.filter((s) => rows[s.key]);
+    // '사용 가능'으로 검수한 이미지만 다 됨으로 셈 (검수 전·사용 안 함은 아직)
+    return { total: slots.length, linked: linked.length, usable: linked.filter((s) => (rows[s.key].post_images || {}).review_status === '사용 가능').length };
   }
-  const invalidate = (id) => { if (id) delete C[id]; else for (const k of Object.keys(C)) delete C[k]; };
+  // 지울 때도 번호를 올려 둠 → 그 전에 보낸 요청의 응답이 늦게 와도 다시 쓰지 않음
+  const invalidate = (id) => { for (const k of id ? [id] : Object.keys(C)) C[k] = { seq: ++seqN }; };
 
   return { postPanel, viewCards, viewLibrary, settingsSection, moneyBlock, postCost, previewImages, exportImages, slotCount, invalidate, genCost };
 }

@@ -237,7 +237,7 @@ describe('1.2.0 이미지가 연결된 원고 내보내기', () => {
   });
   test('복사용 HTML·텍스트: 내려받은 파일 이름과 캡션(AI 안내·사진 출처)을 그 자리에, 이미지 주소는 넣지 않음', () => {
     const html = L.exportHtml(post, { links: [], programs: {}, images: imgs });
-    assert.match(html, /사진 1: 내려받은 「청소기-01-blog_body\.jpg」을 여기에 넣어줘/);
+    assert.match(html, /사진 1: 내려받은 「청소기-01-blog_body\.jpg」 파일을 여기에 넣어줘/);
     assert.match(html, /※ AI로 만든 예시 이미지/);
     assert.match(html, /사진 2: 두 번째 자리 \(여기에 사진 넣기\)/);
     assert.match(html, /사진: Kim \(Pexels\)/);
@@ -272,5 +272,11 @@ describe('1.2.0 이미지가 연결된 원고 내보내기', () => {
     assert.equal(L.safeImgUrl('data:image/svg+xml,<svg onload=alert(1)>'), '');
     assert.equal(L.safeImgUrl('http://evil.example/a.jpg'), '');
     assert.equal(L.safeImgUrl('https://a.jpg" onerror="x'), '');
+    assert.equal(L.safeImgUrl('//evil.example/x.png'), '', '//로 시작하는 다른 곳 주소는 막음');
+    assert.equal(L.safeImgUrl('/fixtures/a.jpg'), '/fixtures/a.jpg');
+    assert.equal(L.safeImgUrl('http://127.0.0.1:8000/a.jpg'), '', '시험용 주소는 그 기기에서 열 때만');
+    // ZIP 안 파일 이름은 겹치지 않게 (이미 -2 가 있으면 그다음 번호)
+    const u = L.uniqueNames(['a.jpg', 'a.jpg', 'a-2.jpg', 'A.JPG']);
+    assert.equal(new Set(u.map((x) => x.toLowerCase())).size, 4, u.join(','));
   });
 });

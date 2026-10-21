@@ -47,7 +47,7 @@ function fakeDeps(over = {}) {
       if (name === 'image_slot_upsert') return { data: { ...args.p }, error: null };
       return { data: null, error: null };
     },
-    upload: async (path, bytes, mime) => { log.upload.push({ path, bytes, mime }); return over.upload ? over.upload(path, bytes, mime) : { error: null }; },
+    upload: async (path, bytes, mime, o) => { log.upload.push({ path, bytes, mime, o }); return over.upload ? over.upload(path, bytes, mime, o) : { error: null }; },
     remove: async (paths) => { log.remove.push(paths); return { error: null }; },
     download: async (path) => { log.download.push(path); return over.download ? over.download(path) : { ok: true, bytes: fx('photo-4x3.jpg') }; },
     findImage: async (q) => (over.findImage ? over.findImage(q) : null),
@@ -71,11 +71,24 @@ describe('OpenAI 오류 나누기 (자동 재시도 금지 대상·청구 여부
     const q = c(429, { error: { code: 'insufficient_quota', message: 'You exceeded your current quota' } });
     assert.deepEqual([q.code, q.billed, q.retryable], ['openai_quota', 'no', false]);
     assert.equal(c(429, { error: { message: 'Rate limit reached' } }).code, 'openai_rate_limited');
+    // OpenAI 'Spend limits' 문서의 오류 코드 (2026-10-22): 직접 걸어둔 한 달 한도 → 기다려도 안 풀림, 다시 시도 안내 안 함
+    for (const code of ['organization_spend_limit_exceeded', 'project_spend_limit_exceeded', 'organization_usage_limit_exceeded']) {
+      const sl = c(429, { error: { code, message: 'You have reached your spend limit.' } });
+      assert.deepEqual([sl.code, sl.billed, sl.retryable], ['openai_spend_limit', 'no', false], code);
+    }
+    assert.equal(c(429, { error: { code: 'credit_balance_exhausted', message: 'Your credit balance is too low.' } }).code, 'openai_quota');
     const mi = c(400, { error: { code: 'moderation_blocked', type: 'image_generation_user_error', moderation_details: { moderation_stage: 'input' } } });
     assert.deepEqual([mi.code, mi.billed, mi.retryable], ['moderation_blocked', 'no', false]);
     assert.equal(c(400, { error: { code: 'moderation_blocked', moderation_details: { moderation_stage: 'output' } } }).billed, 'maybe', '만든 뒤에 걸리면 청구됐을 수 있음');
     assert.deepEqual([c(503, {}).code, c(503, {}).billed], ['openai_server', 'maybe']);
-    assert.equal(c(400, { error: { message: 'Invalid size' } }).code, 'openai_bad_request');
+    // 모델은 되는데 크기·품질을 못 받는 경우는 '모델을 바꿔줘'가 아니라 크기·품질 문제로 (리뷰 지적: 헛도는 안내)
+    assert.equal(c(400, { error: { message: 'Invalid size' } }).code, 'openai_unsupported_option');
+    const uq = c(400, { error: { message: "Invalid value for 'quality': 'xhigh' is not supported for model gpt-image-1.", param: 'quality', code: 'invalid_value' } });
+    assert.deepEqual([uq.code, uq.param, uq.billed, uq.retryable], ['openai_unsupported_option', 'quality', 'no', false]);
+    assert.equal(c(400, { error: { message: "Invalid size '1280x960'. Supported sizes are 1024x1024, 1024x1536, 1536x1024 for this model." } }).param, 'size');
+    assert.equal(c(400, { error: { message: 'The model `gpt-image-x` does not exist.' } }).code, 'model_unavailable');
+    assert.equal(c(400, { error: { message: 'bad', param: 'model' } }).code, 'model_unavailable');
+    assert.equal(c(400, { error: { message: 'Prompt is too long' } }).code, 'openai_bad_request');
   });
   test('오류 문구에 키가 섞여 와도 가림', () => {
     const r = classifyOpenAIError(403, { error: { message: 'Incorrect API key provided: sk-proj-abcdefghijklmnop1234567890' } });
@@ -83,7 +96,7 @@ describe('OpenAI 오류 나누기 (자동 재시도 금지 대상·청구 여부
     assert.equal(scrub('x'.repeat(50)), '[가림]');
   });
   test('만들기 전에 거절된 오류만 하루 횟수에서 뺌', () => {
-    for (const k of ['openai_quota', 'model_unavailable', 'openai_key_invalid', 'openai_rate_limited']) assert.ok(NOT_COUNTED.has(k), k);
+    for (const k of ['openai_quota', 'openai_spend_limit', 'model_unavailable', 'openai_unsupported_option', 'openai_key_invalid', 'openai_rate_limited', 'server_busy_late']) assert.ok(NOT_COUNTED.has(k), k);
     for (const k of ['moderation_blocked', 'openai_timeout', 'openai_server', 'storage_failed']) assert.ok(!NOT_COUNTED.has(k), k);
   });
 });
@@ -250,7 +263,32 @@ describe('AI 생성 흐름 (생성 → 저장소 → 기록)', () => {
     const r = await runGeneration(d, { ...GEN, model: TEST_MODEL }, { key: '', prices: PRICES });
     assert.equal(r.ok, true);
     assert.equal(r.test, true);
-    assert.equal(d.log.rpc.find((x) => x.name === 'image_save').args.fin.usage_usd, null, '토큰 0 → 사용량 비용 없음');
+    const save = d.log.rpc.find((x) => x.name === 'image_save').args;
+    // 점검용은 청구 없음·하루 횟수에 안 셈, OpenAI 이미지로 보이지 않게 표시 (리뷰 지적)
+    assert.deepEqual([save.fin.usage_usd, save.fin.cost_status, save.fin.provider_called], [0, '청구 없음', false]);
+    assert.deepEqual([save.img.provider, save.img.model], ['', TEST_MODEL]);
+    assert.match(save.img.license, /점검용 시험 이미지/);
+  });
+  test('서버 일꾼이 곧 꺼지면 OpenAI를 부르지 않고 실패(청구 없음·횟수에 안 셈), 남은 시간으로 시간 제한', async () => {
+    const f = fakeFetch(() => okImage());
+    const d = fakeDeps({ fetchImpl: f });
+    const late = await runGeneration(d, GEN, { key: 'sk', prices: PRICES, deadline: d.now().getTime() + 5000 });
+    assert.equal(late.code, 'server_busy_late');
+    assert.equal(f.calls.length, 0, 'OpenAI 안 부름');
+    const fin = d.log.rpc.find((x) => x.name === 'image_gen_fail').args.fin;
+    assert.deepEqual([fin.provider_called, fin.cost_status], [false, '청구 없음']);
+    // 본문을 읽는 동안에도 시간 제한이 걸림 (머리만 오고 본문이 늦게 오는 경우)
+    const slowBody = (url, init) => Promise.resolve({ ok: true, status: 200, headers: { get: () => null },
+      json: () => new Promise((_, rej) => init.signal.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' })))) });
+    const d2 = fakeDeps({ fetchImpl: slowBody });
+    assert.equal((await runGeneration(d2, GEN, { key: 'sk', prices: PRICES, timeoutMs: 20 })).code, 'openai_timeout');
+  });
+  test('저장소 첫 시도가 실제로는 됐는데 응답만 실패해도, 두 번째는 덮어쓰기로 성공', async () => {
+    const seen = [];
+    const d = fakeDeps({ fetchImpl: fakeFetch(() => okImage()), upload: (path, bytes, mime, o) => { seen.push(!!(o && o.upsert)); return seen.length === 1 ? { error: { message: 'timeout' } } : { error: null }; } });
+    const r = await runGeneration(d, GEN, { key: 'sk', prices: PRICES });
+    assert.equal(r.ok, true);
+    assert.deepEqual(seen, [false, true]);
   });
 });
 
@@ -275,7 +313,7 @@ describe('실제 사진 고르기 흐름 (Pexels → 보관함)', () => {
     assert.equal(save.img.author_name, 'Kim');
     assert.equal(save.img.attribution_text, '사진: Kim (Pexels)');
     assert.match(save.img.license, /pexels\.com\/license/);
-    assert.deepEqual(save.link, { post_id: 'post-1', slot_key: 'k:책상#1', slot_index: 2, slot_text: '책상 사진', purpose: 'blog_body' });
+    assert.deepEqual(save.link, { post_id: 'post-1', slot_key: 'k:책상#1', slot_index: 2, slot_text: '책상 사진', slot_ctx: '', purpose: 'blog_body' });
   });
   test('이미 받은 사진이면 다시 받지 않고 연결만, 키 없음·없는 사진', async () => {
     const f = fakeFetch(route);

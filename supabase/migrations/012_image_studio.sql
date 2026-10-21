@@ -58,6 +58,7 @@ create table if not exists public.post_image_slots (
   slot_key text not null check (slot_key ~ '^(k|x):' and length(slot_key) <= 220),
   slot_index int not null default 0,
   slot_text text not null default '',
+  slot_ctx text not null default '',         -- 자리 주변 글(소제목·앞뒤 문장): 같은 설명이 여러 번 있거나 설명을 고쳐도 같은 자리를 알아보려고
   image_id uuid references public.post_images(id) on delete set null,
   purpose text not null default 'blog_body',
   crop jsonb,                                -- {"ratio":"4:3","x":0.5,"y":0.5} 중심점 (0~1)
@@ -93,6 +94,7 @@ create table if not exists public.image_generations (
   -- OpenAI가 실제로 만들기를 시도했는지 (하루 한도는 이걸로 셈). 키·모델·잔액 오류처럼 만들기 전에 거절되면 false
   provider_called boolean not null default true,
   provider_request_id text not null default '',      -- OpenAI 요청 번호 (문의할 때 씀)
+  risk_override text not null default '',            -- '실제 사진이 필요해 보이는 자리'인데 사용자가 일반 장면으로 만들겠다고 확인한 경우 그 말
   error_code text not null default '',
   error_message text not null default '',
   est_usd numeric not null default 0 check (est_usd >= 0),     -- 요청 전 예상 (공식 가격·계산기 기준)
@@ -101,6 +103,8 @@ create table if not exists public.image_generations (
   actual_usd numeric check (actual_usd >= 0),                  -- 사용자가 OpenAI 사용량 화면에서 확인해 넣은 실제 청구액
   actual_checked_at date,
   cost_status text not null default '예상' check (cost_status in ('예상','사용량 기준','청구액 확인','청구 없음','확인 필요')),
+  -- 서버가 처음 매긴 비용 상태 (사용자가 넣은 청구액을 지우면 이걸로 되돌림)
+  auto_cost_status text not null default '예상' check (auto_cost_status in ('예상','사용량 기준','청구 없음','확인 필요')),
   fx_krw numeric check (fx_krw is null or fx_krw > 0),         -- 이 기록에 쓴 환율 (원/달러)
   fx_date date,
   fx_source text not null default '',
@@ -177,14 +181,16 @@ declare
   spent numeric;
 begin
   if coalesce(p->>'request_key', '') = '' then raise exception 'request_key is required'; end if;
-  if est < 0 then raise exception 'est_usd is required'; end if;
+  if coalesce(p->>'model', '') = '' then raise exception 'model is required'; end if;
+  -- 예상 비용이 없으면 예산 검사를 건너뛰게 되므로 거절 (0은 점검용 가짜 모델만)
+  if nullif(p->>'est_usd', '') is null or est < 0 then raise exception 'est_usd is required'; end if;
   perform pg_advisory_xact_lock(hashtext('gf_image_gen'));
   select * into g from public.image_generations where request_key = p->>'request_key';
   if g.id is not null then return to_jsonb(g) || jsonb_build_object('duplicate', true); end if;
   -- 4분 넘게 끝나지 않은 생성은 실패로 정리 (서버가 중간에 멈춘 경우 — 청구됐을 수 있어 확인 필요)
   update public.image_generations set status = '실패', error_code = 'timeout',
       error_message = '응답이 끝나지 않아 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.',
-      cost_status = '확인 필요', finished_at = now()
+      cost_status = '확인 필요', auto_cost_status = '확인 필요', finished_at = now()
     where status = '생성 중' and started_at < now() - interval '4 minutes';
   if exists (select 1 from public.image_generations where status = '생성 중') then raise exception 'image_busy'; end if;
   select * into s from public.settings where id = 1;
@@ -194,12 +200,12 @@ begin
     from public.image_generations where created_at >= month_start;
   if spent + est > coalesce(s.image_monthly_budget_usd, 0) then raise exception 'image_budget'; end if;
   insert into public.image_generations (request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality,
-      output_format, purpose, style, user_prompt, prompt, base_image_id, est_usd, fx_krw, fx_date, fx_source)
+      output_format, purpose, style, user_prompt, prompt, base_image_id, est_usd, fx_krw, fx_date, fx_source, risk_override)
     values (p->>'request_key', nullif(p->>'post_id', '')::uuid, coalesce(p->>'slot_key', ''), nullif(p->>'slot_index', '')::int,
       left(coalesce(p->>'slot_text', ''), 500), coalesce(nullif(p->>'mode', ''), 'generate'), 'openai', p->>'model',
       coalesce(p->>'size', ''), coalesce(p->>'quality', ''), coalesce(nullif(p->>'output_format', ''), 'jpeg'),
       coalesce(p->>'purpose', ''), coalesce(p->>'style', ''), left(coalesce(p->>'user_prompt', ''), 2000), left(coalesce(p->>'prompt', ''), 32000),
-      nullif(p->>'base_image_id', '')::uuid, est, s.image_fx_krw, s.image_fx_date, coalesce(s.image_fx_source, ''))
+      nullif(p->>'base_image_id', '')::uuid, est, s.image_fx_krw, s.image_fx_date, coalesce(s.image_fx_source, ''), left(coalesce(p->>'risk_override', ''), 200))
     returning * into g;
   return to_jsonb(g) || jsonb_build_object('duplicate', false, 'used_today', used_today + 1, 'spent_usd', spent);
 end $$;
@@ -233,7 +239,12 @@ begin
   if gen is not null then
     update public.image_generations set status = '성공', image_id = i.id, finished_at = now(),
         usage = fin->'usage', usage_usd = nullif(fin->>'usage_usd', '')::numeric,
-        cost_status = case when nullif(fin->>'usage_usd', '') is not null then '사용량 기준' else '예상' end,
+        -- 점검용 가짜 모델처럼 서버가 '청구 없음'·'OpenAI 안 부름'을 알려주면 그대로
+        provider_called = coalesce((fin->>'provider_called')::boolean, provider_called),
+        cost_status = case when fin->>'cost_status' in ('예상','사용량 기준','청구 없음','확인 필요') then fin->>'cost_status'
+                           when nullif(fin->>'usage_usd', '') is not null then '사용량 기준' else '예상' end,
+        auto_cost_status = case when fin->>'cost_status' in ('예상','사용량 기준','청구 없음','확인 필요') then fin->>'cost_status'
+                           when nullif(fin->>'usage_usd', '') is not null then '사용량 기준' else '예상' end,
         revised_prompt = left(coalesce(fin->>'revised_prompt', ''), 4000),
         provider_request_id = left(coalesce(fin->>'request_id', ''), 120)
       where id = gen returning * into g;
@@ -252,7 +263,8 @@ begin
       error_code = left(coalesce(fin->>'error_code', 'error'), 60),
       error_message = left(coalesce(fin->>'error_message', ''), 500),
       usage = coalesce(fin->'usage', usage), usage_usd = coalesce(nullif(fin->>'usage_usd', '')::numeric, usage_usd),
-      cost_status = case when fin->>'cost_status' in ('예상','사용량 기준','청구액 확인','청구 없음','확인 필요') then fin->>'cost_status' else '확인 필요' end,
+      cost_status = case when fin->>'cost_status' in ('예상','사용량 기준','청구 없음','확인 필요') then fin->>'cost_status' else '확인 필요' end,
+      auto_cost_status = case when fin->>'cost_status' in ('예상','사용량 기준','청구 없음','확인 필요') then fin->>'cost_status' else '확인 필요' end,
       provider_request_id = left(coalesce(nullif(fin->>'request_id', ''), provider_request_id), 120)
     where id = gen and status = '생성 중' returning * into g;
   if g.id is null then raise exception 'generation is not running'; end if;
@@ -267,14 +279,19 @@ declare
   img uuid := nullif(p->>'image_id', '')::uuid;
 begin
   if not exists (select 1 from public.posts where id = p_post) then raise exception 'post not found'; end if;
-  if img is not null and not exists (select 1 from public.post_images where id = img and deleted_at is null) then raise exception 'image not found'; end if;
-  insert into public.post_image_slots (post_id, slot_key, slot_index, slot_text, image_id, purpose)
-    values (p_post, p->>'slot_key', coalesce(nullif(p->>'slot_index', '')::int, 0), left(coalesce(p->>'slot_text', ''), 500), img,
-            coalesce(nullif(p->>'purpose', ''), 'blog_body'))
+  if img is not null then
+    -- 같은 때 그 이미지를 지우는 요청이 있으면 끝날 때까지 기다렸다가 다시 확인 (지운 이미지에 연결되지 않게)
+    perform 1 from public.post_images where id = img and deleted_at is null for share;
+    if not found then raise exception 'image not found'; end if;
+  end if;
+  insert into public.post_image_slots (post_id, slot_key, slot_index, slot_text, slot_ctx, image_id, purpose)
+    values (p_post, p->>'slot_key', coalesce(nullif(p->>'slot_index', '')::int, 0), left(coalesce(p->>'slot_text', ''), 500),
+            left(coalesce(p->>'slot_ctx', ''), 300), img, coalesce(nullif(p->>'purpose', ''), 'blog_body'))
     on conflict (post_id, slot_key) do update set
       image_id = excluded.image_id,
       slot_index = excluded.slot_index,
       slot_text = excluded.slot_text,
+      slot_ctx = coalesce(nullif(p->>'slot_ctx', ''), public.post_image_slots.slot_ctx),
       purpose = coalesce(nullif(p->>'purpose', ''), public.post_image_slots.purpose),
       crop = case when public.post_image_slots.image_id is distinct from excluded.image_id then null else public.post_image_slots.crop end,
       downloaded_at = case when public.post_image_slots.image_id is distinct from excluded.image_id then null else public.post_image_slots.downloaded_at end,
@@ -316,7 +333,7 @@ begin
     delete from public.post_image_slots where id = dst.id;   -- 비어 있던 줄만 지움
   end if;
   update public.post_image_slots set slot_key = p->>'to', slot_index = coalesce(nullif(p->>'index', '')::int, slot_index),
-      slot_text = left(coalesce(p->>'text', slot_text), 500)
+      slot_text = left(coalesce(p->>'text', slot_text), 500), slot_ctx = left(coalesce(p->>'ctx', slot_ctx), 300)
     where id = src.id returning * into src;
   -- 그 자리용으로 만든 이미지 후보도 같이 옮김
   update public.post_images set origin_slot_key = p->>'to' where origin_post_id = p_post and origin_slot_key = p->>'from';
@@ -415,10 +432,11 @@ grant execute on function
 
 -- 9 ───────── 비공개 버킷 (Supabase에만 있음. 테스트용 Postgres에는 storage 스키마가 없어서 건너뜀)
 -- 공개 아님(public=false) + storage.objects 에 정책을 만들지 않음 → 서버 키로만 올리고, 보기는 서버가 만든 짧은 서명 주소로만
+-- 같은 이름의 버킷이 이미 있으면 비공개·크기·형식 제한을 다시 걸어둠 (공개로 남지 않게)
 do $$ begin
   if exists (select 1 from information_schema.tables where table_schema = 'storage' and table_name = 'buckets') then
     insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
       values ('post-images', 'post-images', false, 10485760, array['image/jpeg', 'image/png', 'image/webp'])
-      on conflict (id) do nothing;
+      on conflict (id) do update set public = false, file_size_limit = excluded.file_size_limit, allowed_mime_types = excluded.allowed_mime_types;
   end if;
 end $$;

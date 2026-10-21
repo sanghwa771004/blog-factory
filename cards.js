@@ -12,12 +12,14 @@ const FONT_TITLE = (px) => `400 ${px}px "Do Hyeon", "IBM Plex Sans KR", "Apple S
 const FONT_BODY = (px, w = 400) => `${w} ${px}px "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
 
 // 웹 글꼴이 다 내려온 다음에 그려야 글꼴이 맞음 (인터넷이 안 되면 기기 글꼴로 그림)
-export async function ensureFonts() {
+// 한글 글꼴은 글자 범위별로 나뉘어 내려와서, 실제로 쓸 글자(text)와 쓰는 굵기(400·500·700, 제목 글꼴) 모두 미리 받음
+export async function ensureFonts(text = '') {
   try {
     if (!document.fonts || !document.fonts.load) return;
+    const chars = [...new Set([...String(text || ''), ...'가A0광고'])].join('').slice(0, 3000);
     await Promise.race([
-      Promise.all([document.fonts.load(FONT_TITLE(64), '가A'), document.fonts.load(FONT_BODY(40), '가A'), document.fonts.load(FONT_BODY(40, 700), '가A')]),
-      new Promise((r) => setTimeout(r, 2500)),
+      Promise.all([document.fonts.load(FONT_TITLE(64), chars), document.fonts.load(FONT_BODY(40), chars), document.fonts.load(FONT_BODY(40, 500), chars), document.fonts.load(FONT_BODY(40, 700), chars)]),
+      new Promise((r) => setTimeout(r, 3000)),
     ]);
   } catch { /* 기기 글꼴로 */ }
 }
