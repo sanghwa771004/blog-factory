@@ -123,6 +123,33 @@ export function matchSlots(current, rows) {
   };
 }
 
+// matchSlots 결과를 DB에서 실행할 순서로 바꿈 (서버가 이 순서대로 image_slot_rekey·줄 고치기를 부름)
+// 1) 옮길 자리를 차지한, 연결이 끊긴 이미지 줄은 '사라진 자리' 이름으로 비켜 둠 (빈 줄은 옮길 때 지워짐)
+// 2) 옮기기 — 여러 개면 서로 자리를 바꾸는 경우가 있어서 임시 이름을 거쳐 두 번에 (1단계가 실패한 건 2단계를 건너뜀)
+// 3) 순서만 바뀐 자리는 번호를, 주변 글이 바뀐 자리는 주변 글을 고침
+// tmp(tag, n): 임시 이름 만들기 (서버는 무작위 값을 섞음)
+export function planSlotSync(m, tmp = (tag, n) => `k:~~${tag}${n}#1`) {
+  const ops = [];
+  let n = 0;
+  for (const bl of (m && m.blockers) || []) if (bl.image_id) ops.push({ op: 'rekey', p: { from: bl.slot_key, to: tmp('o', n++) } });
+  const rk = (m && m.rekeys) || [];
+  if (rk.length === 1) ops.push({ op: 'rekey', p: rk[0], final: true });
+  else if (rk.length > 1) {
+    const t = rk.map((r) => ({ ...r, tmp: tmp('t', n++) }));
+    for (const r of t) ops.push({ op: 'rekey', p: { from: r.from, to: r.tmp }, key: r.tmp });
+    for (const r of t) ops.push({ op: 'rekey', p: { from: r.tmp, to: r.to, index: r.index, text: r.text, ctx: r.ctx }, after: r.tmp, final: true });
+  }
+  for (const s of (m && m.slots) || []) {
+    if (!s.link || s.rekey) continue;
+    const patch = {};
+    if (Number(s.link.slot_index) !== s.index) patch.slot_index = s.index;
+    const ctx = ctxOf(s);
+    if (ctx && s.link.slot_ctx !== ctx) patch.slot_ctx = ctx;
+    if (Object.keys(patch).length) ops.push({ op: 'update', id: s.link.id, patch });
+  }
+  return ops;
+}
+
 // ───────── 용도·비율 ─────────
 // size = AI에 요청할 크기 (16의 배수, 비율 1:3~3:1, 총 픽셀 655,360 이상 — OpenAI 공식 문서 기준, 2026-10-22 확인)
 // out = 내려받을 때 만드는 크기 (원본이 더 작으면 원본 크기)

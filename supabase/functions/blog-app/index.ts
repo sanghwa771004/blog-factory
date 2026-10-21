@@ -7,7 +7,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
 import {
-  parseSlots, matchSlots, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
+  parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
   validApiSize, buildPrompt, promptRisk, blocksOf, slotRisk, estimateUsd, estimateTokens, normQuality, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
   CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
 } from "./images.js";
@@ -1230,29 +1230,15 @@ async function syncSlots(post: J) {
     if (r.error) console.error("slot rekey:", r.error.message);
     return !r.error;
   };
-  const tmpKey = (tag: string) => `k:~~${tag}${crypto.randomUUID().slice(0, 8)}#1`;
-  // 옮길 자리를 이미지가 있는 다른 줄(본문에서 사라진 자리)이 쓰고 있으면, 그 줄을 먼저 '사라진 자리' 이름으로 비켜 둠 (이미지·연결은 그대로)
-  for (const bl of m.blockers as J[]) {
-    if (bl.image_id && await rekey({ from: bl.slot_key, to: tmpKey("o") })) changed = true; // 빈 줄은 옮길 때 지워짐
-  }
-  if (m.rekeys.length === 1) {
-    if (await rekey(m.rekeys[0])) { rekeyed++; changed = true; }
-  } else if (m.rekeys.length > 1) {
-    // 같은 설명이 여러 번인 자리끼리 서로 바뀌는 경우가 있어서 두 번에 나눠 옮김 (임시 이름 → 새 이름)
-    const moved: J[] = [];
-    for (const rk of m.rekeys as J[]) { const t = tmpKey("t"); if (await rekey({ from: rk.from, to: t })) moved.push({ ...rk, tmp: t }); }
-    for (const t of moved) if (await rekey({ from: t.tmp, to: t.to, index: t.index, text: t.text, ctx: t.ctx })) { rekeyed++; changed = true; }
-  }
-  // 순서만 바뀐 자리는 번호를, 주변 글이 바뀐 자리는 주변 글을 고쳐 둠 (다음에 알아보기 쉽게)
-  for (const s of m.slots as J[]) {
-    if (!s.link || s.rekey) continue;
-    const link = s.link as J;
-    const patch: J = {};
-    if (Number(link.slot_index) !== s.index) patch.slot_index = s.index;
-    const ctx = ctxOf(s);
-    if (ctx && link.slot_ctx !== ctx) patch.slot_ctx = ctx;
-    if (Object.keys(patch).length) {
-      const r = await sb.from("post_image_slots").update(patch).eq("id", link.id);
+  // 실행 순서는 images.js planSlotSync (비켜 두기 → 임시 이름 거쳐 옮기기 → 번호·주변 글 고치기). 임시 이름에는 무작위 값을 섞음
+  const ops = planSlotSync(m, (tag: string, n: number) => `k:~~${tag}${crypto.randomUUID().slice(0, 8)}${n}#1`) as J[];
+  const done = new Set<string>();
+  for (const o of ops) {
+    if (o.op === "rekey") {
+      if (o.after && !done.has(String(o.after))) continue; // 1단계가 안 된 건 건너뜀
+      if (await rekey(o.p as J)) { changed = true; if (o.key) done.add(String(o.key)); if (o.final) rekeyed++; }
+    } else {
+      const r = await sb.from("post_image_slots").update(o.patch as J).eq("id", o.id);
       if (!r.error) changed = true;
     }
   }

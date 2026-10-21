@@ -2,6 +2,7 @@
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { freshDb, one, all, val, longBody } from './helpers/db.js';
+import { parseSlots, matchSlots, planSlotSync, ctxOf } from '../images.js';
 
 const KEY = (n) => `req-key-${String(n).padStart(4, '0')}-abcdef`;
 const begin = (db, p) => val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ model: 'gpt-image-2.5-flare', size: '1024x1024', quality: 'medium', est_usd: 0.0132, ...p })]);
@@ -217,6 +218,50 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       assert.deepEqual(await val(db, `select public.image_delete($1)`, [free.id]), { storage_path: 'up/free.jpg' });
       assert.ok(await val(db, `select deleted_at from public.post_images where id = $1`, [free.id]));
       await assert.rejects(val(db, `select public.image_delete($1)`, [free.id]), /image not found/);
+    });
+
+    test('본문을 고쳐도 연결 유지: 서버와 같은 순서(planSlotSync)로 실제 DB 함수를 불러 옮김 — 같은 설명 두 자리·비켜 두기', async () => {
+      // 서버 syncSlots 와 같은 실행: 맞추기 → 계획 → image_slot_rekey·줄 고치기 → 다시 맞추기
+      const runSync = async (postId, body) => {
+        const rows = await all(db, `select * from public.post_image_slots where post_id = $1`, [postId]);
+        const done = new Set();
+        for (const o of planSlotSync(matchSlots(parseSlots(body), rows))) {
+          if (o.op === 'rekey') {
+            if (o.after && !done.has(o.after)) continue;
+            try { await val(db, `select public.image_slot_rekey($1, $2::jsonb)`, [postId, JSON.stringify(o.p)]); if (o.key) done.add(o.key); } catch { /* 서버도 실패한 건 건너뜀 */ }
+          } else {
+            const ks = Object.keys(o.patch);
+            await db.query(`update public.post_image_slots set ${ks.map((k, i) => `${k} = $${i + 2}`).join(', ')} where id = $1`, [o.id, ...ks.map((k) => o.patch[k])]);
+          }
+        }
+        return matchSlots(parseSlots(body), await all(db, `select * from public.post_image_slots where post_id = $1`, [postId]));
+      };
+      const DUP = ['## 거실', '거실 창가에 두었어요.', '[이미지: 히터 사진]', '바람이 잘 퍼져요.', '## 침실', '침대 옆에 두었어요.', '[이미지: 히터 사진]', '조용해요.'].join('\n');
+      const setup = async (kw) => {
+        const p = await val(db, `insert into public.posts (keyword, titles, body, stage, channel_id) values ($2, '["중복"]', $1, 'review', 'naver_blog') returning id`, [DUP, kw]);
+        const img = [];
+        for (const [i, s] of parseSlots(DUP).entries()) {
+          img.push((await save(db, { storage_path: `up/${kw}${i}.jpg` }, { post_id: p, slot_key: s.key, slot_index: s.index, slot_text: s.text, slot_ctx: ctxOf(s) })).image.id);
+        }
+        return { p, img };
+      };
+      // 1) 첫째 자리 설명만 고침 → 두 이미지가 서로 바뀌지 않고(임시 이름을 거쳐 두 번 옮김), 남은 옮길 일 없음
+      const A = await setup('dup-a');
+      const b1 = DUP.replace('[이미지: 히터 사진]', '[이미지: 히터 사진 두 개]');
+      const m1 = await runSync(A.p, b1);
+      assert.deepEqual(m1.slots.map((x) => x.link && x.link.image_id), A.img);
+      assert.deepEqual([m1.rekeys.length, m1.orphans.length], [0, 0]);
+      assert.deepEqual(planSlotSync(m1), [], '한 번 더 맞춰도 바뀌는 게 없음 (안정)');
+      // 2) 같은 설명 두 자리 중 첫째를 지움 → 남은 자리는 둘째 이미지, 첫째 이미지는 '사라진 자리' 이름으로 비켜 둠 (지우지 않음)
+      const B = await setup('dup-b');
+      const m2 = await runSync(B.p, DUP.replace('[이미지: 히터 사진]', ''));
+      assert.equal(m2.slots.length, 1);
+      assert.equal(m2.slots[0].link.image_id, B.img[1]);
+      assert.equal(m2.slots[0].link.slot_key, m2.slots[0].key, '남은 자리 열쇠로 옮겨짐');
+      assert.deepEqual(m2.orphans.map((o) => o.image_id), [B.img[0]]);
+      assert.match(m2.orphans[0].slot_key, /^k:~~/);
+      assert.equal(m2.rekeys.length, 0);
+      assert.equal(await val(db, `select count(*)::int from public.post_images where id = any($1::uuid[]) and deleted_at is null`, [[...A.img, ...B.img]]), 4, '이미지는 모두 보관함에 그대로');
     });
 
     test('원고를 아예 지워도(드문 경우) 이미지는 보관함에 남고 연결만 사라짐', async () => {
