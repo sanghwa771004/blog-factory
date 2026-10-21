@@ -11,15 +11,17 @@ import {
   validApiSize, buildPrompt, promptRisk, blocksOf, slotRisk, estimateUsd, estimateTokens, normQuality, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
   CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
 } from "./images.js";
-import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes } from "./image_service.js";
+import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
 
 const VERSION = "1.2.0";
+// 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
+// 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
+// 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
+const FN_GEN = "blog-gen";
 const BOOT_AT = Date.now(); // 이 서버 일꾼(worker)이 켜진 때 — 무료 요금제는 켜진 뒤 150초까지만 일함
 // 일꾼 하나가 일하는 최대 시간 (무료 150초, 유료 400초 — Supabase 문서). 요금제가 다르면 Secrets 에 EDGE_WALL_SECONDS 로 넣음
 const WALL_MS = Math.min(400, Math.max(60, Number(Deno.env.get("EDGE_WALL_SECONDS") ?? "150") || 150)) * 1000;
-const DEADLINE = BOOT_AT + WALL_MS - 12_000; // 이때까지 결과 저장까지 끝내야 함
-// 품질별로 OpenAI 응답을 기다릴 수 있어야 하는 시간 (이만큼 남아 있어야 시작함 — 모자라면 돈이 나가기 전에 '잠깐 뒤에')
-const NEED_MS: Record<string, number> = { low: 60_000, medium: 75_000, high: 100_000, xhigh: 115_000, max: 115_000 };
+const DEADLINE = BOOT_AT + WALL_MS - 12_000; // 이때까지 결과 저장까지 끝내야 함 (품질별로 기다릴 시간은 image_service.js NEED_MS)
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 // 앱을 여는 주소(쉼표로 여러 개). 기본값은 GitHub Pages 주소
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "https://sanghwa771004.github.io")
@@ -368,7 +370,7 @@ async function getState(c: Ctx) {
     fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
     // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (1000줄이 넘어도 끝까지. 이미지 스튜디오 표가 아직 없으면 빈 목록)
     fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null),
-      "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description)")
+      "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text)")
       .then((data) => ({ data, error: null as unknown }), (error) => ({ data: [] as J[], error: error as unknown })),
   ]);
   if (imageSlots.error) console.error("state image_slots:", String((imageSlots.error as Error)?.message ?? imageSlots.error));
@@ -1215,7 +1217,15 @@ async function safetyIdOf(auth: Auth) {
 
 // 원고 본문의 사진 자리와 저장된 연결을 맞춤: 설명을 조금 고친 자리는 연결을 옮기고(rekey), 순서만 바뀐 자리는 번호를 고침
 // 본문에서 사라진 자리의 연결은 지우지 않음 (orphans — 화면에서 다른 자리로 옮기거나 뺄 수 있음)
+// 같은 원고의 자리 맞추기가 이 일꾼 안에서 겹치지 않게 앞의 것이 끝난 뒤에 시작 (겹치면 예전 계획으로 옮기다가 임시 이름에 잠깐 남을 수 있음)
+const SYNC_LOCKS = new Map<string, Promise<unknown>>();
 async function syncSlots(post: J) {
+  const id = String(post.id);
+  const run = (SYNC_LOCKS.get(id) ?? Promise.resolve()).catch(() => {}).then(() => syncSlotsNow(post));
+  SYNC_LOCKS.set(id, run);
+  try { return await run; } finally { if (SYNC_LOCKS.get(id) === run) SYNC_LOCKS.delete(id); }
+}
+async function syncSlotsNow(post: J) {
   const load = async () => {
     const { data, error } = await sb.from("post_image_slots").select("*").eq("post_id", post.id);
     if (error) throw error;
@@ -1322,6 +1332,10 @@ async function generateImage(c: Ctx) {
   const b = await readJson(c.req, 20_000);
   const requestKey = str(b.request_key, 80);
   if (!/^[A-Za-z0-9_-]{8,80}$/.test(requestKey)) fail(400, "bad_field", { field: "request_key" });
+  // 응답을 못 받아 같은 요청 번호로 다시 온 것은 검사·대기 없이 그 기록을 바로 돌려줌 (두 번 만들지 않음 — 만드는 중이면 화면이 바로 진행 상황을 봄)
+  const prior = await sb.from("image_generations").select(GEN_COLS).eq("request_key", requestKey).maybeSingle();
+  if (prior.error) throw prior.error;
+  if (prior.data) return json({ generation: prior.data, duplicate: true });
   const { post, slot, purpose } = await slotTarget(b, true);
   const mode = b.mode === "edit" ? "edit" : "generate";
   const ratio = ratioOf(purpose, str(b.ratio, 8));
@@ -1366,9 +1380,9 @@ async function generateImage(c: Ctx) {
   }
   await storageGuard(2 * 1024 * 1024);
   // 이 일꾼이 꺼질 때까지 남은 시간이 그 품질을 기다리기에 모자라면, 돈이 나가기 전에 '잠깐 뒤에 다시' (그때는 새 일꾼이 받음)
-  const need = Math.min((NEED_MS[quality] ?? 115_000) + (mode === "edit" ? 10_000 : 0), WALL_MS - 30_000);
-  if (DEADLINE - Date.now() < need) {
-    fail(503, "server_busy", { retry_after: Math.min(150, Math.max(3, Math.ceil((BOOT_AT + WALL_MS - Date.now()) / 1000) + 2)) });
+  // 화면은 retry_after 초만큼 기다렸다가 같은 요청 번호로 다시 보냄 (image_service.js busyRetryAfter)
+  if (DEADLINE - Date.now() < needMsFor(quality, mode, WALL_MS)) {
+    fail(503, "server_busy", { retry_after: busyRetryAfter(Date.now() - BOOT_AT, WALL_MS) });
   }
   const begin = await sb.rpc("image_gen_begin", {
     p: {
@@ -1383,7 +1397,7 @@ async function generateImage(c: Ctx) {
   if (gen.duplicate) return json({ generation: pub, duplicate: true });
   RUNNING.add(String(gen.id));
   const task = runGeneration(imageDeps(), gen, {
-    key: keyOpenAI(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: 115_000,
+    key: keyOpenAI(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: 115_000, ratio,
     base: base ? { path: String(base.storage_path), mime: String(base.mime) } : null,
     // 고치기는 바뀐 내용(지시)이 아니라 원래 이미지 설명을 그대로 씀 (지시는 생성 기록의 user_prompt 에)
     description: mode === "edit" ? String(base?.description || slot!.text || text) : text,
@@ -1667,21 +1681,15 @@ async function saveCards(c: Ctx) {
   let bg: string | null = null;
   if (b.bg_image_id !== null && b.bg_image_id !== undefined && b.bg_image_id !== "") {
     if (!isUuid(b.bg_image_id)) fail(400, "bad_field", { field: "bg_image_id" });
-    const { data } = await sb.from("post_images").select("id").eq("id", b.bg_image_id).is("deleted_at", null).maybeSingle();
-    if (!data) fail(404, "not_found");
     bg = String(b.bg_image_id);
   }
   const row = {
-    post_id: post.id, template: oneOf(b.template ?? "clean", Object.keys(CARD_TEMPLATES), "template"), ratio: oneOf(b.ratio ?? "4:5", CARD_RATIOS as string[], "ratio"),
+    template: oneOf(b.template ?? "clean", Object.keys(CARD_TEMPLATES), "template"), ratio: oneOf(b.ratio ?? "4:5", CARD_RATIOS as string[], "ratio"),
     slides, ad_label: b.ad_label !== false, bg_image_id: bg,
   };
-  const { data, error } = await sb.from("post_card_decks").upsert(row, { onConflict: "post_id" }).select().single();
-  if (error) throw error;
-  // 그사이에 배경 이미지가 지워졌으면 배경을 빼고 알려줌 (지운 이미지를 가리키지 않게)
-  if (bg) {
-    const { data: still } = await sb.from("post_images").select("id").eq("id", bg).is("deleted_at", null).maybeSingle();
-    if (!still) { await sb.from("post_card_decks").update({ bg_image_id: null }).eq("post_id", post.id); fail(404, "not_found"); }
-  }
+  // 저장과 '배경 이미지가 아직 있는지' 확인을 DB 함수 하나에서 (그 이미지를 지우는 요청과 겹쳐도 지운 이미지를 가리키지 않게)
+  const { data, error } = await sb.rpc("card_deck_save", { p_post: post.id, p: row });
+  if (error) rpcError(error);
   return json({ deck: data });
 }
 
@@ -1763,10 +1771,13 @@ async function handle(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") return new Response(null, { status: 204 });
   const url = new URL(req.url);
   const parts = url.pathname.split("/").filter(Boolean);
-  const at = parts.findIndex((p) => p.startsWith("blog-app"));
+  const at = parts.findIndex((p) => p.startsWith("blog-app") || p.startsWith(FN_GEN));
+  const genFn = at >= 0 && parts[at].startsWith(FN_GEN);
   const route = (at >= 0 ? parts.slice(at + 1) : parts.slice(1)).join("/");
   try {
-    if (route === "ping") return json({ ok: true, version: VERSION, time: nowIso() });
+    if (route === "ping") return json({ ok: true, version: VERSION, fn: genFn ? FN_GEN : "blog-app", time: nowIso() });
+    // blog-gen 은 생성 요청만 (나머지는 blog-app 으로)
+    if (genFn && !(req.method === "POST" && route === "images/generate")) return json({ error: "not_found" }, 404);
     if (route === "login" && req.method === "POST") return await login(req);
     const auth = await authenticate(req);
     if (auth instanceof Response) return auth;

@@ -143,13 +143,20 @@ function fileOf(blob, name, w, h) {
   f.w = w; f.h = h;
   return f;
 }
-// 서명 주소에서 원본을 받아서 풀어 둠 (한 창에서 여러 번 자를 때 다시 받지 않게)
-export async function loadSource(img) {
-  const res = await fetch(img.url, { mode: 'cors', credentials: 'omit', cache: 'no-store' });
+// 서명 주소에서 원본을 받아서 풀어 둠 (한 창에서 여러 번 자를 때 다시 받지 않게). signal 로 받기를 멈출 수 있음 (창을 닫을 때)
+export async function loadSource(img, signal) {
+  const res = await fetch(img.url, { mode: 'cors', credentials: 'omit', cache: 'no-store', signal });
   if (!res.ok) throw new Error('fetch ' + res.status);
   const blob = await res.blob();
   const el = await loadImg(blob);
   return { blob, el, W: el.naturalWidth || img.width, H: el.naturalHeight || img.height };
+}
+// 원본 파일 그대로 (풀지 않음 — 보관함에서 원본만 받을 때)
+export async function originalFile(img, name, signal) {
+  const res = await fetch(img.url, { mode: 'cors', credentials: 'omit', cache: 'no-store', signal });
+  if (!res.ok) throw new Error('fetch ' + res.status);
+  const blob = await res.blob();
+  return fileOf(blob, String(name).replace(/\.[a-z0-9]+$/i, '') + '.' + IMG.extOf(blob.type), img.width, img.height);
 }
 // 내려받을 파일 만들기: (필요하면) 저장한 초점으로 자르고 → 용도 크기로 줄임 (늘리지는 않음)
 export async function renderOutput(img, o, src) {
@@ -178,26 +185,34 @@ export function createStudio(ui) {
   const drafts = {};   // 원고별 카드뉴스 고치는 중인 내용
   const polls = {};    // 원고별 '만드는 중' 확인 타이머
   let libKind = '';
+  let fontsListener = null; // 카드뉴스 미리보기의 '글꼴 다 받음' 듣는 함수 (하나만)
   const settings = () => (ui.S.settings || {});
   const prices = () => settings().image_prices || IMG.DEFAULT_PRICES;
   const fresh = (c, p) => !!(c && c.data && Date.now() - c.at < 45 * 60e3 && (!p || c.body === p.body));
 
   // ── 서버에서 받기 ──
-  // 강제로 다시 받을 때는 진행 중인 요청(바꾸기 전 내용일 수 있음)을 기다리지 않고 새로 보냄. 늦게 온 예전 응답은 버림
+  // 강제로 다시 받을 때는 진행 중인 요청(바꾸기 전 내용일 수 있음)의 결과를 쓰지 않고 새로 보냄. 늦게 온 예전 응답은 버림
+  // 같은 원고 요청은 겹쳐 보내지 않고 앞의 요청이 끝난 뒤에 보냄 (서버의 사진 자리 맞추기가 동시에 돌지 않게). 기다리는 사이 더 새 요청이 생기면 보내지 않음
   let seqN = 0;
   function fetchPost(id, force) {
     const c = C[id];
     if (!force && fresh(c)) return Promise.resolve(c.data);
     if (!force && c && c.loading) return c.loading;
     const seq = ++seqN;
-    const body = (ui.post(id) || {}).body; // 보낼 때의 본문 (받을 때가 아니라)
-    const p = api(`/posts/${id}/images`).then((d) => {
+    let body;
+    const req = ((c && c.req) || Promise.resolve()).catch(() => {}).then(() => {
+      if (C[id] && C[id].seq > seq) return null;
+      body = (ui.post(id) || {}).body; // 보낼 때의 본문 (받을 때가 아니라)
+      return api(`/posts/${id}/images`);
+    });
+    const p = req.then((d) => {
       const cur = C[id];
-      if (cur && cur.seq > seq) return cur.loading || cur.data || d; // 더 새 요청이 있었음
-      C[id] = { at: Date.now(), data: d, loading: null, body, seq };
-      return d;
-    }).finally(() => { if (C[id] && C[id].loading === p) C[id].loading = null; });
-    C[id] = { ...(c || {}), loading: p, seq };
+      if (d && !(cur && cur.seq > seq)) { C[id] = { at: Date.now(), data: d, loading: null, req: null, body, seq }; return d; }
+      // 더 새 요청이 있었음 → 그 결과를 기다려서 돌려줌
+      return cur && cur.loading && cur.loading !== p ? cur.loading : (cur && cur.data) || d;
+    });
+    p.catch(() => {}).finally(() => { const cur = C[id]; if (cur && cur.loading === p) { cur.loading = null; cur.req = null; } });
+    C[id] = { ...(c || {}), loading: p, req, seq };
     return p;
   }
   function redraw(id) {
@@ -211,6 +226,20 @@ export function createStudio(ui) {
     redraw(id);
     if (ui.clearStats) ui.clearStats(); // 수익 탭의 이미지 비용도 새로
     ui.load();
+  }
+  // AI 이미지 만들기 요청: 생성 전용 서버(blog-gen — 같은 코드, 다른 요청과 섞이지 않는 일꾼)로 먼저 보내고,
+  // 그게 아직 없거나 닿지 않으면 본 서버로 같은 요청 번호로 다시 보냄 (서버가 이미 받았으면 그 기록을 돌려줘서 두 번 만들지 않음)
+  let genFn = true;
+  async function sendGenerate(body) {
+    if (genFn) {
+      try { return await api('/images/generate', { method: 'POST', body, timeout: 40000, gen: true }); } catch (e) {
+        if (!e || (e.code !== 'gen_unavailable' && e.code !== 'network')) throw e;
+        const j = await api('/images/generate', { method: 'POST', body, timeout: 40000 });
+        genFn = false; // 본 서버는 되니까 이번에 앱을 쓰는 동안은 본 서버로
+        return j;
+      }
+    }
+    return api('/images/generate', { method: 'POST', body, timeout: 40000 });
   }
   const dataOf = (id) => (C[id] && C[id].data) || null;
   const imgsOf = (id) => byId((dataOf(id) || {}).images);
@@ -243,7 +272,8 @@ export function createStudio(ui) {
     if (img.used_posts > 1) parts.push(`다른 원고 ${img.used_posts - 1}곳에서도 사용 중`);
     return parts.join(' · ');
   }
-  const usageLine = (u) => (u ? `오늘 ${u.today}/${u.daily_limit}번 · 이번 달 ${usd(u.month_usd)} / 예산 ${usd(u.budget_usd)}` : '');
+  // 이번 달 금액은 청구액을 넣은 것 말고는 예상·사용량 기준 계산값이라 '(예상 포함)'
+  const usageLine = (u) => (u ? `오늘 ${u.today}/${u.daily_limit}번 · 이번 달 ${usd(u.month_usd)}(예상 포함) / 예산 ${usd(u.budget_usd)}` : '');
 
   // ═════════ 원고 상세의 '이미지' 칸 ═════════
   function postPanel(p) {
@@ -371,7 +401,7 @@ export function createStudio(ui) {
     const t = (d.costs && d.costs.totals) || {};
     const gens = d.generations || [];
     const st = settings();
-    const box = det('img-cost:' + p.id, `이미지 생성 비용 — ${t.count || 0}번 (비용 반영 ${t.billed || 0}번) · ${usd(t.usd || 0)}${t.krw != null && Number(t.usd) > 0 ? ' ≈ ' + L.won(t.krw) : ''}`, false, '');
+    const box = det('img-cost:' + p.id, `이미지 생성 비용 — ${t.count || 0}번 (비용 반영 ${t.billed || 0}번) · ${usd(t.usd || 0)}${t.krw != null && Number(t.usd) > 0 ? ' ≈ ' + L.won(t.krw) : ''}${Number(t.n_actual || 0) < Number(t.billed || 0) ? ' (예상 포함)' : ''}`, false, '');
     const inner = h('div', { class: 'stack', style: 'margin-top:8px' });
     inner.append(h('p', { class: 'hint' }, "예상: 요청 전에 공식 가격표로 계산한 값 · 사용량 기준: OpenAI가 알려준 사용량(토큰) × 가격 · 청구액 확인: OpenAI 사용량 화면에서 확인해 직접 넣은 금액. 앱은 실제 청구액을 직접 가져오지 못해."),
       h('p', { class: 'hint' }, st.image_fx_krw ? `원화는 환율 ${L.fmtNum(st.image_fx_krw)}원/달러 기준 (${st.image_fx_date || '날짜 없음'}${st.image_fx_source ? ' · ' + st.image_fx_source : ''}). 기록마다 그때 환율로 계산해.` : '환율을 아직 안 넣어서 원화로 바꾸지 않았어 (설정 > 이미지).'));
@@ -414,8 +444,9 @@ export function createStudio(ui) {
   }
 
   // ── 연결·빼기·순서·사용 완료 ──
-  async function linkTo(p, s, img, button) {
-    const j = await run(button, () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id } }), `${slotName(s)}에 연결했어`);
+  // extra: { purpose } — AI로 만든 바로 그 이미지를 연결할 때는 만들 때 고른 용도로 (내려받을 때 고른 비율로 자르게)
+  async function linkTo(p, s, img, button, extra) {
+    const j = await run(button, () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, ...(extra || {}) } }), `${slotName(s)}에 연결했어`);
     if (j) await refresh(p.id);
     return j;
   }
@@ -487,15 +518,16 @@ export function createStudio(ui) {
     const textTa = h('textarea', { value: f.text, maxlength: '300', style: 'min-height:70px', placeholder: mode === 'edit' ? '예: 배경을 더 밝게, 식물은 빼줘' : '' });
     const extraTa = h('textarea', { value: f.extra, maxlength: '400', style: 'min-height:56px', placeholder: '예: 밝은 오전 햇살, 위에서 내려다본 구도' });
     const qualSel = h('select', { value: f.quality }, qualities.map((q) => opt(q, IMG.QUALITY_LABEL[q])));
-    const f0 = { text: f.text };
+    const f0 = { text: f.text, extra: f.extra }; // 처음 채워 둔 값 (이것과 같으면 '적던 내용'이 아님)
     const genericChk = h('input', { type: 'checkbox' });
     const genericRow = h('label', { class: 'chk' }, genericChk, ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (AI 예시 이미지 — 실제 구성품·라벨·화면은 직접 찍은 사진으로)');
     const riskBox = h('div', { class: 'stack' });
     const costBox = h('div', { class: 'costbox' });
     const promptPre = h('pre', { class: 'prompt' });
     const msg = h('div');
-    // serverEst: 서버가 '예상 비용이 바뀌었어'라며 알려준 값. 화면 계산보다 크면 그걸 보여주고 그걸로 확인을 보냄
-    let busy = false, lastEst = null, serverEst = null, rk = newKey();
+    // serverEst: 서버가 '예상 비용이 바뀌었어'라며 알려준 값 {usd, key: 모델|크기|품질}. 지금 고른 것과 같을 때만, 화면 계산보다 크면 그걸 보여주고 그걸로 확인을 보냄
+    // newModel: 다른 기기에서 설정의 모델을 바꿔서 서버가 다른 모델로 계산한 경우 (창을 다시 열어야 함)
+    let busy = false, lastEst = null, serverEst = null, newModel = '', rk = newKey();
     const goBtn = btn('만들기', 'wide', () => submit());
     const usage = () => (dataOf(p.id) || {}).usage || null;
     const update = () => {
@@ -507,7 +539,8 @@ export function createStudio(ui) {
       const prompt = IMG.buildPrompt({ post: p, slot: s, text: clean(f.text), style: f.style, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide });
       promptPre.textContent = prompt;
       const clientEst = isTest ? 0 : IMG.estimateUsd({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices(), model });
-      const est = clientEst == null ? null : serverEst != null && serverEst > clientEst ? serverEst : clientEst;
+      const sEst = serverEst && serverEst.key === `${model}|${size}|${f.quality}` ? serverEst.usd : null;
+      const est = clientEst == null ? null : sEst != null && sEst > clientEst ? sEst : clientEst;
       lastEst = est;
       const risks = IMG.promptRisk(f.text + '\n' + f.extra, brands);
       const blocks = IMG.blocksOf(risks);
@@ -520,15 +553,16 @@ export function createStudio(ui) {
       put(costBox,
         h('span', null, `모델 ${model} · ${size} · 품질 ${IMG.QUALITY_LABEL[f.quality]}`),
         h('b', { class: 'num' }, est == null ? '예상 비용을 계산하지 못했어' : `예상 ${usd(est)}${fx && est ? ' ≈ ' + L.won(est * fx) : ''}`),
-        serverEst != null && est === serverEst ? h('span', { class: 'notice' }, `서버에서 다시 계산한 예상 비용이 ${usd(serverEst)}이야 (설정·가격·원고가 바뀐 것 같아). 확인하고 다시 눌러줘.`) : null,
-        !caps.flexible && !isTest ? h('span', { class: 'hint' }, `이 모델은 정해진 크기(${size})로만 만들어. 내려받을 때 ${f.ratio}로 잘라 줄게 (미리보기에서 자르는 곳을 고를 수 있어).`) : null,
+        sEst != null && est === sEst ? h('span', { class: 'notice' }, `서버에서 다시 계산한 예상 비용이 ${usd(sEst)}이야 (설정·가격·원고가 바뀐 것 같아). 확인하고 다시 눌러줘.`) : null,
+        !caps.flexible && !isTest ? h('span', { class: 'hint' }, `이 모델은 정해진 크기(${size})로만 만들어. 만든 이미지를 이 자리에 연결하면 내려받을 때 ${f.ratio}로 잘라 줄게 (미리보기에서 자르는 곳을 고를 수 있어).`) : null,
         caps.conservative && !isTest ? h('span', { class: 'notice' }, '이 모델은 공식 가격표에서 장당 가격을 확인하지 못해서 예상 비용을 넉넉하게 잡았어. 실제 청구액은 OpenAI 사용량 화면에서 확인해줘.') : null,
         caps.deprecated ? h('span', { class: 'hint' }, 'OpenAI가 이전 모델(Deprecated)로 표시한 모델이야. 되도록 gpt-image-2.5-flare를 써줘.') : null,
         h('span', { class: 'hint' }, fx ? `환율 ${L.fmtNum(fx)}원/달러 (${st.image_fx_date || '날짜 없음'}${st.image_fx_source ? ' · ' + st.image_fx_source : ''})` : '환율을 넣으면 원화로도 보여줘 (설정 > 이미지)'),
         h('span', { class: 'hint' }, `예상 비용이야 (가격표 ${(prices().checked_at) || '확인일 없음'} 기준). 실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`),
         u ? h('span', { class: 'hint' }, usageLine(u)) : null);
       let why = '';
-      if (!keyOk) why = 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.';
+      if (newModel) why = `설정의 ${mode === 'edit' ? '편집' : '생성'} 모델이 바뀌었어 (${model} → ${newModel}). 이 창을 닫고 다시 열어줘.`;
+      else if (!keyOk) why = 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.';
       else if (!clean(f.text)) why = mode === 'edit' ? '바꿀 내용을 적어줘.' : '사진 설명을 적어줘.';
       else if (blocks.length) why = '빨간 내용을 고쳐야 만들 수 있어.';
       else if (sr.real && !genericChk.checked) why = '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
@@ -555,8 +589,8 @@ export function createStudio(ui) {
       (() => { const dd = det('gen-prompt', 'AI에 보낼 내용 보기', false, 'plain'); dd.append(promptPre); return dd; })(),
       costBox, msg, goBtn,
       h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 한 번에 한 장씩, 같은 요청은 한 번만 보내.'));
-      // 설명을 고쳤거나 더 원하는 것을 적었으면 창 밖을 눌러도 안 닫힘
-      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && !clean(extraTa.value));
+      // 처음 채워 둔 설명·더 원하는 것을 고쳤으면 창 밖을 눌러도 안 닫힘 (안 고쳤으면 그냥 닫힘)
+      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && clean(extraTa.value) === clean(f0.extra));
     };
     // 창을 닫거나 다른 창을 열면(=만들기 버튼이 화면에서 사라지면) 기다리던 다시 보내기를 멈춤 — 사용자가 누르지 않은 생성이 시작되지 않게
     const alive = () => goBtn.isConnected;
@@ -576,12 +610,14 @@ export function createStudio(ui) {
         text: clean(f.text), extra: clean(f.extra), quality: f.quality, confirm_usd: lastEst, generic_ok: genericChk.checked || undefined };
       let j = null;
       for (let attempt = 0; attempt < 4 && !j; attempt++) {
-        try { j = await api('/images/generate', { method: 'POST', body, timeout: 40000 }); } catch (e) {
+        try { j = await sendGenerate(body); } catch (e) {
           if (e && e.code === 'server_busy' && attempt < 3 && await wait(Number(e.retry_after) || 3)) continue;
           busy = false;
           if (!e || e.code === 'auth' || !alive()) return;
           if (e.code === 'estimate_changed') {
-            serverEst = Number(e.est_usd);
+            // 서버가 계산한 값은 그 모델·크기·품질에만 씀 (품질을 바꾸면 화면 계산으로 돌아감)
+            serverEst = { usd: Number(e.est_usd), key: `${e.model}|${e.size}|${e.quality}` };
+            if (e.model && e.model !== model) newModel = String(e.model);
             toast(ui.errText(e), 4000);
             ui.load(); // 다른 기기에서 바꾼 설정·가격을 다시 받음
             update();
@@ -595,7 +631,13 @@ export function createStudio(ui) {
         }
       }
       busy = false;
-      if (!j || !alive()) { update(); return; }
+      if (!j) { update(); return; }
+      if (!alive()) {
+        // 보낸 뒤에 창을 닫았어도 서버는 이미 받아서 만들고 있음 → 이미지 칸에 '만드는 중'이 보이게 새로 받음
+        if (j.generation && j.generation.status === '생성 중') toast('창을 닫았지만 서버에서 만드는 중이야. 끝나면 사진 자리에서 볼 수 있어.', 4000);
+        refresh(p.id);
+        return;
+      }
       if (j.duplicate) toast('이미 받은 요청이야. 그 결과를 보여줄게.', 3000);
       progress(j.generation);
     };
@@ -630,7 +672,7 @@ export function createStudio(ui) {
         h('p', { class: 'hint' }, `${g.model} · ${img.width}×${img.height} · 비용 ${usd(c.usd)} (${c.label})`),
         h('ul', { class: 'lic' }, h('li', null, '이미지 안에 글자·로고·가격이 생기지 않았는지'), h('li', null, '실제 상품 사진처럼 보이지 않는지 (이건 예시 삽화야)'), h('li', null, '사진 자리 설명과 맞는지')),
         h('p', { class: 'hint' }, "쓰기 전에 위를 확인해줘. 미리보기에서 '사용 가능'으로 바꾸면 검수 완료야."),
-        btn(`이 이미지 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => { const j = await linkTo(p, s, img, ev.currentTarget); if (j) closeSheet(); }),
+        btn(`이 이미지 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => { const j = await linkTo(p, s, img, ev.currentTarget, IMG.PURPOSES[g.purpose] ? { purpose: g.purpose } : null); if (j) closeSheet(); }),
         h('div', { class: 'go' }, btn('다시 만들기', 'sm ghost', () => { busy = false; form(); update(); }), btn('보관함에만 두고 닫기', 'sm ghost', closeSheet)));
       ui.setSheetOnClose(() => refresh(p.id));
     };
@@ -805,7 +847,7 @@ export function createStudio(ui) {
     if (!img) return;
     const g = genOf(d, img);
     let purpose = (row.purpose && IMG.PURPOSES[row.purpose]) ? row.purpose : IMG.slotPurpose(s.key);
-    let ratio = (row.crop && row.crop.ratio) || IMG.ratioOf(purpose);
+    let ratio = (row.crop && row.crop.ratio) || IMG.defaultRatio(img, purpose);
     let focus = row.crop ? { x: Number(row.crop.x), y: Number(row.crop.y) } : { x: 0.5, y: 0.5 };
     const pic = h('img', { src: img.url, alt: img.alt_text || '' });
     const win = h('div', { class: 'win', 'aria-hidden': 'true' });
@@ -991,7 +1033,7 @@ export function createStudio(ui) {
         status.textContent = `${i + 1}/${list.length} 준비 중…`;
         const img = imgs[s.row.image_id];
         const purpose = (s.row.purpose && IMG.PURPOSES[s.row.purpose]) ? s.row.purpose : IMG.slotPurpose(s.key);
-        const ratio = (s.row.crop && s.row.crop.ratio) || IMG.ratioOf(purpose);
+        const ratio = (s.row.crop && s.row.crop.ratio) || IMG.defaultRatio(img, purpose);
         const focus = s.row.crop ? { x: Number(s.row.crop.x), y: Number(s.row.crop.y) } : { x: 0.5, y: 0.5 };
         try { files.push({ s, img, file: await renderOutput(img, { ratio, focus, purpose, name: IMG.fileNameFor(p, s.n || (IMG.extraSlot(s.key) || {}).file || 'image', s.n ? purpose : '', outExt(img)) }) }); } catch { failed++; }
       }
@@ -1109,8 +1151,16 @@ export function createStudio(ui) {
       put(overflowNote, over.length ? h('p', { class: 'notice' }, `${over.join(', ')}장은 글자가 많아서 잘렸어. 줄여줘.`) : '');
     };
     // 글꼴이 늦게 내려오면 그때 다시 그림
-    const onFonts = () => { if (!previews.isConnected) { document.fonts.removeEventListener('loadingdone', onFonts); return; } schedule(); };
-    if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) document.fonts.addEventListener('loadingdone', onFonts);
+    // (카드뉴스 화면을 여러 번 열어도 듣는 함수는 하나만 — 앞의 것은 뗌)
+    const onFonts = () => {
+      if (!previews.isConnected) { document.fonts.removeEventListener('loadingdone', onFonts); if (fontsListener === onFonts) fontsListener = null; return; }
+      schedule();
+    };
+    if (typeof document !== 'undefined' && document.fonts && document.fonts.addEventListener) {
+      if (fontsListener) document.fonts.removeEventListener('loadingdone', fontsListener);
+      fontsListener = onFonts;
+      document.fonts.addEventListener('loadingdone', onFonts);
+    }
     const schedule = () => { clearTimeout(timer); timer = setTimeout(paint, 250); };
     const prepareAll = async () => {
       pngBtn.disabled = true; pngBtn.textContent = '만드는 중…';
@@ -1224,14 +1274,15 @@ export function createStudio(ui) {
       `${u.posts && u.posts.titles && u.posts.titles[0] ? u.posts.titles[0] : u.posts ? u.posts.keyword : '원고'}${u.posts && u.posts.deleted_at ? ' (휴지통)' : ''} · ${u.slot_key.startsWith('x:') ? (IMG.extraSlot(u.slot_key) || {}).label || '본문 밖' : '사진 ' + (Number(u.slot_index) + 1)}`)));
     const inUse = (j.used_in || []).length + (j.decks || []).length;
     const c = genCost(j.generation);
-    // 휴대폰 공유 창은 누른 순간에 열어야 해서, 창을 열 때 파일을 먼저 준비해 둠
+    // 휴대폰 공유 창은 누른 순간에 열어야 해서, 창을 열 때 파일을 먼저 준비해 둠 (창을 닫으면 받기를 멈춤 — 휴대폰 데이터 아끼기)
     let orig = null;
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
     const dl = btn('원본 준비 중…', 'sm ghost', async () => {
       if (!orig) return;
       const r = await saveFiles([orig], orig.name);
       if (r !== 'cancelled') toast(r === 'shared' ? '저장했어' : `내려받았어 (${orig.name})`);
     }, { disabled: true });
-    renderOutput(img, { original: true, name: IMG.fileNameFor({ keyword: (img.description || '이미지').slice(0, 20) }, 'original', '', outExt(img)) })
+    originalFile(img, IMG.fileNameFor({ keyword: (img.description || '이미지').slice(0, 20) }, 'original', '', outExt(img)), ctrl ? ctrl.signal : undefined)
       .then((f) => { orig = f; if (dl.isConnected) { dl.disabled = false; dl.textContent = '원본 내려받기'; } })
       .catch(() => { if (dl.isConnected) dl.textContent = '원본을 불러오지 못했어'; });
     openSheet(IMG.KIND_LABEL[img.kind] || '이미지',
@@ -1250,6 +1301,7 @@ export function createStudio(ui) {
           if (r) { closeSheet(); if (onChange) onChange(); }
         }, { disabled: false })),
       h('p', { class: 'hint' }, inUse ? '원고(휴지통 포함)나 카드뉴스에서 쓰는 중이라 지울 수 없어. 먼저 연결을 빼줘.' : '지우면 파일은 없어지고, 비용·출처 기록은 남아.'));
+    ui.setSheetOnClose(() => { if (ctrl && !orig) ctrl.abort(); });
   }
 
   // ═════════ 설정 > 이미지 ═════════
@@ -1371,7 +1423,7 @@ export function createStudio(ui) {
       const im = r && r.image_id ? r.post_images : null;
       if (!im || im.review_status === '사용 안 함') return null; // '사용 안 함'은 내려받지 않으니 글에도 안 넣음
       const purpose = (r.purpose && IMG.PURPOSES[r.purpose]) ? r.purpose : 'blog_body';
-      return { fileName: IMG.fileNameFor(p, s.n, purpose, outExt(im)), caption: IMG.captionHint({ kind: im.kind, provider: im.provider, author_name: im.author_name }) };
+      return { fileName: IMG.fileNameFor(p, s.n, purpose, outExt(im)), caption: IMG.captionHint({ kind: im.kind, provider: im.provider, author_name: im.author_name, license: im.license, attribution_text: im.attribution_text }) };
     });
   }
   // 원고 목록에 붙이는 '사진 연결 수'
@@ -1384,7 +1436,8 @@ export function createStudio(ui) {
     return { total: slots.length, linked: linked.length, usable: linked.filter((s) => (rows[s.key].post_images || {}).review_status === '사용 가능').length };
   }
   // 지울 때도 번호를 올려 둠 → 그 전에 보낸 요청의 응답이 늦게 와도 다시 쓰지 않음
-  const invalidate = (id) => { for (const k of id ? [id] : Object.keys(C)) C[k] = { seq: ++seqN }; };
+  // 기록을 버림 (진행 중인 요청은 기억해 둬서 다음 요청이 그 뒤에 가게)
+  const invalidate = (id) => { for (const k of id ? [id] : Object.keys(C)) C[k] = { seq: ++seqN, req: (C[k] && C[k].req) || null }; };
 
   return { postPanel, viewCards, viewLibrary, settingsSection, moneyBlock, postCost, previewImages, exportImages, slotCount, invalidate, genCost };
 }

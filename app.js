@@ -165,7 +165,9 @@ function showError(e) {
 
 // ───────── 서버 ─────────
 let session = LS.get('gf-session', '');
-async function api(path, { method = 'GET', body, timeout } = {}) {
+// AI 이미지 만들기만 받는 같은 서버 코드 (생성이 다른 요청과 섞이지 않는 일꾼에서 시작하도록 따로 올림). 없으면 화면이 본 서버로 다시 보냄
+const GEN_API = API.replace(/blog-app$/, 'blog-gen');
+async function api(path, { method = 'GET', body, timeout, gen } = {}) {
   const headers = {};
   if (session) headers['x-app-session'] = session;
   const form = typeof FormData !== 'undefined' && body instanceof FormData; // 파일 올리기 (경계 표시는 브라우저가 붙임)
@@ -176,10 +178,13 @@ async function api(path, { method = 'GET', body, timeout } = {}) {
   let r, j = {};
   try {
     try {
-      r = await fetch(API + path, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+      r = await fetch((gen ? GEN_API : API) + path, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
     } catch { throw { code: ctrl && ctrl.signal.aborted ? 'timeout' : 'network' }; }
     try { j = await r.json(); } catch { if (ctrl && ctrl.signal.aborted) throw { code: 'timeout' }; /* 빈 응답 */ }
   } finally { if (timer) clearTimeout(timer); }
+  // 생성 전용 서버가 아직 없거나(404) 우리 서버가 아닌 곳이 거절했으면(401 — 우리 서버의 오류 코드 모양이 아님) 로그아웃시키지 않고 알려줌 → 본 서버로 다시
+  const ours = !!(j && typeof j.error === 'string' && /^[a-z_]+$/.test(j.error));
+  if (gen && !ours && (r.status === 404 || r.status === 401)) throw { code: 'gen_unavailable', status: r.status };
   if (r.status === 401 && path !== '/login') { authLost(j.reason === 'expired' ? '오래 안 써서 로그아웃됐어. 접속 코드를 다시 넣어줘.' : ERR.auth); throw { code: 'auth' }; }
   if (!r.ok) throw { ...j, code: j.error || 'server', status: r.status };
   return j;

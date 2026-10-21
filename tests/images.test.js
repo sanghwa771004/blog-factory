@@ -153,6 +153,68 @@ describe('연결 맞추기 (원고를 고치거나 다시 만들어도 연결이
   });
 });
 
+describe('같은 설명이 여러 번인 자리 (검증 N1: 주변 글만 새로 쓰면 이미지가 서로 바뀌던 문제)', () => {
+  const POOL = ['겨울철 난방비가 걱정된다면 작은 히터부터 살펴보세요.', '전기 히터는 생각보다 전력을 많이 써요.', '창가 쪽은 외풍이 들어와서 더 춥게 느껴져요.',
+    '바닥에 두면 발이 따뜻해져서 좋아요.', '타이머 기능이 있으면 잠들 때 편해요.', '아이가 있는 집은 넘어짐 방지 기능을 꼭 확인하세요.',
+    '소음이 적은 제품이 침실에는 더 잘 맞아요.', '전기 요금은 하루 몇 시간 쓰는지에 따라 달라져요.', '작은 방이라면 500W 정도면 충분해요.',
+    '사용 후에는 먼지를 털어서 보관하면 오래 써요.', '온도 조절이 세밀할수록 전기를 아낄 수 있어요.', '원룸에서는 공간을 덜 차지하는 세로형이 편해요.',
+    '거실처럼 넓은 곳은 대류형이 더 좋아요.', '밤새 켜 두는 건 피하는 게 좋아요.', '가습기와 같이 쓰면 덜 건조해요.'];
+  const sec = (h, a, b) => [`## ${h}`, a, '[이미지: 히터 사진]', b];
+  const A = sec('거실', '거실 창가에 두었어요.', '바람이 잘 퍼져요.'), B = sec('침실', '침대 옆에 두었어요.', '조용해요.'), Cc = sec('욕실', '욕실 앞에 두었어요.', '습기가 있어요.');
+  const rowsOf = (parts, withCtx = true) => parseSlots(parts.flat().join('\n')).map((x, i) => ({
+    id: 'r' + i, slot_key: x.key, slot_index: x.index, slot_text: x.text, slot_ctx: withCtx ? ctxOf(x) : '', image_id: 'IMG_' + (i + 1),
+  }));
+  const ids = (parts, rows) => matchSlots(parseSlots(parts.flat().join('\n')), rows).slots.map((s) => (s.link ? s.link.image_id : '-'));
+  test('주변 문장을 마구 새로 써도(자리 순서는 그대로) 이미지가 서로 바뀌지 않음 — 무작위 1,000번', () => {
+    let seed = 11;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const pick = () => POOL[Math.floor(rnd() * POOL.length)];
+    const rows = rowsOf([A, B]);
+    let swaps = 0;
+    for (let t = 0; t < 1000; t++) {
+      const keepHeads = t % 2 === 0;
+      const h1 = keepHeads ? '거실' : pick().slice(0, 8), h2 = keepHeads ? '침실' : pick().slice(0, 8);
+      const got = ids([sec(h1, pick(), pick()), sec(h2, pick(), pick())], rows);
+      if (got[0] !== 'IMG_1' || got[1] !== 'IMG_2') swaps++;
+    }
+    assert.equal(swaps, 0);
+  });
+  test('문단째 옮기면(주변 글이 그대로) 이미지가 따라감: 둘 바꾸기·셋 돌리기·셋 뒤집기', () => {
+    assert.deepEqual(ids([B, A], rowsOf([A, B])), ['IMG_2', 'IMG_1']);
+    assert.deepEqual(ids([Cc, A, B], rowsOf([A, B, Cc])), ['IMG_3', 'IMG_1', 'IMG_2']);
+    assert.deepEqual(ids([Cc, B, A], rowsOf([A, B, Cc])), ['IMG_3', 'IMG_2', 'IMG_1']);
+  });
+  test('문단을 옮기면서 문장을 조금 고쳐도 따라감, 다 새로 쓰면 순서대로', () => {
+    const B2 = sec('침실', '침대 옆 협탁에 두었어요.', '조용해요.');
+    assert.deepEqual(ids([B2, A], rowsOf([A, B])), ['IMG_2', 'IMG_1']);
+    const X = sec('작은 방', '책상 아래에 두었어요.', '발이 따뜻해요.'), Y = sec('큰 방', '문 옆에 두었어요.', '금방 따뜻해져요.');
+    assert.deepEqual(ids([X, Y], rowsOf([A, B])), ['IMG_1', 'IMG_2']);
+  });
+  test('가운데를 지우거나 새로 넣어도 나머지는 제자리 (셋 중 첫째·가운데 지우기, 위에 새로 넣기)', () => {
+    const rows = rowsOf([A, B, Cc]);
+    const m1 = matchSlots(parseSlots([B, Cc].flat().join('\n')), rows);
+    assert.deepEqual(m1.slots.map((s) => s.link.image_id), ['IMG_2', 'IMG_3']);
+    assert.deepEqual(m1.orphans.map((o) => o.image_id), ['IMG_1']);
+    const m2 = matchSlots(parseSlots([A, Cc].flat().join('\n')), rows);
+    assert.deepEqual(m2.slots.map((s) => s.link.image_id), ['IMG_1', 'IMG_3']);
+    assert.deepEqual(m2.orphans.map((o) => o.image_id), ['IMG_2']);
+    assert.deepEqual(ids([A, B], rowsOf([B])), ['-', 'IMG_1']);
+  });
+  test('주변 글을 저장하지 않은 예전 줄: 몇 번째인지(키)대로 — 순서를 바꾸지 않음', () => {
+    assert.deepEqual(ids([B, A], rowsOf([A, B], false)), ['IMG_1', 'IMG_2']);
+  });
+  test('일부 자리만 연결돼 있어도(둘째·셋째만) 그대로 그 자리', () => {
+    const rows = rowsOf([A, B, Cc]).slice(1);
+    assert.deepEqual(ids([A, B, Cc], rows), ['-', 'IMG_2', 'IMG_3']);
+  });
+  test('같은 설명이 8곳 넘게 있으면 순서만 지킴 (자리 바꾸기 계산은 작은 묶음에서만)', () => {
+    const many = Array.from({ length: 8 }, (_, i) => sec('방' + i, POOL[i] , POOL[i + 1]));
+    const rows = rowsOf(many);
+    const rev = [...many].reverse();
+    assert.deepEqual(ids(rev, rows), rows.map((r) => r.image_id));
+  });
+});
+
 describe('용도·비율·크기', () => {
   test('모든 비율의 AI 요청 크기가 OpenAI 규칙에 맞고, 비용 표에 있음', () => {
     for (const [r, v] of Object.entries(RATIOS)) {
@@ -302,6 +364,64 @@ describe('위험 표현', () => {
     assert.equal(descriptionMismatch('소형 히터 전경', '원룸에 놓인 소형 히터'), false);
     assert.equal(descriptionMismatch('소형 히터 전경', '바닷가 노을 풍경'), true);
     assert.equal(descriptionMismatch('', '아무거나'), false);
+  });
+  test('검증 N10: 여러 개를 함께 빼라는 말·영어 부정·-free 도 막지 않음, 뒤에서 다시 넣어달라면 막음', () => {
+    const codes = (t) => blocksOf(promptRisk(t)).map((x) => x.code);
+    for (const t of ['글자나 로고 없이 깔끔한 배경', '글자와 로고 없이', '글자, 로고 없이 깔끔하게', '글자·로고 없이', '로고는 없는 일반 청소기', '텍스트가 안 보이게',
+      '글자는 넣지 말고', '로고를 지운 청소기', 'no text or logos', 'without any text', 'text-free background', 'no-logo', 'logo-free design', "don't put any text",
+      '가격표 없이', 'KC 마크 없이', '로고 X'])
+      assert.deepEqual(codes(t), [], t);
+    assert.deepEqual(codes('로고 없이 하지 말고 로고를 크게 넣어줘'), ['logo']);
+    assert.deepEqual(codes('글자 없는 척 말고 글자 넣어줘'), ['text']);
+    assert.deepEqual(codes('로고와 글자 넣어줘'), ['logo', 'text']);
+    assert.deepEqual(codes('add a big logo'), ['logo']);
+  });
+  test('검증 N8: 가격 — 50원·3천원·2만 9천원·5천만원·1.5만원도 막고, 원룸·원형·원래는 가격이 아님', () => {
+    const codes = (t) => blocksOf(promptRisk(t)).map((x) => x.code);
+    for (const t of ['50원짜리 동전', '3천원 할인 스티커', '2만 9천원 느낌', '5천만원 자동차', '1.5만원', '9,900 원', '990원', '$19.99 tag'])
+      assert.deepEqual(codes(t), ['price'], t);
+    for (const t of ['원룸 3 원룸 구조', '3원색 배경', '제1원칙', '원형 테이블 2개', '원래 쓰던 히터'])
+      assert.deepEqual(codes(t), [], t);
+  });
+  test('검증 N7: 실제 사진이 필요한 자리 — 빼라는 말·다른 뜻(포장마차·리포트)은 넘어감', () => {
+    for (const t of ['로고 없이 일반적인 청소기', '포장마차 거리', '리포트 쓰는 대학생', '박스 없이 거실에 놓인 히터', '화면이 안 보이게 뒤에서 찍은 노트북'])
+      assert.equal(slotRisk(t).real, false, t);
+    for (const t of ['포장 박스 뒷면', '로고가 보이는 앞면', '제품 내부 구조'])
+      assert.equal(slotRisk(t).real, true, t);
+  });
+  test('검증 N8: 연결 상품 브랜드는 낱말로만 (LG가 algorithm 안에서 걸리지 않음)', () => {
+    const codes = (t, b) => blocksOf(promptRisk(t, b)).map((x) => x.code);
+    assert.deepEqual(codes('algorithm 설명 그림', ['LG']), []);
+    assert.deepEqual(codes('LG 냉장고 느낌', ['LG']), ['brand']);
+    assert.deepEqual(codes('삼성전자 느낌의 세탁기', ['삼성']), ['brand'], '한글 이름은 붙여 써도 찾음');
+  });
+});
+
+describe('맥락 글 정리 — 검증 N8', () => {
+  test('가격(천원·만 단위)·인증은 지우고, 모델 번호처럼 생긴 것만 지움 (A4·PM2.5·LED 3개·Wi-Fi 6은 그대로)', () => {
+    assert.equal(sanitizeContext('가격은 2만 9천원이고 3천원 쿠폰도 있어요'), '가격은 이고 쿠폰도 있어요');
+    assert.equal(sanitizeContext('50원 차이예요'), '차이예요');
+    assert.equal(sanitizeContext('A4 용지 크기, LED 3개, PM2.5 필터, Wi-Fi 6 지원'), 'A4 용지 크기, LED 3개, PM2.5 필터, Wi-Fi 6 지원');
+    assert.equal(sanitizeContext('갤럭시 SM-G998N 과 V12 비교'), '갤럭시 과 비교');
+    assert.equal(sanitizeContext('인증샷 남겨요, KC인증 제품'), '인증샷 남겨요, 제품');
+    assert.equal(sanitizeContext('algorithm 설명', ['LG']), 'algorithm 설명');
+    assert.equal(sanitizeContext('LG 스탠바이미 후기', ['LG', '스탠바이미']), '제품 제품 후기');
+  });
+});
+
+describe('내려받을 기본 비율·카드뉴스 출처 (검증 N5·N14)', () => {
+  test('자르는 곳을 저장하지 않았으면: 만들 때 고른 비율 → 이미 그 용도 비율인 이미지 → 용도의 첫 비율', async () => {
+    const { defaultRatio } = await import('../images.js');
+    assert.equal(defaultRatio({ ratio: '16:9', width: 1536, height: 1024 }, 'blog_body'), '16:9', '정해진 크기(3:2)로 만든 이미지도 고른 비율로');
+    assert.equal(defaultRatio({ ratio: '', width: 1536, height: 864 }, 'blog_body'), '16:9', '이미 16:9인 사진');
+    assert.equal(defaultRatio({ ratio: '4:5', width: 1024, height: 1536 }, 'blog_body'), '4:3', '그 용도에 없는 비율이면 용도 기본');
+    assert.equal(defaultRatio({ width: 1000, height: 1000 }, 'ig_feed'), '1:1');
+    assert.equal(defaultRatio(null, 'blog_cover'), '16:9');
+  });
+  test('카드뉴스 이미지를 블로그에 쓸 때: AI 배경이면 AI 표시, Pexels 배경이면 사진가 출처', () => {
+    assert.equal(captionHint({ kind: 'card', license: '카드뉴스 (앱에서 직접 만듦) · 배경: AI 생성 이미지', attribution_text: '배경: AI로 만든 예시 이미지' }), '※ 배경은 AI로 만든 예시 이미지');
+    assert.equal(captionHint({ kind: 'card', license: '카드뉴스 (앱에서 직접 만듦) · 배경: Pexels 사진 (AIDAN)', attribution_text: '사진: AIDAN (Pexels)' }), '사진: AIDAN (Pexels)');
+    assert.equal(captionHint({ kind: 'card', license: '카드뉴스 (앱에서 직접 만듦)', attribution_text: '' }), '');
   });
 });
 

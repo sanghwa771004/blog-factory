@@ -77,7 +77,10 @@ end $$;
 진짜 OpenAI·Pexels를 부르지 않고 확인할 수 있는 것만 해. 쓰기 점검은 `[테스트]` 표시를 붙이고 끝나면 정리해.
 | 요청 | 기대 결과 |
 |---|---|
-| `GET /ping` | `version` = 1.2.0 |
+| `GET /ping` | `version` = 1.2.0, `fn` = `blog-app` |
+| `GET /functions/v1/blog-gen/ping` | `version` = 1.2.0, `fn` = `blog-gen` (생성 전용 서버도 올라감) |
+| `blog-gen`으로 `GET /state` · `GET /images/config` (임시 세션) | 404 `not_found` (생성 요청만 받음) |
+| `blog-gen`으로 `POST /images/generate` (세션 없음) | 401 |
 | `GET /images/config` · `GET /images` · `POST /images/generate` (세션 없음) | 모두 401 |
 | `GET /images/config` (임시 세션) | `keys.openai`·`keys.pexels`가 키 넣은 상태와 같음, 키 값은 응답 어디에도 없음, 기본 설정(모델·품질·하루 5장·한 달 2달러) |
 | `POST /images/generate` (키 없음, 실제 모델) | 503 `openai_key_missing`, 생성 기록 안 생김 |
@@ -88,7 +91,9 @@ end $$;
 | 이름만 바꾼 가짜 파일(`b64`=HTML 글자, `mime=image/jpeg`) | 400 `bad_image` (`reason` 있음), 저장 안 됨 |
 | `rights` 없이 올리기 | 400 `rights_required` |
 | `POST /images/{id}` review_status=사용 가능 | 200 |
-| (점검용 가짜 모델) 설정 `image_gen_model=gf-test-fake` → `POST /images/generate` → `GET /images/generations/{id}` | 202 → '성공', 비용 0, 회색 시험 이미지, OpenAI는 안 부름 → 끝나면 모델 이름을 원래대로 |
+| (점검용 가짜 모델) 설정 `image_gen_model=gf-test-fake` → **`blog-gen`으로** `POST /images/generate` → `GET /images/generations/{id}` | 202 → '성공', 비용 0, 회색 시험 이미지, 고른 비율(`ratio`)이 이미지에 저장, OpenAI는 안 부름 → 끝나면 모델 이름을 원래대로 |
+| 같은 요청 번호로 `POST /images/generate` 한 번 더 (blog-gen·blog-app 둘 다) | 200 `duplicate: true`, 같은 생성 기록 (새로 안 만듦, 기다리게 하지 않음) |
+| `POST /posts/{id}/cards` 지운 이미지를 배경으로 | 404 `not_found` (저장 안 됨) |
 | 쓰는 이미지 `DELETE /images/{id}` / 연결을 뺀 뒤 다시 | 409 `image_in_use` / 200 `file_removed: true` |
 | `GET /stats` | `image_costs` 따로 있음, 기존 숫자는 그대로 |
 | `GET /export` | 새 표 4개(`post_images`·`post_image_slots`·`image_generations`·`post_card_decks`) 줄 수가 DB와 같음 |

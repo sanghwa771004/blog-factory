@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 FIX = ROOT / 'tests' / 'fixtures'
 OUT = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / 'tests' / 'ui' / 'screenshots'
 API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app'
+GEN = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-gen'  # 생성 전용 (같은 코드)
 CODE = 'TEST-ONLY-CODE-not-real-123456'  # 가짜 코드
 SESSION = 'test-session-token-0000000000000000'
 
@@ -65,6 +66,16 @@ EXTRA = [{'key': 'x:cover', 'label': '블로그 대표 이미지', 'purpose': 'b
          {'key': 'x:ig_feed', 'label': '인스타그램 피드 이미지', 'purpose': 'ig_feed', 'file': 'instagram'},
          {'key': 'x:ig_story', 'label': '인스타 스토리·릴스 이미지', 'purpose': 'ig_story', 'file': 'story'}]
 FX_IMG = {'4x3': ('/tests/fixtures/img/photo-4x3.jpg', 1280, 960), '16x9': ('/tests/fixtures/img/photo-16x9.jpg', 1536, 864), '4x5': ('/tests/fixtures/img/photo-4x5.jpg', 1080, 1350)}
+RATIO_SIZE = {'16:9': '1536x864', '4:3': '1280x960', '1:1': '1024x1024', '4:5': '1024x1280', '9:16': '864x1536'}
+
+
+def size_for(model, ratio):
+    """서버의 sizeFor 처럼: gpt-image-2·2.5는 비율 그대로, 그 밖의 모델은 표준 크기 세 가지 중 방향이 같은 것"""
+    s = RATIO_SIZE.get(ratio or '', '1280x960')
+    if str(model).startswith('gpt-image-2') or model == 'gf-test-fake':
+        return s
+    w, h = (int(x) for x in s.split('x'))
+    return '1536x1024' if w > h else '1024x1536' if w < h else '1024x1024'
 SECRET_MARK = 'sk-test-SERVER-ONLY-never-sent-to-app'  # 가짜 서버가 '가지고만 있는' 키 — 화면에 절대 나오면 안 됨
 
 
@@ -149,6 +160,10 @@ class Mock:
         self.images, self.slots, self.gens, self.decks, self.polls = [], [], [], {}, {}
         self.min_est = None   # 서버 쪽 예상 비용이 더 크다고 답하게 (estimate_changed 시험)
         self.busy_left = 0    # 이 횟수만큼 server_busy 로 답하게 (서버 일꾼 시간 부족 시험)
+        self.gen_missing = False  # 생성 전용 서버(blog-gen)가 아직 없는 것처럼 (Supabase 404)
+        self.gen_hits = 0         # 그때 생성 전용 서버로 온 요청 수
+        self.hold_generate = False  # 생성 요청의 응답을 붙잡아 둠 (보낸 뒤 창 닫기 시험)
+        self.held = []
         self.settings.update({'image_gen_model': 'gpt-image-2.5-flare', 'image_edit_model': 'gpt-image-2.5-sunburst', 'image_quality': 'medium',
                               'image_daily_limit': 5, 'image_monthly_budget_usd': 2, 'image_fx_krw': 1400, 'image_fx_date': D(-1), 'image_fx_source': '테스트 환율',
                               'image_prices': {'image_output_per_m': 30, 'image_input_per_m': 8, 'text_input_per_m': 5, 'checked_at': '2026-10-22',
@@ -196,7 +211,7 @@ class Mock:
     def add_image(self, kind, post_id, slot_key, fx='4x3', **extra):
         url, w, h = FX_IMG[fx]
         i = {'id': self.new_id(), 'kind': kind, 'provider': {'ai': 'openai', 'stock': 'pexels', 'upload': 'upload', 'card': 'cardnews'}[kind], 'model': '',
-             'prompt': '', 'user_prompt': '', 'style': '', 'purpose': 'blog_body', 'description': '', 'alt_text': '', 'storage_path': f'{kind}/2026/10/{self.seq}.jpg',
+             'prompt': '', 'user_prompt': '', 'style': '', 'purpose': 'blog_body', 'ratio': '', 'description': '', 'alt_text': '', 'storage_path': f'{kind}/2026/10/{self.seq}.jpg',
              'mime': 'image/png' if kind == 'card' else 'image/jpeg', 'bytes': 15000, 'width': w, 'height': h, 'sha256': '', 'source_url': '', 'source_id': '',
              'author_name': '', 'author_url': '', 'license': '', 'attribution_text': '', 'rights_confirmed': kind != 'ai', 'review_status': '검수 전', 'review_note': '',
              'generation_id': None, 'downloaded_at': None, 'created_at': NOW, 'updated_at': NOW, 'deleted_at': None, 'origin_post_id': post_id,
@@ -269,7 +284,7 @@ class Mock:
             i = self.img(r['image_id'])
             if r['image_id'] and i:
                 out.append({**{k: r[k] for k in ('post_id', 'slot_key', 'slot_index', 'image_id', 'purpose', 'used_at', 'downloaded_at')},
-                            'post_images': {k: i[k] for k in ('kind', 'provider', 'review_status', 'mime', 'author_name', 'description')}})
+                            'post_images': {k: i[k] for k in ('kind', 'provider', 'review_status', 'mime', 'author_name', 'description', 'license', 'attribution_text')}})
         return out
 
     def state(self):
@@ -391,13 +406,17 @@ class Mock:
             if self.busy_left > 0:
                 self.busy_left -= 1
                 return 503, {'error': 'server_busy', 'retry_after': 1}
+            model = self.settings['image_edit_model' if body.get('mode') == 'edit' else 'image_gen_model']
+            size = size_for(model, body.get('ratio'))
+            changed = {'error': 'estimate_changed', 'model': model, 'size': size, 'quality': body.get('quality', 'medium')}  # 실제 서버처럼 무엇으로 계산했는지도
             if not isinstance(body.get('confirm_usd'), (int, float)):
-                return 409, {'error': 'estimate_changed', 'est_usd': 0.0111}
+                return 409, {**changed, 'est_usd': 0.0111}
             if self.min_est and body['confirm_usd'] + 1e-9 < self.min_est:
-                return 409, {'error': 'estimate_changed', 'est_usd': self.min_est}
+                return 409, {**changed, 'est_usd': self.min_est}
             g = {'id': self.new_id(), 'request_key': body['request_key'], 'post_id': body['post_id'], 'slot_key': body['slot_key'], 'mode': body.get('mode', 'generate'),
-                 'model': self.settings['image_edit_model' if body.get('mode') == 'edit' else 'image_gen_model'], 'size': '1280x960', 'quality': body.get('quality', 'medium'),
-                 'purpose': body.get('purpose'), 'style': body.get('style'), 'user_prompt': body.get('text', ''), 'status': '생성 중', 'provider_called': True,
+                 'model': model, 'size': size, 'quality': body.get('quality', 'medium'),
+                 'purpose': body.get('purpose'), 'style': body.get('style'), 'user_prompt': '\n'.join(x for x in (body.get('text', ''), body.get('extra', '')) if x),
+                 'ratio': body.get('ratio') or '', 'status': '생성 중', 'provider_called': True,
                  'error_code': '', 'error_message': '', 'est_usd': body['confirm_usd'], 'usage_usd': None, 'actual_usd': None, 'actual_checked_at': None,
                  'cost_status': '예상', 'fx_krw': 1400, 'image_id': None, 'created_at': NOW, 'started_at': NOW, 'finished_at': None}
             self.gens.insert(0, g)
@@ -409,8 +428,8 @@ class Mock:
             self.polls[g['id']] += 1
             image = None
             if g['status'] == '생성 중' and self.polls[g['id']] >= 2:
-                i = self.add_image('ai', g['post_id'], g['slot_key'], model=g['model'], prompt='Create an illustrative image… Rules: No text', description=g['user_prompt'],
-                                   alt_text=g['user_prompt'][:120], generation_id=g['id'], purpose=g['purpose'] or 'blog_body')
+                i = self.add_image('ai', g['post_id'], g['slot_key'], {'16:9': '16x9', '4:5': '4x5'}.get(g.get('ratio') or '', '4x3'), model=g['model'], prompt='Create an illustrative image… Rules: No text', description=g['user_prompt'],
+                                   alt_text=g['user_prompt'][:120], generation_id=g['id'], purpose=g['purpose'] or 'blog_body', ratio=g.get('ratio') or '')
                 g.update({'status': '성공', 'image_id': i['id'], 'usage_usd': 0.01107, 'cost_status': '사용량 기준', 'finished_at': NOW})
             if g['image_id']:
                 image = self.with_uses(self.img(g['image_id']))
@@ -536,7 +555,12 @@ def main():
             if req.method == 'OPTIONS':
                 return route.fulfill(status=204, headers=cors, body='')
             u = urlparse(req.url)
-            path = u.path.split('/blog-app/', 1)[1] if '/blog-app/' in u.path else ''
+            gen = '/blog-gen/' in u.path  # 생성 전용 서버 (같은 코드, 생성 요청만 받음)
+            if gen and mock.gen_missing:  # 아직 안 올린 경우 Supabase가 주는 답
+                mock.gen_hits += 1
+                return route.fulfill(status=404, headers={**cors, 'Content-Type': 'application/json'}, body=json.dumps({'code': 'NOT_FOUND', 'message': 'Requested function was not found'}))
+            mark = '/blog-gen/' if gen else '/blog-app/'
+            path = u.path.split(mark, 1)[1] if mark in u.path else ''
             ctype = req.headers.get('content-type', '')
             body = {}
             if ctype.startswith('multipart/form-data'):
@@ -550,10 +574,23 @@ def main():
                     body = json.loads(req.post_data) if req.post_data else {}
                 except Exception:  # noqa: BLE001
                     body = {}
-            status, data = mock.handle(req.method, path, parse_qs(u.query), req.headers, body)
+            if gen and not (req.method == 'POST' and path == 'images/generate'):
+                status, data = 404, {'error': 'not_found'}  # 실제 서버처럼 blog-gen 은 생성 요청만
+            else:
+                status, data = mock.handle(req.method, path, parse_qs(u.query), req.headers, body)
+                mock.calls[-1]['fn'] = 'gen' if gen else 'app'
+            if mock.hold_generate and path == 'images/generate':  # 응답을 나중에 (테스트가 직접 보냄)
+                mock.held.append((route, status, data, cors))
+                return
             route.fulfill(status=status, headers={**cors, 'Content-Type': 'application/json; charset=utf-8'}, body=json.dumps(data, ensure_ascii=False))
 
+        def release_held():
+            while mock.held:
+                r, st, dt, co = mock.held.pop(0)
+                r.fulfill(status=st, headers={**co, 'Content-Type': 'application/json; charset=utf-8'}, body=json.dumps(dt, ensure_ascii=False))
+
         ctx.route(API + '/**', api_route)
+        ctx.route(GEN + '/**', api_route)
         ctx.route(re.compile(r'https://fonts\.(googleapis|gstatic)\.com/.*'), lambda r: r.fulfill(status=200, content_type='text/css', body=''))
         page = ctx.new_page()
         dialogs = []
@@ -1109,6 +1146,93 @@ def main():
             expect(prog).to_be_visible()
             assert prog.evaluate('(e) => getComputedStyle(e).flexDirection') == 'column'
         check('검토 회귀: 자르기 저장 유지·모두 내려받기, 실제 사진 자리 확인, 서버 바쁨 중 닫기, 서버 예상 비용 반영, 기존 화면 모양', t_review_regressions)
+
+        # 검증에서 나온 것: 생성 전용 서버, 서버 예상 비용은 그 품질에만, 미리 채운 칸은 '적던 내용' 아님, 보낸 뒤 창 닫기, 생성 전용 서버가 없을 때
+        def t_verify_regressions():
+            gens = [c for c in mock.calls if c['path'] == 'images/generate']
+            assert gens and all(c.get('fn') == 'gen' for c in gens), [c.get('fn') for c in gens]
+            mock.settings['image_daily_limit'] = 50  # 이 시험에서 여러 장 만듦
+            page.get_by_role('button', name='새로고침').click()
+            page.wait_for_timeout(400)
+            open_p8()
+            cards = page.locator('section.studio .slot')
+            sheet = page.locator('#sheet')
+            go = lambda: sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
+
+            def ai_sheet(i):
+                card = cards.nth(i)
+                b = card.get_by_role('button', name='바꾸기', exact=True).or_(card.get_by_role('button', name='AI로 만들기')).first
+                expect(b).to_be_enabled()
+                was = b.inner_text()
+                b.click()
+                if was == '바꾸기':
+                    sheet.get_by_role('button', name='AI로 새로 만들기').click()
+            # N4: 서버가 보통 품질로 다시 계산한 값($0.05)은 품질을 낮음으로 바꾸면 쓰지 않음
+            mock.min_est = 0.05
+            ai_sheet(0)
+            go().click()
+            expect(sheet).to_contain_text('서버에서 다시 계산한 예상 비용이 $0.0500')
+            sheet.locator('label', has_text='품질').locator('select').select_option('low')
+            expect(sheet).not_to_contain_text('서버에서 다시 계산한')
+            assert '$0.0500' not in go().inner_text(), go().inner_text()
+            mock.min_est = None
+            sheet.get_by_role('button', name='닫기').click()
+            # 더 원하는 것을 넣어 만들고 연결 → 연결할 때 만들 때 고른 용도도 같이 보냄
+            ai_sheet(0)
+            sheet.locator('label', has_text='더 원하는 것').locator('textarea').fill('밝은 오전 햇살')
+            go().click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=15000)
+            sheet.get_by_role('button', name=re.compile('이 이미지 쓰기')).click()
+            expect(page.locator('#toast')).to_contain_text('연결했어')
+            link = [c for c in mock.calls if c['path'].endswith('/images/link')][-1]['body']
+            assert link.get('purpose') == 'blog_body', link
+            # N6: '다시 만들기'는 전에 넣은 말을 미리 채움 → 안 고쳤으면 창 밖을 눌러도 그냥 닫힘, 고치면 안 닫힘
+            cards.nth(0).get_by_role('button', name='다시 만들기').click()
+            extra = sheet.locator('label', has_text='더 원하는 것').locator('textarea')
+            expect(extra).to_have_value('밝은 오전 햇살')
+            page.locator('#dim').click(position={'x': 20, 'y': 20}, force=True)
+            expect(sheet).to_be_hidden()
+            cards.nth(0).get_by_role('button', name='다시 만들기').click()
+            extra.fill('밝은 오후 햇살')
+            page.locator('#dim').click(position={'x': 20, 'y': 20}, force=True)
+            expect(page.locator('#toast')).to_contain_text('적던 내용이 있어서 안 닫았어')
+            expect(sheet).to_be_visible()
+            sheet.get_by_role('button', name='닫기').click()
+            # N11: 보낸 뒤 응답 전에 창을 닫아도, 서버가 받은 생성은 이미지 칸에 '만드는 중'으로 보임
+            mock.hold_generate = True
+            ai_sheet(0)
+            go().click()
+            for _ in range(50):
+                if mock.held:
+                    break
+                page.wait_for_timeout(100)
+            assert mock.held, '생성 요청이 오지 않음'
+            sheet.get_by_role('button', name='닫기').click()
+            mock.hold_generate = False
+            release_held()
+            expect(page.locator('section.studio')).to_contain_text('이미지 만드는 중', timeout=5000)
+            expect(page.locator('#toast')).to_contain_text('서버에서 만드는 중')
+            g = next(x for x in mock.gens if x['status'] == '생성 중')
+            mock.polls[g['id']] = 5
+            mock.handle('GET', f"images/generations/{g['id']}", {}, {'x-app-session': SESSION}, {})  # 가짜 서버에서 생성 끝내기
+            page.get_by_role('button', name='새로고침').click()
+            expect(page.locator('section.studio')).not_to_contain_text('이미지 만드는 중', timeout=8000)
+            # 생성 전용 서버가 아직 없으면(404) 본 서버로 같은 요청을 보내고, 그다음부터는 바로 본 서버로
+            mock.gen_missing = True
+            before = len([c for c in mock.calls if c['path'] == 'images/generate'])
+            ai_sheet(0)
+            go().click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=15000)
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            ai_sheet(0)
+            go().click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=15000)
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            after = [c for c in mock.calls if c['path'] == 'images/generate'][before:]
+            assert [c.get('fn') for c in after] == ['app', 'app'], [c.get('fn') for c in after]
+            assert mock.gen_hits == 1, f'404 뒤에도 생성 전용 서버로 또 보냄: {mock.gen_hits}'
+            mock.gen_missing = False
+        check('검증 회귀: 생성 전용 서버, 서버 예상 비용은 그 품질에만, 미리 채운 칸, 보낸 뒤 창 닫기, 생성 전용 서버 없을 때 본 서버로', t_verify_regressions)
 
         def t_img_no_keys():
             mock.keys = {'openai': False, 'pexels': False}

@@ -6,7 +6,7 @@
 --  4. post_card_decks   — 카드뉴스 문구·템플릿 (원고마다 하나)
 --  5. api_calls         — 외부 API 호출 기록 (Pexels 시간당 한도 보호)
 --  6. settings          — 이미지 모델·품질·하루 한도·한 달 예산·환율·가격
---  7. 함수: 생성 시작(중복·동시·한도·예산 검사) / 저장 / 실패 / 자리 연결·바꾸기·옮기기 / 안전 삭제 / 이미지 비용 통계 / 사용량
+--  7. 함수: 생성 시작(중복·동시·한도·예산 검사) / 저장 / 실패 / 자리 연결·바꾸기·옮기기 / 카드뉴스 저장 / 안전 삭제 / 이미지 비용 통계 / 사용량
 
 -- 1 ───────── 이미지 보관함
 create table if not exists public.post_images (
@@ -21,6 +21,7 @@ create table if not exists public.post_images (
   user_prompt text not null default '',     -- 사용자가 고친 설명·추가 요청
   style text not null default '',
   purpose text not null default '',
+  ratio text not null default '',           -- AI로 만들 때 고른 비율 (정해진 크기로만 만드는 모델은 내려받을 때 이 비율로 자름)
   description text not null default '',
   alt_text text not null default '',
   storage_path text not null default '',
@@ -103,8 +104,8 @@ create table if not exists public.image_generations (
   actual_usd numeric check (actual_usd >= 0),                  -- 사용자가 OpenAI 사용량 화면에서 확인해 넣은 실제 청구액
   actual_checked_at date,
   cost_status text not null default '예상' check (cost_status in ('예상','사용량 기준','청구액 확인','청구 없음','확인 필요')),
-  -- 서버가 처음 매긴 비용 상태 (사용자가 넣은 청구액을 지우면 이걸로 되돌림)
-  auto_cost_status text not null default '예상' check (auto_cost_status in ('예상','사용량 기준','청구 없음','확인 필요')),
+  -- 서버가 처음 매긴 비용 상태 (사용자가 넣은 청구액을 지우면 이걸로 되돌림). 값 검사는 아래 '보강'에서
+  auto_cost_status text not null default '예상',
   fx_krw numeric check (fx_krw is null or fx_krw > 0),         -- 이 기록에 쓴 환율 (원/달러)
   fx_date date,
   fx_source text not null default '',
@@ -140,6 +141,21 @@ create table if not exists public.api_calls (
   at timestamptz not null default now()
 );
 create index if not exists api_calls_at_idx on public.api_calls (provider, at);
+
+-- 보강: 이 파일의 예전 초안을 먼저 돌린 DB에서도 같은 결과가 되게 (create table if not exists 는 이미 있는 표에 새 열을 더하지 않음)
+alter table public.post_images add column if not exists ratio text not null default '';
+alter table public.post_image_slots add column if not exists slot_ctx text not null default '';
+alter table public.image_generations add column if not exists risk_override text not null default '';
+alter table public.image_generations add column if not exists auto_cost_status text not null default '예상';
+do $$ begin
+  if not exists (select 1 from pg_constraint where conname = 'post_images_ratio_check') then
+    alter table public.post_images add constraint post_images_ratio_check check (ratio in ('', '16:9', '4:3', '1:1', '4:5', '9:16'));
+  end if;
+  if not exists (select 1 from pg_constraint where conname = 'image_generations_auto_cost_status_check') then
+    alter table public.image_generations add constraint image_generations_auto_cost_status_check
+      check (auto_cost_status in ('예상','사용량 기준','청구 없음','확인 필요'));
+  end if;
+end $$;
 
 -- 6 ───────── 설정
 -- 가격은 OpenAI 공식 가격표(2026-10-22 확인)로 시작하고, 바뀌면 설정에서 고침. 환율은 비워둠 (사용자가 기준과 날짜를 넣음)
@@ -222,12 +238,13 @@ begin
     select * into g from public.image_generations where id = gen for update;
     if g.id is null or g.status <> '생성 중' then raise exception 'generation is not running'; end if;
   end if;
-  insert into public.post_images (origin_post_id, origin_slot_index, origin_slot_key, kind, provider, model, prompt, user_prompt, style, purpose, description, alt_text,
+  insert into public.post_images (origin_post_id, origin_slot_index, origin_slot_key, kind, provider, model, prompt, user_prompt, style, purpose, ratio, description, alt_text,
       storage_path, mime, bytes, width, height, sha256, source_url, source_id, author_name, author_url, license, attribution_text, rights_confirmed, generation_id)
     values (nullif(img->>'origin_post_id', '')::uuid, nullif(img->>'origin_slot_index', '')::int, left(coalesce(img->>'origin_slot_key', ''), 220),
       img->>'kind', coalesce(img->>'provider', ''),
       coalesce(img->>'model', ''), left(coalesce(img->>'prompt', ''), 32000), left(coalesce(img->>'user_prompt', ''), 2000), coalesce(img->>'style', ''),
-      coalesce(img->>'purpose', ''), left(coalesce(img->>'description', ''), 500), left(coalesce(img->>'alt_text', ''), 300),
+      coalesce(img->>'purpose', ''), case when img->>'ratio' in ('16:9', '4:3', '1:1', '4:5', '9:16') then img->>'ratio' else '' end,
+      left(coalesce(img->>'description', ''), 500), left(coalesce(img->>'alt_text', ''), 300),
       coalesce(img->>'storage_path', ''), coalesce(img->>'mime', ''), nullif(img->>'bytes', '')::int, nullif(img->>'width', '')::int, nullif(img->>'height', '')::int,
       coalesce(img->>'sha256', ''), left(coalesce(img->>'source_url', ''), 2000), left(coalesce(img->>'source_id', ''), 60),
       left(coalesce(img->>'author_name', ''), 200), left(coalesce(img->>'author_url', ''), 2000), left(coalesce(img->>'license', ''), 200),
@@ -340,6 +357,28 @@ begin
   return to_jsonb(src);
 end $$;
 
+-- 카드뉴스 저장 (원고마다 하나). 배경 이미지를 지우는 요청과 겹치면 끝날 때까지 기다렸다가 다시 확인 — 지운 이미지를 배경으로 저장하지 않게
+-- (image_delete 가 같은 이미지 줄을 잠그고 카드뉴스에서 쓰는지 세므로, 둘 중 하나만 이김)
+create or replace function public.card_deck_save(p_post uuid, p jsonb) returns jsonb
+language plpgsql set search_path = '' as $$
+declare
+  d public.post_card_decks;
+  bg uuid := nullif(p->>'bg_image_id', '')::uuid;
+begin
+  if not exists (select 1 from public.posts where id = p_post) then raise exception 'post not found'; end if;
+  if bg is not null then
+    perform 1 from public.post_images where id = bg and deleted_at is null for share;
+    if not found then raise exception 'image not found'; end if;
+  end if;
+  insert into public.post_card_decks (post_id, template, ratio, slides, ad_label, bg_image_id)
+    values (p_post, coalesce(nullif(p->>'template', ''), 'clean'), coalesce(nullif(p->>'ratio', ''), '4:5'),
+            coalesce(p->'slides', '[]'::jsonb), coalesce((p->>'ad_label')::boolean, true), bg)
+    on conflict (post_id) do update set template = excluded.template, ratio = excluded.ratio, slides = excluded.slides,
+      ad_label = excluded.ad_label, bg_image_id = excluded.bg_image_id
+    returning * into d;
+  return to_jsonb(d);
+end $$;
+
 -- 이미지 지우기: 어느 원고(휴지통 포함)나 카드뉴스에서라도 쓰고 있으면 거절. 지우면 파일 경로를 돌려줘서 서버가 파일도 지움
 create or replace function public.image_delete(p_image uuid) returns jsonb
 language plpgsql set search_path = '' as $$
@@ -422,12 +461,12 @@ revoke all on public.post_images, public.post_image_slots, public.image_generati
 revoke execute on function
   public.image_gen_begin(jsonb), public.image_save(jsonb, jsonb, uuid, jsonb), public.image_gen_fail(uuid, jsonb),
   public.image_slot_upsert(uuid, jsonb), public.image_slot_swap(uuid, jsonb, jsonb), public.image_slot_rekey(uuid, jsonb),
-  public.image_delete(uuid), public.image_costs(date, date, uuid), public.image_usage()
+  public.card_deck_save(uuid, jsonb), public.image_delete(uuid), public.image_costs(date, date, uuid), public.image_usage()
   from public, anon, authenticated;
 grant execute on function
   public.image_gen_begin(jsonb), public.image_save(jsonb, jsonb, uuid, jsonb), public.image_gen_fail(uuid, jsonb),
   public.image_slot_upsert(uuid, jsonb), public.image_slot_swap(uuid, jsonb, jsonb), public.image_slot_rekey(uuid, jsonb),
-  public.image_delete(uuid), public.image_costs(date, date, uuid), public.image_usage()
+  public.card_deck_save(uuid, jsonb), public.image_delete(uuid), public.image_costs(date, date, uuid), public.image_usage()
   to service_role;
 
 -- 9 ───────── 비공개 버킷 (Supabase에만 있음. 테스트용 Postgres에는 storage 스키마가 없어서 건너뜀)

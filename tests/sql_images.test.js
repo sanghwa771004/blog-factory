@@ -1,7 +1,10 @@
 // 이미지 스튜디오 DB(012) 테스트 — PGlite(진짜 Postgres 17)에 001~012를 적용해서 확인. 실행: npm test
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { freshDb, one, all, val, longBody } from './helpers/db.js';
+import { freshDb, one, all, val, longBody, MIGRATIONS_DIR } from './helpers/db.js';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseSlots, matchSlots, planSlotSync, ctxOf } from '../images.js';
 
 const KEY = (n) => `req-key-${String(n).padStart(4, '0')}-abcdef`;
@@ -54,6 +57,9 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
     assert.deepEqual(g, []);
     assert.equal(await val(db, `select has_function_privilege('anon', 'public.image_gen_begin(jsonb)', 'execute')`), false);
     assert.equal(await val(db, `select has_function_privilege('service_role', 'public.image_gen_begin(jsonb)', 'execute')`), true);
+    assert.equal(await val(db, `select has_function_privilege('anon', 'public.card_deck_save(uuid, jsonb)', 'execute')`), false);
+    assert.equal(await val(db, `select has_function_privilege('authenticated', 'public.card_deck_save(uuid, jsonb)', 'execute')`), false);
+    assert.equal(await val(db, `select has_function_privilege('service_role', 'public.card_deck_save(uuid, jsonb)', 'execute')`), true);
   });
 
   describe('생성 시작 (중복·동시·하루 한도·예산)', () => {
@@ -264,6 +270,27 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       assert.equal(await val(db, `select count(*)::int from public.post_images where id = any($1::uuid[]) and deleted_at is null`, [[...A.img, ...B.img]]), 4, '이미지는 모두 보관함에 그대로');
     });
 
+    test('검증 N10: 카드뉴스 저장은 DB 함수 하나에서 — 지운 배경 이미지는 거절, 저장된 배경은 지우기를 막음', async () => {
+      const bg = (await save(db, { storage_path: 'up/deck-bg.jpg' })).image;
+      const d = await val(db, `select public.card_deck_save($1, $2::jsonb)`, [postB, JSON.stringify({ template: 'mark', ratio: '1:1', slides: [{ title: '첫 장' }], ad_label: false, bg_image_id: bg.id })]);
+      assert.deepEqual([d.template, d.ratio, d.ad_label, d.bg_image_id, d.slides.length], ['mark', '1:1', false, bg.id, 1]);
+      await assert.rejects(val(db, `select public.image_delete($1)`, [bg.id]), /image in use/, '배경으로 쓰는 중');
+      const again = await val(db, `select public.card_deck_save($1, $2::jsonb)`, [postB, JSON.stringify({ slides: [{ title: '고침' }], bg_image_id: null })]);
+      assert.deepEqual([again.template, again.ratio, again.ad_label, again.bg_image_id], ['clean', '4:5', true, null], '안 보낸 값은 기본값, 원고마다 한 줄');
+      assert.equal(await val(db, `select count(*)::int from public.post_card_decks where post_id = $1`, [postB]), 1);
+      await val(db, `select public.image_delete($1)`, [bg.id]);
+      await assert.rejects(val(db, `select public.card_deck_save($1, $2::jsonb)`, [postB, JSON.stringify({ slides: [], bg_image_id: bg.id })]), /image not found/, '지운 이미지는 배경으로 못 씀');
+      await assert.rejects(val(db, `select public.card_deck_save('00000000-0000-4000-8000-000000000000', '{}'::jsonb)`), /post not found/);
+    });
+
+    test('검증 N5: AI로 만들 때 고른 비율을 이미지에 저장 (모르는 값은 빈 값)', async () => {
+      const a = (await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/r1.jpg', ratio: '16:9' })).image;
+      const b = (await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/r2.jpg', ratio: '3:2' })).image;
+      const c = (await save(db, { storage_path: 'up/r3.jpg' })).image;
+      assert.deepEqual([a.ratio, b.ratio, c.ratio], ['16:9', '', '']);
+      await assert.rejects(db.query(`update public.post_images set ratio = '2:1' where id = $1`, [a.id]), /ratio_check/);
+    });
+
     test('원고를 아예 지워도(드문 경우) 이미지는 보관함에 남고 연결만 사라짐', async () => {
       const p = await val(db, `insert into public.posts (keyword, titles, body, stage, channel_id) values ('c', '["다"]', 'x', 'review', 'naver_blog') returning id`);
       const r = await save(db, { storage_path: 'up/keep.jpg', origin_post_id: p }, { post_id: p, slot_key: 'k:a#1' });
@@ -339,5 +366,39 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       assert.equal(u3.pexels_month, 2);
       assert.equal(await val(db, `select has_function_privilege('anon', 'public.image_usage()', 'execute')`), false);
     });
+  });
+});
+
+describe('012를 다시 돌리거나 예전 초안 위에 돌려도 같은 결과 (검증 N9)', () => {
+  const SQL012 = readFileSync(join(MIGRATIONS_DIR, '012_image_studio.sql'), 'utf8');
+  const DRAFT = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', '012_draft_77c6d5f.sql'), 'utf8');
+  const shape = (db) => all(db, `select table_name, column_name, data_type, column_default, is_nullable from information_schema.columns
+    where table_schema = 'public' and table_name in ('post_images','post_image_slots','image_generations','post_card_decks','api_calls','settings') order by 1, 2`);
+  const checks = (db) => all(db, `select conname from pg_constraint where conrelid in ('public.post_images'::regclass, 'public.image_generations'::regclass) and contype = 'c' order by 1`);
+  test('같은 DB에 두 번 돌려도 오류 없이, 열·검사가 그대로 (겹치지 않음)', async () => {
+    const db = await freshDb();
+    const [s1, c1] = [await shape(db), await checks(db)];
+    await db.exec(SQL012);
+    assert.deepEqual(await shape(db), s1);
+    assert.deepEqual(await checks(db), c1);
+    assert.ok(c1.some((x) => x.conname === 'post_images_ratio_check') && c1.some((x) => x.conname === 'image_generations_auto_cost_status_check'));
+  });
+  test('예전 초안(77c6d5f)을 먼저 돌린 DB에 지금 012를 돌리면: 빠졌던 열·검사가 생기고 함수가 동작', async () => {
+    const fresh = await freshDb();
+    const db = await freshDb({ upTo: '011' });
+    await db.exec(DRAFT);
+    const missing = await all(db, `select column_name from information_schema.columns where table_schema = 'public' and column_name in ('slot_ctx','risk_override','auto_cost_status','ratio') and table_name like '%image%'`);
+    assert.deepEqual(missing, [], '초안에는 새 열이 없음');
+    await db.exec(SQL012);
+    assert.deepEqual(await shape(db), await shape(fresh), '새로 만든 DB와 열이 같음');
+    assert.deepEqual(await checks(db), await checks(fresh), '값 검사도 같음');
+    const post = await val(db, `insert into public.posts (keyword, titles, body, stage, channel_id) values ('k', '["t"]', 'x', 'review', 'naver_blog') returning id`);
+    const sl = await val(db, `select public.image_slot_upsert($1, $2::jsonb)`, [post, JSON.stringify({ slot_key: 'k:a#1', slot_index: 0, slot_text: 'a', slot_ctx: '소제목 | 앞', image_id: null })]);
+    assert.equal(sl.slot_ctx, '소제목 | 앞');
+    const g = await val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ request_key: 'req-key-draft-0001', model: 'gpt-image-2.5-flare', est_usd: 0.01, risk_override: '일반 장면으로 만들기 확인: 박스' })]);
+    assert.deepEqual([g.risk_override, g.auto_cost_status], ['일반 장면으로 만들기 확인: 박스', '예상']);
+    await assert.rejects(db.query(`update public.image_generations set auto_cost_status = '모름' where id = $1`, [g.id]), /auto_cost_status_check/);
+    const d = await val(db, `select public.card_deck_save($1, '{"slides":[{"title":"a"}]}'::jsonb)`, [post]);
+    assert.equal(d.template, 'clean');
   });
 });

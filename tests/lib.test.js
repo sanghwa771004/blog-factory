@@ -273,6 +273,8 @@ describe('1.2.0 이미지가 연결된 원고 내보내기', () => {
     assert.equal(L.safeImgUrl('http://evil.example/a.jpg'), '');
     assert.equal(L.safeImgUrl('https://a.jpg" onerror="x'), '');
     assert.equal(L.safeImgUrl('//evil.example/x.png'), '', '//로 시작하는 다른 곳 주소는 막음');
+    assert.equal(L.safeImgUrl('/\\evil.example/x.png'), '', '/\\ 도 브라우저는 다른 곳 주소로 읽음 (검증 N16)');
+    assert.equal(L.safeImgUrl('https://x.supabase.co/a\\b.jpg'), '', '역슬래시가 섞인 주소는 안 씀');
     assert.equal(L.safeImgUrl('/fixtures/a.jpg'), '/fixtures/a.jpg');
     assert.equal(L.safeImgUrl('http://127.0.0.1:8000/a.jpg'), '', '시험용 주소는 그 기기에서 열 때만');
     // ZIP 안 파일 이름은 겹치지 않게 (이미 -2 가 있으면 그다음 번호)

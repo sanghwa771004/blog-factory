@@ -48,3 +48,12 @@ test('이미지 저장소는 비공개 버킷 + 정책 없음 (서버 키로만,
   assert.ok(!/create policy/i.test(sql), 'storage 정책을 만들지 않음 (anon·authenticated 접근 없음)');
   assert.ok(!/drop table|truncate|delete from public\.(posts|metrics|links|products)/i.test(sql), '기존 표를 지우거나 비우지 않음');
 });
+
+test('생성 전용 서버(blog-gen)는 AI 이미지 만들기 요청만 받고, 앱은 그게 없을 때 로그아웃시키지 않고 본 서버로', () => {
+  const ts = read('supabase/functions/blog-app/index.ts');
+  assert.match(ts, /if \(genFn && !\(req\.method === "POST" && route === "images\/generate"\)\) return json\(\{ error: "not_found" \}, 404\);/);
+  assert.match(read('supabase/functions/blog-gen/index.ts'), /^import "\.\.\/blog-app\/index\.ts";$/m);
+  const app = read('app.js');
+  assert.match(app, /if \(gen && !ours && \(r\.status === 404 \|\| r\.status === 401\)\) throw \{ code: 'gen_unavailable'/);
+  assert.ok(app.indexOf("throw { code: 'gen_unavailable'") < app.indexOf('authLost(j.reason'), '로그아웃 처리보다 먼저 거름');
+});

@@ -34,11 +34,11 @@ export const pct = (r) => (r == null ? '' : `${(r * 100).toFixed(r < 0.1 ? 2 : 1
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const safeUrl = (u) => { u = String(u || '').trim(); return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : ''; };
 // 미리보기에 띄울 이미지 주소: https(서명 주소)·blob(이 기기에서 만든 것)·같은 곳(테스트)만
-// (//로 시작하는 다른 곳 주소는 막음, http://127.0.0.1 은 이 기기에서 시험할 때만)
+// (//·/\ 로 시작하는 다른 곳 주소는 막음 — 브라우저는 /\ 도 // 처럼 읽음, http://127.0.0.1 은 이 기기에서 시험할 때만)
 const LOCAL_TEST = typeof location !== 'undefined' && location.hostname === '127.0.0.1';
 export const safeImgUrl = (u) => {
   u = String(u || '');
-  if (/^(https:\/\/|blob:|\/(?!\/))[^\s"'<>]*$/i.test(u)) return u;
+  if (/^(https:\/\/|blob:|\/(?![/\\]))[^\s"'<>\\]*$/i.test(u)) return u;
   return LOCAL_TEST && /^http:\/\/127\.0\.0\.1[:/][^\s"'<>]*$/i.test(u) ? u : '';
 };
 

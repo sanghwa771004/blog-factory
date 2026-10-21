@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   classifyOpenAIError, openaiImage, normalizePexels, pexelsSearch, pexelsPhoto, downloadImage, runGeneration, saveStockPhoto, saveUploaded,
-  storagePath, bytesToB64, b64ToBytes, sha256Hex, scrub, TEST_MODEL, NOT_COUNTED,
+  storagePath, bytesToB64, b64ToBytes, sha256Hex, scrub, TEST_MODEL, NOT_COUNTED, needMsFor, busyRetryAfter,
 } from '../supabase/functions/blog-app/image_service.js';
 import { sniffImage } from '../images.js';
 
@@ -283,6 +283,18 @@ describe('AI 생성 흐름 (생성 → 저장소 → 기록)', () => {
     const d2 = fakeDeps({ fetchImpl: slowBody });
     assert.equal((await runGeneration(d2, GEN, { key: 'sk', prices: PRICES, timeoutMs: 20 })).code, 'openai_timeout');
   });
+  test('검증 N5: 고른 비율을 이미지에 같이 저장 (정해진 크기로만 만드는 모델은 내려받을 때 이 비율로 자름)', async () => {
+    const d = fakeDeps({ fetchImpl: fakeFetch(() => okImage()) });
+    await runGeneration(d, { ...GEN, model: 'gpt-image-1.5', size: '1536x1024' }, { key: 'sk', prices: PRICES, ratio: '16:9' });
+    assert.equal(d.log.rpc.find((x) => x.name === 'image_save').args.img.ratio, '16:9');
+  });
+  test('검증 13b: 점검용 가짜 모델은 저장소에서 실패해도 청구 없음·횟수에 안 셈', async () => {
+    const d = fakeDeps({ upload: () => ({ error: { message: 'down' } }) });
+    const r = await runGeneration(d, { ...GEN, model: TEST_MODEL }, { key: '', prices: PRICES });
+    assert.equal(r.code, 'storage_failed');
+    const fin = d.log.rpc.find((x) => x.name === 'image_gen_fail').args.fin;
+    assert.deepEqual([fin.provider_called, fin.cost_status], [false, '청구 없음']);
+  });
   test('저장소 첫 시도가 실제로는 됐는데 응답만 실패해도, 두 번째는 덮어쓰기로 성공', async () => {
     const seen = [];
     const d = fakeDeps({ fetchImpl: fakeFetch(() => okImage()), upload: (path, bytes, mime, o) => { seen.push(!!(o && o.upsert)); return seen.length === 1 ? { error: { message: 'timeout' } } : { error: null }; } });
@@ -365,5 +377,22 @@ describe('직접 올리기 흐름', () => {
   });
   test('저장 경로에는 원고 제목·파일 이름이 들어가지 않음', () => {
     assert.equal(storagePath('upload', 'png', new Date('2026-01-05T00:00:00Z'), 'abc'), 'upload/2026/01/abc.png');
+  });
+});
+
+describe('서버 일꾼 시간 (검증 N2: 기다리는 시간 줄이기)', () => {
+  test('품질별로 남아 있어야 하는 시간, 고치기는 10초 더, 일꾼 시간에서 30초는 남김', () => {
+    assert.equal(needMsFor('low', 'generate', 150000), 60000);
+    assert.equal(needMsFor('medium', 'edit', 150000), 85000);
+    assert.equal(needMsFor('max', 'edit', 150000), 120000, '150초 일꾼: 최대 120초');
+    assert.equal(needMsFor('xhigh', 'generate', 400000), 115000);
+    assert.equal(needMsFor('unknown', 'generate', 150000), 115000);
+  });
+  test('다시 보낼 때까지: 일꾼 시간의 절반 전이면 절반이 지난 뒤(+3초), 지났으면 이 일꾼이 끝난 뒤(+2초), 3~150초', () => {
+    assert.equal(busyRetryAfter(40000, 150000), 38, '40초 된 일꾼 → 75초에서 3초 뒤');
+    assert.equal(busyRetryAfter(74500, 150000), 4);
+    assert.equal(busyRetryAfter(80000, 150000), 72, '절반 넘음 → 150초에서 2초 뒤');
+    assert.equal(busyRetryAfter(149000, 150000), 3);
+    assert.equal(busyRetryAfter(10000, 400000), 150, '최대 150초');
   });
 });

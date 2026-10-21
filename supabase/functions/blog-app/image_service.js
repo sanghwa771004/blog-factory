@@ -255,16 +255,29 @@ async function linkExisting(d, link, image) {
   return { ok: true, image, slot: s.data, reused: true };
 }
 
+// ───────── 서버 일꾼 시간 (Supabase Edge Functions: 일꾼 하나가 켜진 뒤 무료 150초·유료 400초까지 일함) ─────────
+// 품질별로 OpenAI 응답을 기다릴 수 있어야 하는 시간 — 이만큼 남아 있어야 시작함 (모자라면 돈이 나가기 전에 '잠깐 뒤에')
+export const NEED_MS = { low: 60000, medium: 75000, high: 100000, xhigh: 115000, max: 115000 };
+export const needMsFor = (quality, mode, wallMs) => Math.min((NEED_MS[quality] ?? 115000) + (mode === 'edit' ? 10000 : 0), wallMs - 30000);
+// '잠깐 뒤에 다시'까지 기다릴 초: 일꾼 시간의 절반이 지나기 전이면 그 뒤 (그때부터 새 요청은 새 일꾼이 받는 경우가 많음 —
+// Supabase 'retire'. 공식 문서로 확인하지 못해서, 같은 일꾼이 또 받으면 그때는 이 일꾼이 끝난 뒤로), 아니면 이 일꾼이 끝난 뒤
+export function busyRetryAfter(ageMs, wallMs) {
+  const sec = ageMs < wallMs / 2 ? (wallMs / 2 - ageMs) / 1000 + 3 : (wallMs - ageMs) / 1000 + 2;
+  return Math.min(150, Math.max(3, Math.ceil(sec)));
+}
+
 // AI 생성 실행 (image_gen_begin 으로 '생성 중' 한 줄을 만든 다음). 끝나면 성공·실패를 기록하고 결과를 돌려줌
-// opt: { key, prices, safetyId, timeoutMs, deadline(이 서버 일꾼이 꺼지기 전 마지막 시각, ms), base: {path, mime} (편집일 때), description }
+// opt: { key, prices, safetyId, timeoutMs, deadline(이 서버 일꾼이 꺼지기 전 마지막 시각, ms), base: {path, mime} (편집일 때), description,
+//        ratio(고른 비율 — 정해진 크기로만 만드는 모델은 내려받을 때 이 비율로 자름) }
 // 시간 제한은 OpenAI를 부르기 바로 직전에 남은 시간으로 다시 계산 (편집 원본 받기 등 앞 단계에서 쓴 시간을 뺌)
 export const MIN_OPENAI_MS = 20000;
 export async function runGeneration(d, gen, opt = {}) {
   const leftMs = () => (opt.deadline ? opt.deadline - d.now().getTime() : Infinity);
+  const isTest = gen.model === TEST_MODEL; // 점검용 가짜 모델은 어디서 실패해도 OpenAI를 안 불렀으니 청구 없음·횟수에 안 셈
   const fail = async (r) => {
     const fin = {
-      provider_called: !NOT_COUNTED.has(r.code), error_code: r.code, error_message: scrub(r.message, 500),
-      cost_status: r.billed === 'no' ? '청구 없음' : '확인 필요', request_id: r.requestId || '',
+      provider_called: !isTest && !NOT_COUNTED.has(r.code), error_code: r.code, error_message: scrub(r.message, 500),
+      cost_status: isTest || r.billed === 'no' ? '청구 없음' : '확인 필요', request_id: r.requestId || '',
     };
     if (r.usage) { fin.usage = r.usage; fin.usage_usd = usageUsd(r.usage, opt.prices, gen.model); }
     const x = await d.rpc('image_gen_fail', { gen: gen.id, fin });
@@ -298,7 +311,7 @@ export async function runGeneration(d, gen, opt = {}) {
   const img = {
     origin_post_id: gen.post_id || '', origin_slot_index: gen.slot_index ?? '', origin_slot_key: gen.slot_key || '',
     kind: 'ai', provider: res.test ? '' : 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
-    description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
+    ratio: opt.ratio || '', description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
     sha256: await sha256Hex(bytes), license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)', attribution_text: '',
   };
   // 점검용 가짜 모델은 청구가 없고 하루 횟수에도 안 셈

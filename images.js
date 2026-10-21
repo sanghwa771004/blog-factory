@@ -73,9 +73,58 @@ export function textSimilarity(a, b) {
 // 자리 주변 글(소제목·앞뒤 문장). 연결할 때 같이 저장해 두고, 같은 설명이 여러 번 있거나 설명을 고쳐도 같은 자리를 알아보는 데 씀
 export const ctxOf = (s) => String([s && s.heading, s && s.before, s && s.after].filter(Boolean).join(' | ')).replace(/\s+/g, ' ').trim().slice(0, 300);
 const baseOf = (key) => String(key || '').replace(/#\d+$/, '');
+const occOf = (key) => Number((/#(\d+)$/.exec(String(key || '')) || [])[1] || 0);
+
+// 주변 글 점수(V)로 가장 잘 맞는 짝 (순서 상관없이). 작은 묶음(7개 이하)에서만 씀 — 같은 점수면 앞의 짝(=순서대로)을 고름
+function bestAssign(V, n, m) {
+  const rowsFirst = n <= m;
+  const A = rowsFirst ? n : m, B = rowsFirst ? m : n;
+  const val = (a, b) => (rowsFirst ? V[a][b] : V[b][a]) ?? 0;
+  const usedB = new Array(B).fill(false);
+  const cur = [];
+  let best = -1, pairs = [];
+  const rec = (a, sum) => {
+    if (a === A) { if (sum > best + 1e-9) { best = sum; pairs = cur.slice(); } return; }
+    for (let b = 0; b < B; b++) {
+      if (usedB[b]) continue;
+      usedB[b] = true; cur.push(rowsFirst ? [a, b] : [b, a]);
+      rec(a + 1, sum + val(a, b));
+      cur.pop(); usedB[b] = false;
+    }
+  };
+  rec(0, 0);
+  return { sum: best, pairs };
+}
+// 같은 설명끼리 짝짓기 (S = 지금 자리들, R = 저장된 줄들)
+// 1) 순서를 지키면서 짝지음 — 같은 설명을 가운데서 지우거나 새로 넣어도 나머지가 제자리를 찾음. 주변 글이 그대로면 그 짝을, 없으면 몇 번째인지(키)를 따름
+// 2) 순서를 바꾸는 건 주변 글이 '확실히' 다른 짝을 가리킬 때만 (문단째 옮긴 경우). 주변 글만 새로 쓴 경우에는 섞지 않음
+function matchGroup(S, R, ctxSim) {
+  const rs = [...R].sort((a, b) => occOf(a.slot_key) - occOf(b.slot_key) || Number(a.slot_index ?? 0) - Number(b.slot_index ?? 0));
+  const n = S.length, m = rs.length;
+  const V = S.map((s) => rs.map((r) => ctxSim(s, r)));
+  const w = (i, j) => 0.5 + (V[i][j] ?? 0.5) + (rs[j].slot_key === S[i].key ? 0.35 : 0) + (rs[j].image_id ? 0.15 : 0)
+    - 0.01 * Math.min(Math.abs(Number(rs[j].slot_index ?? 0) - S[i].index), 20);
+  const f = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) f[i][j] = Math.max(f[i - 1][j], f[i][j - 1], f[i - 1][j - 1] + w(i - 1, j - 1));
+  let pairs = [];
+  for (let i = n, j = m; i > 0 && j > 0;) {
+    if (f[i][j] === f[i - 1][j - 1] + w(i - 1, j - 1)) { pairs.push([i - 1, j - 1]); i--; j--; }
+    else if (f[i][j] === f[i - 1][j]) i--;
+    else j--;
+  }
+  pairs.reverse();
+  if (Math.min(n, m) >= 2 && Math.max(n, m) <= 7 && rs.every((r) => r.slot_ctx)) {
+    const best = bestAssign(V, n, m);
+    const sumOf = (ps) => ps.reduce((a, [i, j]) => a + (V[i][j] ?? 0), 0);
+    const inOrder = new Set(pairs.map(([i, j]) => i + ':' + j));
+    const diff = best.pairs.filter(([i, j]) => !inOrder.has(i + ':' + j));
+    if (best.pairs.length === pairs.length && diff.length && diff.every(([i, j]) => (V[i][j] ?? 0) >= 0.6) && best.sum - sumOf(pairs) >= 0.3 * diff.length) pairs = best.pairs;
+  }
+  return pairs.map(([i, j]) => [S[i], rs[j]]);
+}
 
 // 저장된 연결(rows)을 지금 본문의 사진 자리에 맞춤.
-// 1) 설명이 같은 자리끼리 — 같은 설명이 여러 번이면 주변 글이 가장 비슷하고 순서가 가까운 것끼리 (몇 번째인지만 보고 섞지 않음)
+// 1) 설명이 같은 자리끼리 — matchGroup (순서를 지키고, 주변 글이 확실할 때만 순서를 바꿈)
 // 2) 설명을 고친 자리 — 설명이 비슷하거나, 설명은 달라도 같은 위치에 주변 글이 그대로면 연결을 옮김(rekey)
 // 3) 본문에서 사라진 자리의 연결은 지우지 않고 orphans 로 돌려줌 (이미지는 보관함에 그대로)
 export function matchSlots(current, rows) {
@@ -89,16 +138,14 @@ export function matchSlots(current, rows) {
     for (const [, s, r] of pairs) if (!s.link && !used.has(r.slot_key)) take(s, r);
   };
   // 1) 같은 설명
-  const pairs1 = [];
+  const groups = new Map();
   for (const s of slots) {
-    for (const r of stored) {
-      if (baseOf(r.slot_key) !== baseOf(s.key)) continue;
-      const cx = ctxSim(s, r);
-      const dist = Math.min(Math.abs(Number(r.slot_index ?? 0) - s.index), 20);
-      pairs1.push([(cx == null ? 0.5 : cx) * 2 - dist * 0.05 + (r.slot_key === s.key ? 0.01 : 0) + (r.image_id ? 0.001 : 0), s, r]);
-    }
+    const b = baseOf(s.key);
+    if (!groups.has(b)) groups.set(b, { S: [], R: [] });
+    groups.get(b).S.push(s);
   }
-  assign(pairs1);
+  for (const r of stored) { const g = groups.get(baseOf(r.slot_key)); if (g) g.R.push(r); }
+  for (const { S, R } of groups.values()) if (R.length) for (const [s, r] of matchGroup(S, R, ctxSim)) take(s, r);
   // 2) 설명을 고친 자리 (이미지가 있는 연결만)
   const pairs2 = [];
   for (const s of slots) {
@@ -212,6 +259,13 @@ export function outputSize(rect, maxW) {
 }
 // 이미 그 비율이면(1% 안) 자를 필요 없음
 export const sameRatio = (w, h, ratio) => { const R = RATIOS[ratio]; return !!R && w > 0 && h > 0 && Math.abs(w / h - R.w / R.h) / (R.w / R.h) < 0.01; };
+// 자르는 곳을 저장하지 않았을 때 내려받을 비율: 만들 때 고른 비율(img.ratio — 정해진 크기로만 만드는 모델) → 이미 그 용도의 비율인 이미지면 그대로 → 용도의 첫 비율
+export function defaultRatio(img, purpose) {
+  const p = PURPOSES[purpose] || PURPOSES.blog_body;
+  if (img && p.ratios.includes(img.ratio)) return img.ratio;
+  const w = Number(img && img.width), h = Number(img && img.height);
+  return (w && h && p.ratios.find((r) => sameRatio(w, h, r))) || p.ratios[0];
+}
 // 사진 검색 방향 (Pexels orientation)
 export const orientationFor = (ratio) => { const R = RATIOS[ratio]; return !R ? '' : R.w > R.h ? 'landscape' : R.w < R.h ? 'portrait' : 'square'; };
 
@@ -242,13 +296,19 @@ const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); 
 
 // 맥락으로 같이 보내는 글(제목·소제목·앞뒤 문장)에서 상품 이름·브랜드·모델명·가격·인증·순위 표현을 지움 (AI가 그대로 그리지 않게)
 const escRe = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-const CTX_PRICE = /(\d{1,3}(,\d{3})+|\d{3,})\s*원|\d+(\.\d+)?\s*만\s*원|₩\s*\d[\d,]*|\$\s?\d[\d,.]*|\d[\d,.]*\s*(달러|USD)/gi;
-const CTX_CLAIM = /KC\s*(인증|마크)|인증\s*(마크|서)?|특허|판매\s*1위|\d+\s*위|1등(?!급)|베스트\s*셀러|(?<![가-힣])수상(?!한|하|스키|쩍|레저|가옥)/gi;
-const CTX_MODEL = /\b[A-Za-z]{1,6}[-\s]?\d{1,5}[A-Za-z0-9-]*\b/g;
+// 영문·숫자로 된 이름(LG·V12)은 낱말 경계로만 찾음 — 'algorithm' 안의 'lg' 같은 건 건드리지 않게. 한글 이름은 붙여 쓴 것도 찾음
+const nameRe = (w, flags = 'gi') => (/^[A-Za-z0-9 .&+'_-]+$/.test(w) ? new RegExp(`(?<![A-Za-z0-9])${escRe(w)}(?![A-Za-z0-9])`, flags) : new RegExp(escRe(w), flags));
+// 원화 가격: 29,900원 · 990원 · 50원 · 3천원 · 2만 9천원 · 5천만원 · 1.5만원 (원룸·원형·원래처럼 '원'으로 시작하는 낱말은 가격이 아님)
+const WON = '원(?![룸형래인칙리소자고두본단피목격산재액판통석색작조장서])';
+const KRW = `\\d[\\d,.]*\\s*(?:[억만천]\\s*(?:\\d[\\d,.]*\\s*)?)*${WON}`;
+const CTX_PRICE = new RegExp(`${KRW}|₩\\s*\\d[\\d,]*|\\$\\s?\\d[\\d,.]*|\\d[\\d,.]*\\s*(?:달러|USD)`, 'gi');
+const CTX_CLAIM = /KC\s*(인증|마크)|인증\s*(마크|서)?(?!샷)|특허|판매\s*1위|\d+\s*위|1등(?!급)|베스트\s*셀러|(?<![가-힣])수상(?!한|하|스키|쩍|레저|가옥)/gi;
+// 모델 번호처럼 생긴 것만 (대문자+숫자 두 자리 이상: V12 · S24 · SM-G998N · XQ-1234). A4 · PM2.5 · LED 3개 · Wi-Fi 6 은 그대로
+const CTX_MODEL = /(?<![A-Za-z0-9-])(?:[A-Z]{1,5}-?\d{2,5}[A-Z0-9]*(?:-[A-Z0-9]+)*|[A-Z]{1,4}-[A-Z]\d{2,5}[A-Z0-9]*(?:-[A-Z0-9]+)*)(?![A-Za-z0-9-])/g;
 export function sanitizeContext(text, hide = []) {
   let t = String(text || '');
   const words = [...new Set((hide || []).map((w) => String(w || '').trim()).filter((w) => w.length >= 2))].sort((a, b) => b.length - a.length);
-  for (const w of words) t = t.replace(new RegExp(escRe(w), 'gi'), '제품');
+  for (const w of words) t = t.replace(nameRe(w), '제품');
   return t.replace(CTX_PRICE, '').replace(CTX_CLAIM, '').replace(CTX_MODEL, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
 }
 
@@ -283,43 +343,50 @@ export function buildPrompt({ post, slot, text, style, purpose, ratio, extra, mo
 // 이미지에 넣으면 안 되는 요청. block = 생성을 막음, warn = 알려만 줌. brands: 이 글에 연결된 상품 브랜드
 const PROMPT_RISKS = [
   ['block', /(로고|상표|트레이드\s*마크|브랜드\s*(이름|명|로고|마크))|\blogos?\b|\btrademarks?\b/i, 'logo', '상표·로고는 이미지로 만들 수 없어. 실제 상품 이미지는 공식 이미지나 직접 찍은 사진을 써줘.'],
-  ['block', /(\d{1,3}(,\d{3})+|\d{3,})\s*원|\d+(\.\d+)?\s*만\s*원|₩\s*\d|가격\s*(표|표시|태그)|최저가|할인율|\bprice\s*tags?\b/i, 'price', '이미지에 가격을 넣으면 안 돼. 가격은 본문에 확인한 날짜와 함께 써줘.'],
+  ['block', new RegExp(`${KRW}|₩\\s*\\d|\\$\\s?\\d|가격\\s*(표|표시|태그)|최저가|할인율|\\bprice\\s*tags?\\b`, 'i'), 'price', '이미지에 가격을 넣으면 안 돼. 가격은 본문에 확인한 날짜와 함께 써줘.'],
   ['warn', /가격/, 'price_word', "'가격'이 들어 있어. 이미지에는 가격이 그려지지 않게 할게 (가격은 본문에만)."],
   ['block', /(인증\s*(마크|서)|KC\s*마크|특허|판매\s*1위|1위|1등(?!급)|베스트\s*셀러|(?<![가-힣])수상(?!한|하|스키|쩍|레저|가옥)|\bcertified\b|\bawards?\b)/i, 'claim', '인증·순위·수상 같은 표시는 이미지로 만들면 안 돼.'],
   ['block', /(후기\s*사진|리뷰\s*사진|실사용\s*(사진|샷)|내돈내산|구매\s*인증|언박싱|\bunboxing\b)/i, 'review', '실제로 써본 것처럼 보이는 후기 사진은 만들 수 없어.'],
   ['block', /(글자|문구(?!점)|텍스트|자막|제목을?\s*넣|타이포|\btext\b|\bcaptions?\b|\btypography\b)/i, 'text', "이미지 안에 글자는 넣지 않아. 글자는 '카드뉴스 만들기'에서 따로 얹어줘."],
 ];
-// '글자 없이', '로고 빼고', 'no text' 처럼 넣지 말라는 뜻이면 막지 않음
-const NEG_AFTER = /^\s*(이|가|은|는|을|를|도|이나)?\s*(없이|없는|없게|빼고|빼서|말고|제외|금지|넣지|안\s*(넣|보이|들어|나오)|X(?![A-Za-z]))/;
-const NEG_BEFORE = /\b(no|without|not|non|zero)[\s-]*$/i;
-function riskHit(re, t) {
+// '글자 없이', '로고 빼고', '글자나 로고 없이', '로고를 지운', 'no text', 'no text or logos', 'without any text', 'text-free' 처럼
+// 넣지 말라는 뜻이면 막지 않음 ('로고 없이 말고 로고 넣어줘'처럼 뒤에 다시 나오면 그건 막음)
+const NEG_KO = '(?:없이|없는|없게|없고|빼고|빼서|뺀|말고|제외|금지|넣지|지운|지우고|지워|없앤|없애고|가린|가리고|안\\s*(?:넣|보이|들어|나오|그려|생기))';
+const PART = '(?:이|가|은|는|을|를|도|만)';
+const JOIN = '(?:이?나|와|과|이?랑|하고|및|또는|[,·/])';
+const NEG_AFTER = new RegExp(`^\\s*${PART}?\\s*(?:${JOIN}\\s*[가-힣A-Za-z]{1,8}\\s*${PART}?\\s*){0,4}(?:${NEG_KO}|X(?![A-Za-z]))`);
+const NEG_AFTER_EN = /^(?:e?s)?-?\s?free\b/i;
+const NEG_BEFORE = /(?:\b(?:no|without|not|non|zero|never|free\s+of|don'?t\s+(?:put|add|include|draw|show|use|render|write))\s+(?:(?:put|add|include|draw|show|use|render|write)\s+)?(?:any\s+)?(?:[a-z-]+\s*(?:,|\bor\b|\band\b|\bnor\b)\s*){0,4}|\b(?:no|non|zero)-)$/i;
+const negated = (t, at, len) => {
+  const after = t.slice(at + len, at + len + 40);
+  return NEG_AFTER.test(after) || NEG_AFTER_EN.test(after) || NEG_BEFORE.test(t.slice(Math.max(0, at - 40), at));
+};
+const firstHit = (re, t) => {
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
   let m;
   while ((m = g.exec(t))) {
     if (!m[0]) { g.lastIndex++; continue; }
-    const after = t.slice(m.index + m[0].length, m.index + m[0].length + 14);
-    const before = t.slice(Math.max(0, m.index - 12), m.index);
-    if (NEG_AFTER.test(after) || NEG_BEFORE.test(before)) continue;
-    return true;
+    if (!negated(t, m.index, m[0].length)) return m;
   }
-  return false;
-}
+  return null;
+};
 export function promptRisk(text, brands = []) {
   const t = String(text || '');
   const out = [];
   for (const [level, re, code, msg] of PROMPT_RISKS) {
     if (code === 'price_word' && out.some((x) => x.code === 'price')) continue;
-    if (riskHit(re, t)) out.push({ level, code, msg });
+    if (firstHit(re, t)) out.push({ level, code, msg });
   }
-  const hit = (brands || []).map((b) => String(b || '').trim()).filter((b) => b.length >= 2).find((b) => t.toLowerCase().includes(b.toLowerCase()));
+  const hit = (brands || []).map((b) => String(b || '').trim()).filter((b) => b.length >= 2).find((b) => nameRe(b, 'i').test(t));
   if (hit) out.push({ level: 'block', code: 'brand', msg: `'${hit}' 같은 실제 브랜드 이름은 AI 이미지에 넣을 수 없어.` });
   return out;
 }
 export const blocksOf = (risks) => (risks || []).filter((r) => r.level === 'block');
 // 실제 상품·화면 사진이 필요해 보이는 자리 (AI로 만들면 실제와 다르게 보일 수 있음 → 직접 찍은 사진·공식 이미지 권장)
-const REAL_NEEDED = /(구성품|박스|포장|뒷면|라벨|원재료|성분표|표기|설명서|화면\s*캡처|캡처|스크린샷|실물|실사용|착용|사용\s*후기|후기\s*사진|언박싱|영수증|인증서|단자|포트|버튼|조작부|컨트롤러|디스플레이|화면|제품\s*사진|상품\s*사진|모델명|로고|내부)/;
+// '로고 없이'처럼 빼라는 말은 넘어감. 포장마차·리포트·실내처럼 다른 뜻으로 쓰인 말도 넘어감
+const REAL_NEEDED = /(구성품|박스|포장(?!마차)|뒷면|라벨|원재료|성분표|표기(?!법)|설명서|화면\s*캡처|캡처|스크린샷|실물|실사용|착용|사용\s*후기|후기\s*사진|언박싱|영수증|인증서|단자|(?<![리서])포트(?!폴)|버튼|조작부|컨트롤러|디스플레이|화면|제품\s*사진|상품\s*사진|모델명|로고|내부)/;
 export function slotRisk(text) {
-  const m = REAL_NEEDED.exec(String(text || ''));
+  const m = firstHit(REAL_NEEDED, String(text || ''));
   return m ? { real: true, word: m[1], msg: `'${m[1]}'처럼 실제 상품·화면이 보여야 하는 자리야. AI로 만들면 실제와 다르게 보일 수 있어서, 직접 찍은 사진이나 쓸 수 있는 공식 이미지를 권해.` } : { real: false };
 }
 // 이미지 설명이 사진 자리 설명과 너무 다르면 알려줌
@@ -622,6 +689,11 @@ export function captionHint(img) {
   if (!img) return '';
   if (img.kind === 'ai') return '※ AI로 만든 예시 이미지';
   if (img.provider === 'pexels') return attributionFor(img);
+  // 카드뉴스: 배경으로 쓴 이미지의 출처를 그대로 (AI 배경이면 AI 표시, Pexels 배경이면 사진가)
+  if (img.kind === 'card') {
+    if (/배경: AI|AI로 만든/.test(String(img.license || '') + ' ' + String(img.attribution_text || ''))) return '※ 배경은 AI로 만든 예시 이미지';
+    return String(img.attribution_text || '');
+  }
   return '';
 }
 export const altTextFor = (text) => clip(String(text || '').replace(/\s*(사진|이미지)$/, ''), 120);

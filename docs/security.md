@@ -27,12 +27,13 @@
 | 올린 파일 검사 | 확장자 말고 파일 첫 바이트로 형식 확인(JPEG·PNG·WebP), 크기·가로세로 확인, 8MB 제한, 숨은 정보(EXIF·GPS·글 정보) 지우기, 같은 파일 중복 확인(SHA-256) | `images.js` sniffImage·checkImageFile·stripMetadata, `image_service.js` saveUploaded |
 | 외부 이미지 내려받기 | 허용한 주소(`images.pexels.com`, https)만, 다른 곳으로 넘기는 주소는 안 따라감, 크기 제한 | `image_service.js` downloadImage |
 | 비용·남용 | 한 번에 한 장(DB 유일 인덱스), 같은 요청 번호는 한 번만, 하루 한도·한 달 예산을 DB 함수가 잠금 안에서 검사, 자동 재시도 없음, 오래 멈춘 생성은 '확인 필요'로 정리 | `012` image_gen_begin, `index.ts` generateImage |
-| DB | 새 표 5개 모두 RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수 9개는 `search_path = ''`·service_role만 실행 | `012` 8번, `tests/sql_images.test.js` |
+| DB | 새 표 5개 모두 RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수 10개는 `search_path = ''`·service_role만 실행 | `012` 8번, `tests/sql_images.test.js` |
 | 지우기 | 이미지는 어느 원고(휴지통 포함)·카드뉴스에서 쓰면 못 지움. 원고를 지워도 이미지는 남음. DB에서 먼저 지움 표시 후 파일 삭제 | `012` image_delete, `index.ts` deleteImage |
 | 로그·오류 | OpenAI·Pexels 오류 문구에서 키처럼 생긴 글자를 가림. 생성 기록에 프롬프트는 남지만 키는 남지 않음 | `image_service.js` scrub |
-| AI에 보내는 내용 | 사용자가 쓴 설명은 로고·가격·인증·순위·후기 사진·글자·연결 상품 브랜드를 서버에서도 막음('없이·빼고·no' 같은 부정은 통과). 맥락(제목·소제목·앞뒤 문장)은 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄. 실제 구성품·라벨·화면이 필요한 자리는 '일반 장면' 확인 없이는 거절하고, 확인하면 그 사실을 생성 기록(risk_override)에 남김 | `images.js` promptRisk·sanitizeContext·slotRisk, `index.ts` generateImage |
-| 동시에 지우기·연결하기 | 연결할 때 이미지 줄을 잠그고(FOR SHARE) 다시 확인 → 지우는 중인 이미지에 연결되지 않음. 카드뉴스 배경은 저장 뒤 한 번 더 확인 | `012` image_slot_upsert, `index.ts` saveCards |
-| 서버 일꾼 시간 | 무료 요금제 일꾼은 켜진 뒤 150초까지만 일함 → 품질별로 기다릴 시간이 남았을 때만 OpenAI를 부르고(모자라면 돈이 나가기 전에 '잠깐 뒤에'), 시간 제한은 부르기 직전에 남은 시간으로 다시 계산, 응답 본문을 읽는 동안에도 적용 | `index.ts` DEADLINE·NEED_MS, `image_service.js` runGeneration·timed |
+| AI에 보내는 내용 | 사용자가 쓴 설명은 로고·가격(천원·만 단위 포함)·인증·순위·후기 사진·글자·연결 상품 브랜드(영문은 낱말로만)를 서버에서도 막음('없이·빼고·지운·글자나 로고 없이·no·without·-free' 같은 부정은 통과, 뒤에서 다시 넣어달라면 막음). 맥락(제목·소제목·앞뒤 문장)은 연결 상품 이름·브랜드·모델명·가격·인증 표현과 모델 번호처럼 생긴 것을 지우고 보냄. 실제 구성품·라벨·화면이 필요한 자리는 '일반 장면' 확인 없이는 거절하고, 확인하면 그 사실을 생성 기록(risk_override)에 남김 | `images.js` promptRisk·sanitizeContext·slotRisk, `index.ts` generateImage |
+| 동시에 지우기·연결하기 | 연결할 때·카드뉴스 배경으로 저장할 때 이미지 줄을 잠그고(FOR SHARE) 다시 확인 → 지우는 중인 이미지에 연결·저장되지 않음 (지우기는 같은 줄을 잠그고 쓰는 곳을 셈 — 둘 중 하나만 이김) | `012` image_slot_upsert·card_deck_save·image_delete |
+| 서버 일꾼 시간 | 무료 요금제 일꾼은 켜진 뒤 150초까지만 일함 → 품질별로 기다릴 시간이 남았을 때만 OpenAI를 부르고(모자라면 돈이 나가기 전에 '잠깐 뒤에'), 시간 제한은 부르기 직전에 남은 시간으로 다시 계산, 응답 본문을 읽는 동안에도 적용. 같은 요청 번호로 다시 오면 기다리게 하지 않고 그 기록을 바로 돌려줌 | `index.ts` DEADLINE·generateImage, `image_service.js` NEED_MS·busyRetryAfter·runGeneration·timed |
+| 생성 전용 서버 `blog-gen` | `blog-app`과 같은 코드·같은 로그인 검사·같은 CORS. `POST /images/generate`와 `/ping`만 받고 나머지는 404. 앱은 `blog-gen`이 없거나(404) 우리 서버가 아닌 곳이 거절하면(401, 우리 오류 코드 모양이 아님) 로그아웃시키지 않고 같은 요청 번호로 본 서버에 다시 보냄 (중복 생성 없음). 화면 보안 정책(CSP)은 같은 Supabase 주소라 바꿀 것 없음 | `index.ts` handle, `app.js` api, `studio.js` sendGenerate, `tests/security_static.test.js` |
 
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)
 - 로그인 없이 `/state` → 401, 가짜 세션 → 401, 틀린 코드 로그인 → 401
