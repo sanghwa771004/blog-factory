@@ -1231,7 +1231,9 @@ async function syncSlotsNow(post: J) {
     if (error) throw error;
     return (data ?? []) as J[];
   };
-  const cur = parseSlots(String(post.body ?? ""));
+  // 앞의 맞추기를 기다리는 사이 본문이 또 바뀌었을 수 있어서 지금 본문을 다시 읽어서 맞춤 (예전 본문으로 되돌려 맞추지 않게)
+  const { data: now } = await sb.from("posts").select("body").eq("id", post.id).maybeSingle();
+  const cur = parseSlots(String((now as J | null)?.body ?? post.body ?? ""));
   let rows = await load();
   let m = matchSlots(cur, rows);
   let rekeyed = 0, changed = false;

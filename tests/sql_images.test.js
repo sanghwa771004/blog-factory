@@ -387,6 +387,9 @@ describe('012를 다시 돌리거나 예전 초안 위에 돌려도 같은 결�
     const fresh = await freshDb();
     const db = await freshDb({ upTo: '011' });
     await db.exec(DRAFT);
+    // 초안 시절의 생성 기록: 서버가 매긴 '사용량 기준' / 사용자가 넣은 '청구 없음'(확인일 있음)
+    await db.query(`insert into public.image_generations (request_key, model, status, est_usd, cost_status) values ('req-old-usage-01', 'm', '성공', 0.01, '사용량 기준')`);
+    await db.query(`insert into public.image_generations (request_key, model, status, est_usd, cost_status, actual_checked_at) values ('req-old-user-001', 'm', '성공', 0.01, '청구 없음', '2026-10-20')`);
     const missing = await all(db, `select column_name from information_schema.columns where table_schema = 'public' and column_name in ('slot_ctx','risk_override','auto_cost_status','ratio') and table_name like '%image%'`);
     assert.deepEqual(missing, [], '초안에는 새 열이 없음');
     await db.exec(SQL012);
@@ -398,6 +401,8 @@ describe('012를 다시 돌리거나 예전 초안 위에 돌려도 같은 결�
     const g = await val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ request_key: 'req-key-draft-0001', model: 'gpt-image-2.5-flare', est_usd: 0.01, risk_override: '일반 장면으로 만들기 확인: 박스' })]);
     assert.deepEqual([g.risk_override, g.auto_cost_status], ['일반 장면으로 만들기 확인: 박스', '예상']);
     await assert.rejects(db.query(`update public.image_generations set auto_cost_status = '모름' where id = $1`, [g.id]), /auto_cost_status_check/);
+    const old = await all(db, `select request_key, auto_cost_status from public.image_generations where request_key like 'req-old-%' order by 1`);
+    assert.deepEqual(old.map((x) => [x.request_key, x.auto_cost_status]), [['req-old-usage-01', '사용량 기준'], ['req-old-user-001', '예상']], '서버가 매긴 상태만 처음 상태로 (사용자가 넣은 건 그대로)');
     const d = await val(db, `select public.card_deck_save($1, '{"slides":[{"title":"a"}]}'::jsonb)`, [post]);
     assert.equal(d.template, 'clean');
   });

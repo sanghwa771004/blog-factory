@@ -62,18 +62,32 @@ function bigrams(s) {
   for (let i = 0; i + 2 <= t.length; i++) { const g = t.slice(i, i + 2); m.set(g, (m.get(g) || 0) + 1); }
   return { m, n: Math.max(0, t.length - 1) };
 }
-export function textSimilarity(a, b) {
-  const A = bigrams(a), B = bigrams(b);
+const simOf = (a, b, A, B) => {
   if (!A.n || !B.n) return normText(a) && normText(a) === normText(b) ? 1 : 0;
   let inter = 0;
   for (const [g, c] of A.m) inter += Math.min(c, B.m.get(g) || 0);
   return (2 * inter) / (A.n + B.n);
+};
+export function textSimilarity(a, b) { return simOf(a, b, bigrams(a), bigrams(b)); }
+// 같은 글을 여러 번 비교할 때 (사진 자리 맞추기) — 글자 쌍 목록을 한 번만 만듦
+function similarityCache() {
+  const bg = new Map(), memo = new Map();
+  const big = (t) => { let x = bg.get(t); if (!x) { x = bigrams(t); bg.set(t, x); } return x; };
+  return (a, b) => {
+    const k = a + '\u0001' + b;
+    let v = memo.get(k);
+    if (v === undefined) { v = simOf(a, b, big(a), big(b)); memo.set(k, v); }
+    return v;
+  };
 }
 
 // 자리 주변 글(소제목·앞뒤 문장). 연결할 때 같이 저장해 두고, 같은 설명이 여러 번 있거나 설명을 고쳐도 같은 자리를 알아보는 데 씀
 export const ctxOf = (s) => String([s && s.heading, s && s.before, s && s.after].filter(Boolean).join(' | ')).replace(/\s+/g, ' ').trim().slice(0, 300);
 const baseOf = (key) => String(key || '').replace(/#\d+$/, '');
 const occOf = (key) => Number((/#(\d+)$/.exec(String(key || '')) || [])[1] || 0);
+// 서버가 잠깐 비켜 둔 줄(사라진 자리 'k:~~…')은 열쇠 대신 저장된 설명으로 원래 묶음을 찾음
+const isParked = (key) => /^k:~~/.test(String(key || ''));
+const rowBase = (r) => (isParked(r.slot_key) ? 'k:' + (normText(r.slot_text).slice(0, 150) || '_') : baseOf(r.slot_key));
 
 // 주변 글 점수(V)로 가장 잘 맞는 짝 (순서 상관없이). 작은 묶음(7개 이하)에서만 씀 — 같은 점수면 앞의 짝(=순서대로)을 고름
 function bestAssign(V, n, m) {
@@ -95,43 +109,100 @@ function bestAssign(V, n, m) {
   rec(0, 0);
   return { sum: best, pairs };
 }
-// 같은 설명끼리 짝짓기 (S = 지금 자리들, R = 저장된 줄들)
-// 1) 순서를 지키면서 짝지음 — 같은 설명을 가운데서 지우거나 새로 넣어도 나머지가 제자리를 찾음. 주변 글이 그대로면 그 짝을, 없으면 몇 번째인지(키)를 따름
-// 2) 순서를 바꾸는 건 주변 글이 '확실히' 다른 짝을 가리킬 때만 (문단째 옮긴 경우). 주변 글만 새로 쓴 경우에는 섞지 않음
+// 같은 설명끼리 짝짓기 (S = 지금 자리들, R = 저장된 줄들, V = 주변 글이 비슷한 정도 0~1, 주변 글을 저장 안 한 줄은 null)
+// 1) 확실한 짝 먼저: 주변 글이 거의 그대로(0.9 이상)이고 다른 후보보다 뚜렷이(0.1 넘게) 나은 짝 —
+//    문단째 옮기거나, 같은 설명의 다른 자리를 지우거나 새로 넣어도 그 자리는 제 이미지를 지킴 (순서가 바뀌어도 됨)
+// 2) 나머지는 순서를 지키며 짝지음 (1의 짝들과도 앞뒤가 맞게). 단 주변 글이 꽤 다르면(0.5 미만) 몇 번째인지(키)가 같을 때만 —
+//    주변 문장만 새로 쓴 자리(AI가 다시 씀)는 그대로 두고, 지운 자리의 이미지를 다른 자리에 붙이지 않음 (사라진 자리로 남김)
+// 3) 나머지끼리 순서를 바꾸는 게 주변 글로 확실하면(바뀌는 짝마다 0.6 이상, 0.3 넘게 나음) 바꿈 — 문단을 옮기면서 문장도 조금 고친 경우 (7개 이하일 때)
 function matchGroup(S, R, ctxSim) {
-  const rs = [...R].sort((a, b) => occOf(a.slot_key) - occOf(b.slot_key) || Number(a.slot_index ?? 0) - Number(b.slot_index ?? 0));
+  // 저장된 줄은 예전 본문 순서대로 (서버가 맞출 때마다 slot_index 를 고쳐 둠, 같으면 몇 번째인지로)
+  const rs = [...R].sort((a, b) => Number(a.slot_index ?? 0) - Number(b.slot_index ?? 0) || occOf(a.slot_key) - occOf(b.slot_key));
   const n = S.length, m = rs.length;
   const V = S.map((s) => rs.map((r) => ctxSim(s, r)));
-  const w = (i, j) => 0.5 + (V[i][j] ?? 0.5) + (rs[j].slot_key === S[i].key ? 0.35 : 0) + (rs[j].image_id ? 0.15 : 0)
-    - 0.01 * Math.min(Math.abs(Number(rs[j].slot_index ?? 0) - S[i].index), 20);
-  const f = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = 1; i <= n; i++) for (let j = 1; j <= m; j++) f[i][j] = Math.max(f[i - 1][j], f[i][j - 1], f[i - 1][j - 1] + w(i - 1, j - 1));
-  let pairs = [];
-  for (let i = n, j = m; i > 0 && j > 0;) {
-    if (f[i][j] === f[i - 1][j - 1] + w(i - 1, j - 1)) { pairs.push([i - 1, j - 1]); i--; j--; }
-    else if (f[i][j] === f[i - 1][j]) i--;
-    else j--;
+  const v = (i, j) => V[i][j] ?? 0;
+  const key = (i, j) => rs[j].slot_key === S[i].key;
+  const out = [], uS = new Set(), uR = new Set();
+  // 1) 확실한 짝
+  const cand = [];
+  for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) if (V[i][j] != null && V[i][j] >= 0.9) cand.push([V[i][j] + (key(i, j) ? 0.001 : 0), i, j]);
+  cand.sort((a, b) => b[0] - a[0]);
+  // 아직 안 묶인 다른 강한 후보(0.9 이상)와 0.1 안으로 비슷하면 애매해서 넘김 (예: 주변 글이 같은, 바로 붙은 두 자리)
+  // (후보는 점수가 높은 순이라 자리·줄마다 목록 앞에서부터 아직 안 묶인 첫 후보만 보면 됨)
+  const byS = Array.from({ length: n }, () => []), byR = Array.from({ length: m }, () => []);
+  for (const c of cand) { byS[c[1]].push(c); byR[c[2]].push(c); }
+  const firstFree = (list, i, j) => { for (const [, ii, jj] of list) if (!(ii === i && jj === j) && !uS.has(ii) && !uR.has(jj)) return V[ii][jj]; return 0; };
+  const rival = (i, j) => Math.max(firstFree(byS[i], i, j), firstFree(byR[j], i, j));
+  for (const [, i, j] of cand) {
+    if (uS.has(i) || uR.has(j) || V[i][j] - rival(i, j) < 0.1) continue;
+    uS.add(i); uR.add(j); out.push([i, j]);
   }
-  pairs.reverse();
-  if (Math.min(n, m) >= 2 && Math.max(n, m) <= 7 && rs.every((r) => r.slot_ctx)) {
-    const best = bestAssign(V, n, m);
-    const sumOf = (ps) => ps.reduce((a, [i, j]) => a + (V[i][j] ?? 0), 0);
-    const inOrder = new Set(pairs.map(([i, j]) => i + ':' + j));
-    const diff = best.pairs.filter(([i, j]) => !inOrder.has(i + ':' + j));
-    if (best.pairs.length === pairs.length && diff.length && diff.every(([i, j]) => (V[i][j] ?? 0) >= 0.6) && best.sum - sumOf(pairs) >= 0.3 * diff.length) pairs = best.pairs;
+  // 2) 나머지는 순서대로
+  const Si = [...Array(n).keys()].filter((i) => !uS.has(i)), Rj = [...Array(m).keys()].filter((j) => !uR.has(j));
+  // 비켜 둔 줄은 주변 글이 맞을 때만 다시 씀 (주변 글이 없으면 다시 쓰지 않음 — 지운 자리의 이미지가 다른 자리로 가지 않게)
+  const ok = (i, j) => key(i, j) || (V[i][j] == null ? !isParked(rs[j].slot_key) : V[i][j] >= 0.5);
+  // 확실한 짝들과 앞뒤가 엇갈리는 짝은 주변 글이 꽤 비슷할 때(0.75 이상 — 문단을 옮기면서 조금 고친 경우)만 씀
+  // (예: 맨 앞 문단을 지우고 맨 뒤에 비슷한 틀의 새 문단을 넣었을 때 지운 문단의 이미지가 새 문단으로 가지 않게)
+  const fits = (i, j) => v(i, j) >= 0.75 || out.every(([ia, ja]) => (i < ia) === (j < ja));
+  const w = (i, j) => (ok(i, j) && fits(i, j)
+    ? 0.5 + (V[i][j] ?? 0.5) + (key(i, j) ? 0.35 : 0) + (rs[j].image_id ? 0.15 : 0) - 0.01 * Math.min(Math.abs(Number(rs[j].slot_index ?? 0) - S[i].index), 20)
+    : -1);
+  const a = Si.length, b = Rj.length;
+  const f = Array.from({ length: a + 1 }, () => new Array(b + 1).fill(0));
+  for (let x = 1; x <= a; x++) for (let y = 1; y <= b; y++) f[x][y] = Math.max(f[x - 1][y], f[x][y - 1], f[x - 1][y - 1] + w(Si[x - 1], Rj[y - 1]));
+  let rest = [];
+  for (let x = a, y = b; x > 0 && y > 0;) {
+    const ww = w(Si[x - 1], Rj[y - 1]);
+    if (ww > 0 && f[x][y] === f[x - 1][y - 1] + ww) { rest.push([Si[x - 1], Rj[y - 1]]); x--; y--; }
+    else if (f[x][y] === f[x - 1][y]) x--;
+    else y--;
   }
-  return pairs.map(([i, j]) => [S[i], rs[j]]);
+  // 3) 나머지끼리 순서 바꾸기
+  if (rest.length >= 2 && Math.max(a, b) <= 7 && Rj.every((j) => rs[j].slot_ctx)) {
+    const best = bestAssign(Si.map((i) => Rj.map((j) => V[i][j])), a, b);
+    const mapped = best.pairs.map(([x, y]) => [Si[x], Rj[y]]);
+    const sumOf = (ps) => ps.reduce((t, [i, j]) => t + v(i, j), 0);
+    const inRest = new Set(rest.map(([i, j]) => i + ':' + j));
+    const diff = mapped.filter(([i, j]) => !inRest.has(i + ':' + j));
+    if (mapped.length === rest.length && diff.length && diff.every(([i, j]) => v(i, j) >= 0.6 && fits(i, j)) && sumOf(mapped) - sumOf(rest) >= 0.3 * diff.length) rest = mapped;
+  }
+  return [...out, ...rest].map(([i, j]) => [S[i], rs[j]]);
+}
+
+// 서버가 이대로 옮긴 뒤 다음에 다시 맞춰도 결과가 같게: 옮긴 뒤의 모습(짝지은 줄 = 그 자리의 열쇠·주변 글, 그 열쇠를 쓰던 안 짝지은 줄 = 비켜 둠·빈 줄은 지워짐)으로
+// 한 번 더 맞춰 보고, 달라지면 그 결과를 씀 (최대 3번). 그래서 한 번 저장할 때 한 번에 자리를 잡음
+function matchGroupStable(S, R, ctxSim) {
+  let pairs = matchGroup(S, R, ctxSim);
+  for (let it = 0; it < 3; it++) {
+    const slotOf = new Map(pairs.map(([s, r]) => [r, s]));
+    const taken = new Map(pairs.map(([s, r]) => [s.key, r]));
+    const virt = [];
+    R.forEach((r, k) => {
+      const s = slotOf.get(r);
+      if (s) { virt.push({ ...r, slot_key: s.key, slot_index: s.index, slot_ctx: ctxOf(s) || r.slot_ctx, __r: r }); return; }
+      const other = taken.get(r.slot_key);
+      if (other && other !== r) { if (r.image_id) virt.push({ ...r, slot_key: `k:~~v${k}#1`, __r: r }); return; }
+      virt.push({ ...r, __r: r });
+    });
+    const again = matchGroup(S, virt, ctxSim).map(([s, x]) => [s, x.__r]);
+    const same = again.length === pairs.length && again.every(([s, r]) => slotOf.get(r) === s);
+    if (same) break;
+    pairs = again;
+  }
+  return pairs;
 }
 
 // 저장된 연결(rows)을 지금 본문의 사진 자리에 맞춤.
-// 1) 설명이 같은 자리끼리 — matchGroup (순서를 지키고, 주변 글이 확실할 때만 순서를 바꿈)
-// 2) 설명을 고친 자리 — 설명이 비슷하거나, 설명은 달라도 같은 위치에 주변 글이 그대로면 연결을 옮김(rekey)
+// 1) 설명이 같은 자리끼리 — matchGroup (주변 글이 확실한 짝 먼저, 나머지는 순서대로)
+// 2) 설명을 고친 자리 — 설명이 비슷하거나, 설명은 달라도 같은 위치에 주변 글이 그대로면 연결을 옮김(rekey). 설명이 같은 자리끼리는 1)에서만 정함
 // 3) 본문에서 사라진 자리의 연결은 지우지 않고 orphans 로 돌려줌 (이미지는 보관함에 그대로)
 export function matchSlots(current, rows) {
   const stored = (rows || []).filter((r) => r && !isExtraKey(r.slot_key));
   const used = new Set();
   const slots = (current || []).map((c) => ({ ...c, link: null, rekey: null }));
-  const ctxSim = (s, r) => (r.slot_ctx ? textSimilarity(ctxOf(s), r.slot_ctx) : null);
+  const sim = similarityCache();
+  const ctxS = new Map(slots.map((s) => [s, ctxOf(s)]));
+  const ctxSim = (s, r) => (r.slot_ctx ? sim(ctxS.get(s) ?? ctxOf(s), r.slot_ctx) : null);
   const take = (s, r) => { used.add(r.slot_key); s.link = r; s.rekey = r.slot_key === s.key ? null : { from: r.slot_key, to: s.key }; };
   const assign = (pairs) => {
     pairs.sort((x, y) => y[0] - x[0]);
@@ -144,19 +215,19 @@ export function matchSlots(current, rows) {
     if (!groups.has(b)) groups.set(b, { S: [], R: [] });
     groups.get(b).S.push(s);
   }
-  for (const r of stored) { const g = groups.get(baseOf(r.slot_key)); if (g) g.R.push(r); }
-  for (const { S, R } of groups.values()) if (R.length) for (const [s, r] of matchGroup(S, R, ctxSim)) take(s, r);
+  for (const r of stored) { const g = groups.get(rowBase(r)); if (g) g.R.push(r); }
+  for (const { S, R } of groups.values()) if (R.length) for (const [s, r] of matchGroupStable(S, R, ctxSim)) take(s, r);
   // 2) 설명을 고친 자리 (이미지가 있는 연결만)
   const pairs2 = [];
   for (const s of slots) {
     if (s.link) continue;
     for (const r of stored) {
-      if (used.has(r.slot_key) || !r.image_id) continue;
-      const sim = textSimilarity(s.text, r.slot_text);
+      if (used.has(r.slot_key) || !r.image_id || rowBase(r) === baseOf(s.key)) continue;
+      const ts = sim(s.text, r.slot_text);
       const cx = ctxSim(s, r);
       const near = Number(r.slot_index) === s.index;
-      const ok = sim >= 0.55 || (near && sim >= 0.35) || (cx != null && cx >= 0.6 && (near || sim >= 0.2));
-      if (ok) pairs2.push([sim + (near ? 0.1 : 0) + (cx != null ? cx * 0.5 : 0), s, r]);
+      const ok = ts >= 0.55 || (near && ts >= 0.35) || (cx != null && cx >= 0.6 && (near || ts >= 0.2));
+      if (ok) pairs2.push([ts + (near ? 0.1 : 0) + (cx != null ? cx * 0.5 : 0), s, r]);
     }
   }
   assign(pairs2);
@@ -304,7 +375,7 @@ const KRW = `\\d[\\d,.]*\\s*(?:[억만천]\\s*(?:\\d[\\d,.]*\\s*)?)*${WON}`;
 const CTX_PRICE = new RegExp(`${KRW}|₩\\s*\\d[\\d,]*|\\$\\s?\\d[\\d,.]*|\\d[\\d,.]*\\s*(?:달러|USD)`, 'gi');
 const CTX_CLAIM = /KC\s*(인증|마크)|인증\s*(마크|서)?(?!샷)|특허|판매\s*1위|\d+\s*위|1등(?!급)|베스트\s*셀러|(?<![가-힣])수상(?!한|하|스키|쩍|레저|가옥)/gi;
 // 모델 번호처럼 생긴 것만 (대문자+숫자 두 자리 이상: V12 · S24 · SM-G998N · XQ-1234). A4 · PM2.5 · LED 3개 · Wi-Fi 6 은 그대로
-const CTX_MODEL = /(?<![A-Za-z0-9-])(?:[A-Z]{1,5}-?\d{2,5}[A-Z0-9]*(?:-[A-Z0-9]+)*|[A-Z]{1,4}-[A-Z]\d{2,5}[A-Z0-9]*(?:-[A-Z0-9]+)*)(?![A-Za-z0-9-])/g;
+const CTX_MODEL = /(?<![A-Za-z0-9-])(?!PM\d|TOP\d)(?:[A-Z]{1,5}-?\d{2,5}[A-Z0-9]*(?:-[A-Z0-9]+)*|[A-Z]{1,4}-[A-Z]\d{2,5}[A-Z0-9]*(?:-[A-Z0-9]+)*)(?![A-Za-z0-9-])/g;
 export function sanitizeContext(text, hide = []) {
   let t = String(text || '');
   const words = [...new Set((hide || []).map((w) => String(w || '').trim()).filter((w) => w.length >= 2))].sort((a, b) => b.length - a.length);
@@ -351,10 +422,10 @@ const PROMPT_RISKS = [
 ];
 // '글자 없이', '로고 빼고', '글자나 로고 없이', '로고를 지운', 'no text', 'no text or logos', 'without any text', 'text-free' 처럼
 // 넣지 말라는 뜻이면 막지 않음 ('로고 없이 말고 로고 넣어줘'처럼 뒤에 다시 나오면 그건 막음)
-const NEG_KO = '(?:없이|없는|없게|없고|빼고|빼서|뺀|말고|제외|금지|넣지|지운|지우고|지워|없앤|없애고|가린|가리고|안\\s*(?:넣|보이|들어|나오|그려|생기))';
+const NEG_KO = '(?:없이|없는|없게|없고|없음|빼고|빼서|뺀|말고|제외|금지|넣지|지운|지우고|지워|없앤|없애고|가린|가리고|안\\s*(?:넣|보이|들어|나오|그려|생기))';
 const PART = '(?:이|가|은|는|을|를|도|만)';
 const JOIN = '(?:이?나|와|과|이?랑|하고|및|또는|[,·/])';
-const NEG_AFTER = new RegExp(`^\\s*${PART}?\\s*(?:${JOIN}\\s*[가-힣A-Za-z]{1,8}\\s*${PART}?\\s*){0,4}(?:${NEG_KO}|X(?![A-Za-z]))`);
+const NEG_AFTER = new RegExp(`^\\s*${PART}?\\s*(?:${JOIN}\\s*[가-힣A-Za-z]{1,8}(?:\\s+[가-힣A-Za-z]{1,8})?\\s*${PART}?\\s*){0,4}(?:${NEG_KO}|X(?![A-Za-z]))`);
 const NEG_AFTER_EN = /^(?:e?s)?-?\s?free\b/i;
 const NEG_BEFORE = /(?:\b(?:no|without|not|non|zero|never|free\s+of|don'?t\s+(?:put|add|include|draw|show|use|render|write))\s+(?:(?:put|add|include|draw|show|use|render|write)\s+)?(?:any\s+)?(?:[a-z-]+\s*(?:,|\bor\b|\band\b|\bnor\b)\s*){0,4}|\b(?:no|non|zero)-)$/i;
 const negated = (t, at, len) => {
@@ -384,7 +455,7 @@ export function promptRisk(text, brands = []) {
 export const blocksOf = (risks) => (risks || []).filter((r) => r.level === 'block');
 // 실제 상품·화면 사진이 필요해 보이는 자리 (AI로 만들면 실제와 다르게 보일 수 있음 → 직접 찍은 사진·공식 이미지 권장)
 // '로고 없이'처럼 빼라는 말은 넘어감. 포장마차·리포트·실내처럼 다른 뜻으로 쓰인 말도 넘어감
-const REAL_NEEDED = /(구성품|박스|포장(?!마차)|뒷면|라벨|원재료|성분표|표기(?!법)|설명서|화면\s*캡처|캡처|스크린샷|실물|실사용|착용|사용\s*후기|후기\s*사진|언박싱|영수증|인증서|단자|(?<![리서])포트(?!폴)|버튼|조작부|컨트롤러|디스플레이|화면|제품\s*사진|상품\s*사진|모델명|로고|내부)/;
+const REAL_NEEDED = /(구성품|박스|포장(?!마차)|뒷면|라벨|원재료|성분표|표기(?!법)|설명서|화면\s*캡처|캡처|스크린샷|실물|실사용|착용|사용\s*후기|후기\s*사진|언박싱|영수증|인증서|단자|(?<![리서어스])포트(?!폴|라이트)|버튼|조작부|컨트롤러|디스플레이|화면|제품\s*사진|상품\s*사진|모델명|로고|내부)/;
 export function slotRisk(text) {
   const m = firstHit(REAL_NEEDED, String(text || ''));
   return m ? { real: true, word: m[1], msg: `'${m[1]}'처럼 실제 상품·화면이 보여야 하는 자리야. AI로 만들면 실제와 다르게 보일 수 있어서, 직접 찍은 사진이나 쓸 수 있는 공식 이미지를 권해.` } : { real: false };

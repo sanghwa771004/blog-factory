@@ -182,9 +182,10 @@ async function api(path, { method = 'GET', body, timeout, gen } = {}) {
     } catch { throw { code: ctrl && ctrl.signal.aborted ? 'timeout' : 'network' }; }
     try { j = await r.json(); } catch { if (ctrl && ctrl.signal.aborted) throw { code: 'timeout' }; /* 빈 응답 */ }
   } finally { if (timer) clearTimeout(timer); }
-  // 생성 전용 서버가 아직 없거나(404) 우리 서버가 아닌 곳이 거절했으면(401 — 우리 서버의 오류 코드 모양이 아님) 로그아웃시키지 않고 알려줌 → 본 서버로 다시
+  // 생성 전용 서버가 아직 없거나(404), 우리 서버가 아닌 곳이 거절했거나(401·403·405), 켜지지 못했으면(5xx — Supabase의 BOOT_ERROR 등)
+  // 우리 서버의 오류 코드 모양이 아닐 때 로그아웃시키지 않고 알려줌 → 화면이 같은 요청 번호로 본 서버에 다시 보냄 (두 번 만들지 않음)
   const ours = !!(j && typeof j.error === 'string' && /^[a-z_]+$/.test(j.error));
-  if (gen && !ours && (r.status === 404 || r.status === 401)) throw { code: 'gen_unavailable', status: r.status };
+  if (gen && !ours && ([401, 403, 404, 405].includes(r.status) || r.status >= 500)) throw { code: 'gen_unavailable', status: r.status };
   if (r.status === 401 && path !== '/login') { authLost(j.reason === 'expired' ? '오래 안 써서 로그아웃됐어. 접속 코드를 다시 넣어줘.' : ERR.auth); throw { code: 'auth' }; }
   if (!r.ok) throw { ...j, code: j.error || 'server', status: r.status };
   return j;

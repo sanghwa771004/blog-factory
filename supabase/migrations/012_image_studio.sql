@@ -147,6 +147,9 @@ alter table public.post_images add column if not exists ratio text not null defa
 alter table public.post_image_slots add column if not exists slot_ctx text not null default '';
 alter table public.image_generations add column if not exists risk_override text not null default '';
 alter table public.image_generations add column if not exists auto_cost_status text not null default '예상';
+-- (예전 초안으로 이미 있던 생성 기록: 서버가 매긴 비용 상태를 처음 상태로 맞춤. 사용자가 넣은 값(확인일 있음)은 건드리지 않음. 새 DB에는 해당 줄이 없음)
+update public.image_generations set auto_cost_status = cost_status
+  where auto_cost_status = '예상' and cost_status in ('사용량 기준', '청구 없음', '확인 필요') and actual_checked_at is null;
 do $$ begin
   if not exists (select 1 from pg_constraint where conname = 'post_images_ratio_check') then
     alter table public.post_images add constraint post_images_ratio_check check (ratio in ('', '16:9', '4:3', '1:1', '4:5', '9:16'));

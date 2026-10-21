@@ -162,6 +162,7 @@ class Mock:
         self.busy_left = 0    # 이 횟수만큼 server_busy 로 답하게 (서버 일꾼 시간 부족 시험)
         self.gen_missing = False  # 생성 전용 서버(blog-gen)가 아직 없는 것처럼 (Supabase 404)
         self.gen_hits = 0         # 그때 생성 전용 서버로 온 요청 수
+        self.gen_boot_error = False  # 생성 전용 서버가 올라가 있지만 켜지지 못하는 것처럼 (Supabase 503 BOOT_ERROR)
         self.hold_generate = False  # 생성 요청의 응답을 붙잡아 둠 (보낸 뒤 창 닫기 시험)
         self.held = []
         self.settings.update({'image_gen_model': 'gpt-image-2.5-flare', 'image_edit_model': 'gpt-image-2.5-sunburst', 'image_quality': 'medium',
@@ -556,6 +557,9 @@ def main():
                 return route.fulfill(status=204, headers=cors, body='')
             u = urlparse(req.url)
             gen = '/blog-gen/' in u.path  # 생성 전용 서버 (같은 코드, 생성 요청만 받음)
+            if gen and mock.gen_boot_error:  # 올라가 있지만 켜지지 못한 경우 Supabase가 주는 답
+                mock.gen_hits += 1
+                return route.fulfill(status=503, headers={**cors, 'Content-Type': 'application/json'}, body=json.dumps({'code': 'BOOT_ERROR', 'message': 'Function failed to start (please check logs)'}))
             if gen and mock.gen_missing:  # 아직 안 올린 경우 Supabase가 주는 답
                 mock.gen_hits += 1
                 return route.fulfill(status=404, headers={**cors, 'Content-Type': 'application/json'}, body=json.dumps({'code': 'NOT_FOUND', 'message': 'Requested function was not found'}))
@@ -1233,6 +1237,26 @@ def main():
             assert mock.gen_hits == 1, f'404 뒤에도 생성 전용 서버로 또 보냄: {mock.gen_hits}'
             mock.gen_missing = False
         check('검증 회귀: 생성 전용 서버, 서버 예상 비용은 그 품질에만, 미리 채운 칸, 보낸 뒤 창 닫기, 생성 전용 서버 없을 때 본 서버로', t_verify_regressions)
+
+        # 생성 전용 서버가 올라가 있지만 켜지지 못하면(503 BOOT_ERROR) 로그아웃 없이 본 서버로 같은 요청을 보냄
+        def t_gen_boot_error():
+            page.reload()
+            expect(page.locator('#app')).to_be_visible()
+            mock.gen_boot_error, mock.gen_hits = True, 0
+            open_p8()
+            sheet = page.locator('#sheet')
+            card = page.locator('section.studio .slot').nth(0)
+            card.get_by_role('button', name='바꾸기', exact=True).click()
+            sheet.get_by_role('button', name='AI로 새로 만들기').click()
+            n0 = len([c for c in mock.calls if c['path'] == 'images/generate'])
+            sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기')).click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=15000)
+            after = [c for c in mock.calls if c['path'] == 'images/generate'][n0:]
+            assert [c.get('fn') for c in after] == ['app'] and mock.gen_hits == 1, ([c.get('fn') for c in after], mock.gen_hits)
+            assert page.evaluate("localStorage.getItem('gf-session')"), '로그아웃되면 안 됨'
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            mock.gen_boot_error = False
+        check('생성 전용 서버가 켜지지 못하면(503) 로그아웃 없이 본 서버로', t_gen_boot_error)
 
         def t_img_no_keys():
             mock.keys = {'openai': False, 'pexels': False}

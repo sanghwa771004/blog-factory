@@ -201,9 +201,10 @@ export function createStudio(ui) {
     const seq = ++seqN;
     let body;
     const req = ((c && c.req) || Promise.resolve()).catch(() => {}).then(() => {
-      if (C[id] && C[id].seq > seq) return null;
+      const cur = C[id];
+      if (cur && cur.seq > seq && cur.loading && cur.loading !== p) return null; // 더 새 요청이 기다리는 중 → 이건 안 보냄
       body = (ui.post(id) || {}).body; // 보낼 때의 본문 (받을 때가 아니라)
-      return api(`/posts/${id}/images`);
+      return api(`/posts/${id}/images`, { timeout: 25000 }); // 오래 멈춘 요청이 뒤의 요청을 계속 막지 않게
     });
     const p = req.then((d) => {
       const cur = C[id];
@@ -508,7 +509,7 @@ export function createStudio(ui) {
       text: mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
       quality: IMG.normQuality(capsModel, (prev && prev.quality) || st.image_quality || 'medium'),
     };
-    if (base && base.width && base.height) f.ratio = (IMG.PURPOSES[f.purpose].ratios.find((r) => IMG.sameRatio(base.width, base.height, r))) || '';
+    if (base) f.ratio = IMG.defaultRatio(base, f.purpose); // 고치기는 원래 이미지의 비율로 (정해진 크기로 만든 이미지면 그때 고른 비율)
     const prods = ui.productsOf(p.id) || [];
     const brands = prods.map((x) => x.brand).filter(Boolean);
     const hide = prods.flatMap((x) => [x.brand, x.name, x.model]).filter((v) => v && String(v).trim().length >= 2);

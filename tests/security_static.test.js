@@ -54,6 +54,6 @@ test('생성 전용 서버(blog-gen)는 AI 이미지 만들기 요청만 받고,
   assert.match(ts, /if \(genFn && !\(req\.method === "POST" && route === "images\/generate"\)\) return json\(\{ error: "not_found" \}, 404\);/);
   assert.match(read('supabase/functions/blog-gen/index.ts'), /^import "\.\.\/blog-app\/index\.ts";$/m);
   const app = read('app.js');
-  assert.match(app, /if \(gen && !ours && \(r\.status === 404 \|\| r\.status === 401\)\) throw \{ code: 'gen_unavailable'/);
+  assert.match(app, /if \(gen && !ours && \(\[401, 403, 404, 405\]\.includes\(r\.status\) \|\| r\.status >= 500\)\) throw \{ code: 'gen_unavailable'/);
   assert.ok(app.indexOf("throw { code: 'gen_unavailable'") < app.indexOf('authLost(j.reason'), '로그아웃 처리보다 먼저 거름');
 });

@@ -207,11 +207,37 @@ describe('같은 설명이 여러 번인 자리 (검증 N1: 주변 글만 새로
     const rows = rowsOf([A, B, Cc]).slice(1);
     assert.deepEqual(ids([A, B, Cc], rows), ['-', 'IMG_2', 'IMG_3']);
   });
-  test('같은 설명이 8곳 넘게 있으면 순서만 지킴 (자리 바꾸기 계산은 작은 묶음에서만)', () => {
-    const many = Array.from({ length: 8 }, (_, i) => sec('방' + i, POOL[i] , POOL[i + 1]));
+  test('같은 설명이 8곳 넘게 있어도 문단째 옮기면 따라감 (주변 글이 그대로인 짝을 먼저 묶음)', () => {
+    const many = Array.from({ length: 10 }, (_, i) => sec('방' + i, POOL[i], POOL[i + 1]));
     const rows = rowsOf(many);
-    const rev = [...many].reverse();
-    assert.deepEqual(ids(rev, rows), rows.map((r) => r.image_id));
+    assert.deepEqual(ids([...many].reverse(), rows), rows.map((r) => r.image_id).reverse());
+    const moved = [many[9], ...many.slice(0, 9)];
+    assert.deepEqual(ids(moved, rows), ['IMG_10', ...rows.slice(0, 9).map((r) => r.image_id)]);
+  });
+  test('검증 R1: 일부만 연결된 묶음에서 하나를 지우거나, 지우면서 새로 넣어도 남은 자리는 제 이미지 — 지운 자리 이미지는 사라진 자리로', () => {
+    const rows = rowsOf([A, B, Cc]).filter((r) => r.image_id !== 'IMG_3'); // 욕실은 연결 안 함
+    const m = matchSlots(parseSlots([B, Cc].flat().join('\n')), rows);
+    assert.deepEqual(m.slots.map((s) => (s.link ? s.link.image_id : '-')), ['IMG_2', '-']);
+    assert.deepEqual(m.orphans.map((o) => o.image_id), ['IMG_1']);
+    const bare = (h) => [`## ${h}`, `${h}에 있는 히터예요.`, '[이미지]', `${h}은 조용해요.`];
+    const five = ['거실', '침실', '욕실', '주방', '서재'].map(bare);
+    const m2 = matchSlots(parseSlots([...five.slice(1), bare('현관')].flat().join('\n')), rowsOf(five));
+    assert.deepEqual(m2.slots.map((s) => (s.link ? s.link.image_id : '-')), ['IMG_2', 'IMG_3', 'IMG_4', 'IMG_5', '-']);
+    assert.deepEqual(m2.orphans.map((o) => o.image_id), ['IMG_1']);
+    const m3 = matchSlots(parseSlots([Cc, A].flat().join('\n')), rowsOf([A, B])); // 침실 지우고 욕실을 맨 위에
+    assert.deepEqual(m3.slots.map((s) => (s.link ? s.link.image_id : '-')), ['-', 'IMG_1']);
+    assert.deepEqual(m3.orphans.map((o) => o.image_id), ['IMG_2']);
+  });
+  test('서버가 옮긴 뒤 다시 맞춰도 그대로 (한 번에 자리를 잡음)', () => {
+    const rows = rowsOf([A, B, Cc]);
+    const cur = parseSlots([B, sec('주방', '주방 옆에 두었어요.', '따뜻해요.'), Cc].flat().join('\n'));
+    const m = matchSlots(cur, rows);
+    const after = [];
+    for (const s of m.slots) if (s.link) after.push({ ...s.link, slot_key: s.key, slot_index: s.index, slot_ctx: ctxOf(s) });
+    for (const o of m.orphans) after.push({ ...o, slot_key: cur.some((s) => s.key === o.slot_key) ? 'k:~~o1#1' : o.slot_key });
+    const again = matchSlots(cur, after);
+    assert.deepEqual(again.slots.map((s) => (s.link ? s.link.image_id : '-')), m.slots.map((s) => (s.link ? s.link.image_id : '-')));
+    assert.equal(again.rekeys.length, 0);
   });
 });
 
@@ -386,8 +412,11 @@ describe('위험 표현', () => {
   test('검증 N7: 실제 사진이 필요한 자리 — 빼라는 말·다른 뜻(포장마차·리포트)은 넘어감', () => {
     for (const t of ['로고 없이 일반적인 청소기', '포장마차 거리', '리포트 쓰는 대학생', '박스 없이 거실에 놓인 히터', '화면이 안 보이게 뒤에서 찍은 노트북'])
       assert.equal(slotRisk(t).real, false, t);
-    for (const t of ['포장 박스 뒷면', '로고가 보이는 앞면', '제품 내부 구조'])
+    for (const t of ['포장 박스 뒷면', '로고가 보이는 앞면', '제품 내부 구조', 'USB 포트 쪽'])
       assert.equal(slotRisk(t).real, true, t);
+    for (const t of ['에어포트 라운지', '스포트라이트 받는 히터', '표기 없음']) assert.equal(slotRisk(t).real, false, t);
+    assert.deepEqual(blocksOf(promptRisk('로고·브랜드 마크·가격표 없이 깔끔하게')).map((x) => x.code), [], '두 낱말짜리도 함께 빼라는 말');
+    assert.deepEqual(blocksOf(promptRisk('로고와 함께 크게 넣어줘')).map((x) => x.code), ['logo'], '넣어달라는 건 막음');
   });
   test('검증 N8: 연결 상품 브랜드는 낱말로만 (LG가 algorithm 안에서 걸리지 않음)', () => {
     const codes = (t, b) => blocksOf(promptRisk(t, b)).map((x) => x.code);
@@ -402,6 +431,7 @@ describe('맥락 글 정리 — 검증 N8', () => {
     assert.equal(sanitizeContext('가격은 2만 9천원이고 3천원 쿠폰도 있어요'), '가격은 이고 쿠폰도 있어요');
     assert.equal(sanitizeContext('50원 차이예요'), '차이예요');
     assert.equal(sanitizeContext('A4 용지 크기, LED 3개, PM2.5 필터, Wi-Fi 6 지원'), 'A4 용지 크기, LED 3개, PM2.5 필터, Wi-Fi 6 지원');
+    assert.equal(sanitizeContext('PM10 농도가 높은 날'), 'PM10 농도가 높은 날', '미세먼지 PM10은 모델 번호가 아님');
     assert.equal(sanitizeContext('갤럭시 SM-G998N 과 V12 비교'), '갤럭시 과 비교');
     assert.equal(sanitizeContext('인증샷 남겨요, KC인증 제품'), '인증샷 남겨요, 제품');
     assert.equal(sanitizeContext('algorithm 설명', ['LG']), 'algorithm 설명');
