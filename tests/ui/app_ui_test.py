@@ -46,8 +46,8 @@ class Mock:
         self.calls = []
         self.force_401 = False
         self.seq = 100
-        P1, P2, P3, P4, P5 = (uid(i) for i in range(1, 6))
-        self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
+        P1, P2, P3, P4, P5, P6, P7 = (uid(i) for i in range(1, 8))
+        self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, P6=P6, P7=P7, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
         base = dict(money='', platform='', style='', len='2500', hashtags=[], threads='', instagram='', link='', variants={}, sources=[], summary='',
                     ai_notes={}, error='', experience='', category='겨울 가전', topic_id=None, effort_minutes=None, blog_url='', published_on=None,
                     deleted_at=None, request_id=None, disclosure_text='', disclosure_at=None, status='planned')
@@ -68,6 +68,14 @@ class Mock:
             {**base, 'id': P5, 'keyword': '손난로 후기', 'titles': [], 'stage': 'verify', 'channel_id': 'naver_blog', 'program_ids': ['coupang_partners'],
              'content_type': 'experience_review', 'publish_date': None, 'created_at': NOW, 'source': 'request', 'body': '',
              'error': '후기 글은 실제 경험이 필요해. 써본 기간·환경·느낀 점을 적고 다시 요청해줘.'},
+            # 고지문이 비어 있는 수익 모델(네이버 쇼핑 커넥트) → 복사 막힘
+            {**base, 'id': P6, 'keyword': '전기요 세탁 방법', 'titles': ['전기요 세탁 방법'], 'stage': 'review', 'channel_id': 'naver_blog',
+             'program_ids': ['naver_shopping_connect'], 'content_type': 'how_to', 'publish_date': None, 'created_at': NOW, 'source': 'request',
+             'body': '## 전기요 세탁 전 확인할 것\n' + ('세탁 전에 라벨의 세탁 표시를 먼저 확인해요. ' * 20)},
+            # 고지문이 애매한 경우를 시험할 토스 쉐어링크 원고
+            {**base, 'id': P7, 'keyword': '손난로 고르는 법', 'titles': ['손난로 고르는 법'], 'stage': 'review', 'channel_id': 'naver_blog',
+             'program_ids': ['toss_sharelink'], 'content_type': 'buying_guide', 'publish_date': None, 'created_at': NOW, 'source': 'request',
+             'body': '## 손난로 고를 때 볼 것\n' + ('충전식인지 일회용인지 먼저 정해요. ' * 25)},
         ]
         I = self.ids
         self.links = [
@@ -136,7 +144,7 @@ class Mock:
 
     def state(self):
         live = [p for p in self.posts if not p['deleted_at']]
-        return {'version': '1.1.1', 'now': NOW, 'today': TODAY.isoformat(), 'auth': 'session', 'posts': live, 'trash': [], 'jobs': self.jobs,
+        return {'version': json.loads((ROOT / 'version.json').read_text(encoding='utf-8'))['version'], 'now': NOW, 'today': TODAY.isoformat(), 'auth': 'session', 'posts': live, 'trash': [], 'jobs': self.jobs,
                 'settings': self.settings, 'runs': self.runs, 'channels': self.channels, 'programs': self.programs, 'compat': self.compat,
                 'topics': self.topics, 'products': self.products, 'post_products': self.post_products, 'links': self.links,
                 'imports': self.imports}
@@ -198,8 +206,9 @@ class Mock:
         if path == 'imports' and method == 'POST':
             iid = self.new_id()
             self.imports.insert(0, {'id': iid, 'filename': body.get('filename'), 'source_label': body.get('source_label'), 'rows_ok': len(body['rows']),
-                                    'rows_dup': body.get('dup_in_file', 0), 'rows_err': body.get('error_count', 0), 'status': '완료', 'created_at': NOW})
-            return 200, {'import_id': iid, 'ok': len(body['rows']), 'dup': body.get('dup_in_file', 0), 'errors': body.get('error_count', 0)}
+                                    'rows_dup': body.get('dup_in_file', 0), 'rows_err': body.get('error_count', 0), 'rows_changed': 0, 'status': '완료',
+                                    'created_at': NOW})
+            return 200, {'import_id': iid, 'ok': len(body['rows']), 'dup': body.get('dup_in_file', 0), 'changed': 0, 'errors': body.get('error_count', 0)}
         return 200, {'ok': True}
 
 
@@ -344,6 +353,31 @@ def main():
             expect(page.locator('.badge', has_text='발행 준비 완료').first).to_be_visible()
             assert not dialogs, '알림창이 떴음(스크립트 실행됨): ' + str(dialogs)
         check('발행 준비 완료: 검사 통과한 원고만, 본문 HTML은 글자로만 보임', t_ready_ok)
+
+        # 4-1) 고지문이 비었거나 애매한 수익 모델 글은 복사 버튼 자체가 안 나옴
+        def t_copy_blocked():
+            goto_hash('content/post/' + mock.ids['P6'])
+            expect(page.locator('h2', has_text='전기요 세탁 방법')).to_be_visible()
+            expect(page.locator('.badbox', has_text='고지문이 비어 있어서 복사를 막아뒀어')).to_be_visible()
+            assert page.get_by_role('button', name='서식 그대로 복사').count() == 0, '고지문 없는데 복사 버튼이 보임'
+            expect(page.get_by_role('button', name='수익 모델 설정 열기')).to_be_visible()
+            shot('03b-copy-blocked')
+            toss = next(x for x in mock.programs if x['id'] == 'toss_sharelink')
+            keep = toss['disclosure_template']
+            toss['disclosure_template'] = '이 글의 링크로 구매하면 수수료를 받을 수 있습니다.'
+            try:
+                page.get_by_role('button', name='새로고침').click()
+                page.wait_for_timeout(400)
+                goto_hash('content/post/' + mock.ids['P7'])
+                expect(page.locator('.badbox', has_text='애매해서 복사를 막아뒀어')).to_be_visible()
+                assert page.get_by_role('button', name='서식 그대로 복사').count() == 0, '애매한 고지문인데 복사 버튼이 보임'
+            finally:
+                toss['disclosure_template'] = keep
+            page.get_by_role('button', name='새로고침').click()
+            page.wait_for_timeout(400)
+            goto_hash('content/post/' + mock.ids['P7'])
+            expect(page.get_by_role('button', name='서식 그대로 복사')).to_be_visible()
+        check('고지문 비었거나 애매하면 복사 막기, 고치면 다시 복사 가능', t_copy_blocked)
 
         # 5) 새 원고 요청: 안 되는 조합·경험 없는 후기 막기, 되는 조합은 요청
         def t_new_request():

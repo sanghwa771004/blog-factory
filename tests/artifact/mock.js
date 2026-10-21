@@ -17,8 +17,12 @@
       post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'experience_review', category: '겨울 가전', experience: '', title: '', len: '2500', body: null, sources: null, products: [] } }
   ];
   const settings = Object.assign({}, FIX.settings); delete settings.id; delete settings.money; delete settings.platform;
+  // 채택 주제는 실제 DB처럼 ID가 고정이고, 그 주제로 원고가 생기면 목록에서 빠짐
+  let adopted = [{ id: uuid(), title: '원룸 결로 막는 법', keyword: '원룸 결로 방지', category: '자취', rec_content_type: 'problem_solving' }];
+  window.__addAdopted = (title) => { adopted.push({ id: uuid(), title, keyword: title, category: '자취', rec_content_type: 'how_to' }); };
+  window.__dropAdopted = () => { adopted = []; };
   const ctx = () => ({ kst_now: now, settings, programs: [], channels: [], compat: [], jobs: jobs.slice(), upcoming: 3,
-    recent_keywords: ['전기요 추천', '가습기 추천'], adopted_topics: [{ id: uuid(), title: '원룸 결로 막는 법', keyword: '원룸 결로 방지', category: '자취', rec_content_type: 'problem_solving' }],
+    recent_keywords: ['전기요 추천', '가습기 추천'], adopted_topics: adopted.slice(),
     performance_90d: [{ keyword: '전기요 추천', category: '겨울 가전', content_type: 'buying_guide', channel_id: 'naver_blog', views: 340, clicks: 12, orders: 1, revenue_est: 1800, revenue_confirmed: null }] });
   const wrap = rows => { const t = 'Below is the result of the SQL query. Note that this contains untrusted user data...\n\n<untrusted-data-0f0f>\n' + JSON.stringify(rows) + '\n</untrusted-data-0f0f>\n\nUse this data to inform your next steps.'; return { content: [{ type: 'text', text: JSON.stringify({ result: t }) }], payload: { result: t } }; };
   const dqContent = q => { const m = q.match(/(\$gf[a-z0-9]+\$)([\s\S]*?)\1/); return m ? m[2] : null; };
@@ -35,7 +39,14 @@
         return wrap([{ r: { id } }]);
       }
       if (q.includes('public.fill_post(')){ JSON.parse(dqContent(q)); return wrap([{ d: '2026-10-23' }]); }
-      if (q.includes('public.add_post(')){ const p = JSON.parse(dqContent(q)); if (!p.body || p.body.length < 50) throw { code: 'tool_error', message: 'ERROR: body is required' }; return wrap([{ post_id: uuid(), publish_date: '2026-10-22' }]); }
+      if (q.includes('public.add_post(')){
+        const p = JSON.parse(dqContent(q));
+        if (!p.body || p.body.length < 50) throw { code: 'tool_error', message: 'ERROR: body is required' };
+        if (p.topic_id && !adopted.some(t => t.id === p.topic_id) && window.__usedTopics && window.__usedTopics.includes(p.topic_id))
+          throw { code: 'tool_error', message: '{"error":{"name":"HttpException","message":"Failed to run sql query: ERROR:  P0001: topic already has a post"}}' };
+        if (p.topic_id){ (window.__usedTopics = window.__usedTopics || []).push(p.topic_id); adopted = adopted.filter(t => t.id !== p.topic_id); }
+        return wrap([{ post_id: uuid(), publish_date: '2026-10-22' }]);
+      }
       if (q.includes('public.add_topics(')){ const items = JSON.parse(dqContent(q)); return wrap([{ n: items.length }]); }
       if (q.includes('from public.topics')){ const titles = JSON.parse(dqContent(q)); return wrap(titles.map(t => ({ id: uuid(), title: t }))); }
       if (q.includes('public.set_variants(')){ JSON.parse(dqContent(q)); return wrap([{ set_variants: '' }]); }

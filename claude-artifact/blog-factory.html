@@ -522,7 +522,7 @@ const BUILTIN_PROGRAMS = [
 const ARTIFACT_NOTE = "Claude 안 글공장에서 웹 확인 없이 쓴 원고야. 상품 스펙·가격·통계는 넣지 않았어.";
 const SNS_FALLBACK_DISCLOSURE = "#광고 이 글의 링크로 구매하면 수수료를 받아요";
 
-// ───────── 본문 형식 (앱 checks.js 1.1.1 과 같은 규칙) ─────────
+// ───────── 본문 형식 (앱 checks.js 1.1.2 와 같은 규칙) ─────────
 function parseBody(md){
   const blocks = [];
   let list = null, tbl = null;
@@ -590,10 +590,17 @@ const FAKE_EXPERIENCE = [
   /(제가|저는|내가|나는|저희|우리)\s*[^.!?\n]{0,12}(샀|구매했|구입했|주문했)/
 ];
 const OTHERS_EXPERIENCE = /(사람들|분들|사용자들|후기를 보면|리뷰를 보면|후기들|리뷰들)/;
+// 안내·조건 문장("직접 사용해 보면서 비교해 보세요")은 써본 척이 아님. 1인칭·겪은 일 표현이 있으면 그대로 검사 (앱 checks.js 1.1.2와 같음)
+const ADVICE = /(보세요|하세요|해\s*보세요|십시오|보자|하자|해\s*봐|면\s|면,|다면|라면|려면|경우|할\s*때|일\s*때|는\s*게\s*좋|보는\s*게)/;
+const FIRST_PERSON = /(제가|저는|저도|내가|나는|나도|저희|우리\s*집|제\s*방|제\s*경험)/;
+const PAST_EXPERIENCE = /(보니|봤|보았|샀|구매했|구입했|주문했|내돈내산|써\s*본|사용해\s*본)/;
+const isFakeExperience = text => !OTHERS_EXPERIENCE.test(text)
+  && !(ADVICE.test(text) && !FIRST_PERSON.test(text) && !PAST_EXPERIENCE.test(text))
+  && FAKE_EXPERIENCE.some(re => re.test(text));
 const HYPE = ["무조건", "100%", "역대급", "최저가 보장", "부작용 없", "완벽한", "절대 후회", "인생템", "1등", "최고의 선택"];
 const PRICE_EXACT = /(\d{1,3}(?:,\d{3})+|\d{4,})\s*원(?!\s*(대|이하|이상|안팎|선|미만|초과|부터|까지|정도|내외))|\d+(?:\.\d+)?\s*만\s*원(?!\s*(대|이하|이상|안팎|선|미만|초과|부터|까지|정도|내외))/;
 const NUM_CLAIM = /\d[\d,.]*\s*(%|퍼센트|배\b|kWh|kW|W\b|와트|mAh|dB|℃|시간|kg|리터)/;
-const VAGUE_DISCLOSURE = /(받을|제공받을|지급받을|받게\s*될)\s*수(도)?\s*있/;
+const VAGUE_DISCLOSURE = /(받을|제공받을|지급받을|받게\s*될|받으실|지급될|제공될|발생할|생길)\s*수\s*(도)?\s*있/;
 
 const progIdsOf = d => (Array.isArray(d.program_ids) ? d.program_ids : (LEGACY_MONEY[d.money] || []));
 const chIdOf = d => d.channel_id || LEGACY_PLATFORM[d.platform] || "naver_blog";
@@ -612,7 +619,7 @@ function quickCheck(d, C){
   const me = countMe(body);
   if (me) errors.push(`빈 [내 경험] 칸 ${me}곳 — 직접 겪은 걸로 채우거나 지워야 '발행 준비 완료'로 바꿀 수 있어.`);
   if (ct && ct.needsExperience && !hasExp) errors.push("실제 경험 후기인데 경험 내용이 없어. 경험을 적거나 글 유형을 바꿔줘.");
-  const fake = sents.filter(s => !OTHERS_EXPERIENCE.test(s.text) && FAKE_EXPERIENCE.some(re => re.test(s.text)));
+  const fake = sents.filter(s => isFakeExperience(s.text));
   if (fake.length && !hasExp) errors.push(`써본 것처럼 쓴 문장 ${fake.length}곳: “${clip(fake[0].text)}”`);
   const prices = sents.filter(s => PRICE_EXACT.test(s.text));
   if (prices.length) errors.push(`정확한 가격 ${prices.length}곳: “${clip(prices[0].text)}” — 가격은 빼고 링크에서 확인하라고 바꿔줘.`);
@@ -705,8 +712,12 @@ function withSnsDisclosure(text, pids, P){
   const dsc = snsDisclosure(pids, P);
   if (!dsc) return t;
   if (!t) return dsc;
-  if (dsc.split("\n").every(line => t.includes(line))) return t;
-  return dsc + "\n\n" + t;
+  if (t.startsWith(dsc)) return t;
+  // 중간·끝에 있던 고지문은 빼고 맨 앞으로 (끝에 두면 글자 수 자를 때 잘려 나감)
+  let rest = t;
+  for (const line of dsc.split("\n")) if (line.trim()) rest = rest.split(line).join("");
+  rest = rest.replace(/\n{3,}/g, "\n\n").trim();
+  return rest ? dsc + "\n\n" + rest : dsc;
 }
 function threadsShare(d, P){
   let text = String(d.threads || "").trim();
@@ -898,6 +909,7 @@ function dbMsg(e){
   if (/post is not waiting/.test(s)) return "이미 써진 원고라 덮어쓰지 않았어.";
   if (/post not found/.test(s)) return "앱에서 지운 원고야.";
   if (/body is required/.test(s)) return "본문이 너무 짧아서 저장하지 않았어.";
+  if (/topic already has a post/.test(s)) return "이 주제로 쓴 원고가 이미 앱에 있어서 다시 만들지 않았어.";
   if (/paused|inactive|not active/i.test(s)) return "Supabase 프로젝트가 쉬는 중이야. Supabase 대시보드에서 프로젝트를 다시 켜줘(Restore).";
   return "앱 서버가 받지 않았어.";
 }
@@ -1061,11 +1073,11 @@ function flash(btn, msg){
   btn._t = setTimeout(() => { btn.textContent = btn.dataset.label; }, 1600);
 }
 
-const APP_VER = "5";
+const APP_VER = "6";
 const APP_DATE = "2026.10.21";
 const APP_PROJECT = "oxewhsqmdkiasckvnyua";
 const SERVER = "Supabase";
-const WHATS_NEW = "새 앱(1.1)에 맞췄어. 채널과 수익 모델을 따로 고르고, 글 유형 11가지·주제 추천 점수·앱 요청 바로 처리가 생겼어. 쓴 원고는 앱 검수함으로 들어가.";
+const WHATS_NEW = "앱 1.1.2에 맞췄어. 고지문이 비었거나 애매하면 복사를 막고, 앱 주제는 쓰기 직전에 다시 확인해서 이미 원고가 생긴 주제는 빼. 써본 척 문장 검사도 더 정확해졌어.";
 const ERR = {
   not_granted: "Claude 사용을 허용해야 쓸 수 있어.",
   rate_limited: "너무 자주 돌렸거나 사용량이 다 찼어. 잠깐 쉬었다가 다시 해줘.",
@@ -1789,10 +1801,20 @@ $("#tSave").onclick = async () => {
   }
 };
 $("#tWrite").onclick = async () => {
-  const picks = pickedAdopted().map(t => ({ src: "app", t })).concat(topics.filter(t => t.checked && t.state !== "done").map(t => ({ src: "local", t })));
   const out = $("#tBarStatus");
-  if (!picks.length) return;
   if (!sample){ $("#tUnavail").hidden = false; return; }
+  // 앱에서 채택한 주제는 그사이 자동 작가가 썼을 수 있으니 목록을 먼저 새로 받아서 빠진 건 뺌
+  let goneNote = "";
+  if (mcp && pickedAdopted().length){
+    out.textContent = "앱 주제 목록을 다시 확인하는 중…";
+    await loadCatalog();
+    const live = new Set((cat.live ? cat.adopted : []).map(t => t.id));
+    const gone = [...adoptedPick].filter(id => !live.has(id));
+    gone.forEach(id => adoptedPick.delete(id));
+    if (gone.length) goneNote = `앱 주제 ${gone.length}개는 그사이 원고가 생겼거나 확인이 안 돼서 뺐어. `;
+  }
+  const picks = pickedAdopted().map(t => ({ src: "app", t })).concat(topics.filter(t => t.checked && t.state !== "done").map(t => ({ src: "local", t })));
+  if (!picks.length){ out.textContent = goneNote || "쓸 주제를 골라줘."; renderTopics(); return; }
   const base = makeInput({ ...readForm(), keyword: "주제", ctype: "" });
   if (base.error){ out.textContent = base.error; return; }
   const sns = base.channel.kind === "sns";
@@ -1826,7 +1848,7 @@ $("#tWrite").onclick = async () => {
   if (ok) parts.push(`${ok}개 썼어.${sentN ? ` ${sentN}개는 앱 검수함에 들어갔어.` : ""}${ok > sentN ? ` ${ok - sentN}개는 앱으로 못 보내서 보관함에 있어.` : ""}`);
   if (fail) parts.push(`실패 ${fail}개는 다시 누르면 이어서 써.`);
   if (stopMsg) parts.push(stopMsg);
-  out.textContent = parts.join(" ") || "쓴 글이 없어.";
+  out.textContent = goneNote + (parts.join(" ") || "쓴 글이 없어.");
   if (sentN) loadCatalog();
 };
 $("#tStop").onclick = () => { batchStop = true; if (batchCtl) batchCtl.abort(); };
@@ -1914,6 +1936,11 @@ function renderJobs(){
   }
 }
 const jobFail = (id, msg, needs) => sql(`select public.job_fail('${id}'::uuid, ${dq(msg)}, ${needs ? "true" : "false"});`);
+// 실패 기록 자체가 안 됐을 때는 다시 쓰지 않고 멈춤 (결과를 모르는 쓰기는 자동으로 다시 보내지 않음)
+const failJob = async (id, msg, needs) => {
+  try { await jobFail(id, msg, needs); }
+  catch (e) { throw { code: "fail_write", ambiguous: !(e && e.code === "tool_error"), msg: (e && e.code === "tool_error") ? dbMsg(e) : connMsg(e) }; }
+};
 const saveErr = e => (e && e.code === "tool_error") ? { dbmsg: dbMsg(e) } : { code: "save_unknown", msg: connMsg(e) };
 async function doWriteJob(j, plan, signal){
   const p = j.post || null;
@@ -1986,10 +2013,10 @@ $("#jRun").onclick = async () => {
     }
     try {
       if ((Number(j.attempts) || 0) >= 3){
-        await jobFail(j.id, "세 번 시도했는데 실패했어. 요청 내용을 확인하고 다시 요청해줘.", false);
+        await failJob(j.id, "세 번 시도했는데 실패했어. 요청 내용을 확인하고 다시 요청해줘.", false);
         tally.failed++; setJob(j.id, "fail", "세 번 넘게 실패한 요청이라 멈췄어", j); continue;
       }
-      if (plan.needsInput){ await jobFail(j.id, plan.needsInput, true); tally.failed++; setJob(j.id, "fail", plan.needsInput, j); continue; }
+      if (plan.needsInput){ await failJob(j.id, plan.needsInput, true); tally.failed++; setJob(j.id, "fail", plan.needsInput, j); continue; }
       jobCtl = new AbortController();
       if (j.kind === "write"){ await doWriteJob(j, plan, jobCtl.signal); tally.written++; tally.write++; }
       else if (j.kind === "topics"){ await doTopicJob(j, jobCtl.signal); tally.topics++; }
@@ -1998,6 +2025,11 @@ $("#jRun").onclick = async () => {
     } catch (e) {
       const code = e && e.code;
       if (code === "save_unknown"){ setJob(j.id, "wait", "저장됐는지 확인을 못 했어 — 앱에서 확인해줘", j); stopMsg = e.msg || ""; break; }
+      if (code === "fail_write"){
+        setJob(j.id, "wait", "실패 기록을 남기지 못했어 — 앱에서 확인해줘", j);
+        if (e.ambiguous){ stopMsg = e.msg || ""; break; }
+        continue;
+      }
       if (code === "cancelled" || (code && SAMPLE_PAUSE.includes(code))){
         const why = code === "cancelled" ? "멈췄어" : errMsg(e);
         setJob(j.id, "wait", `${why} — 30분 뒤 자동 작가가 다시 처리해`, j);
@@ -2253,7 +2285,7 @@ function onCatalog(){
 }
 
 /* ---------- 시작 ---------- */
-$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.1.1 기준`;
+$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.1.2 기준`;
 (() => {
   const seen = LS.get("bgf-ver", null);
   const returning = seen || LS.get("bgf-tab", null) || LS.get("bgf-settings", null);

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { freshDb, one, all, val, kstToday, addDays, longBody } from './helpers/db.js';
 
 describe('마이그레이션', () => {
-  test('예전(1.0) 데이터가 있는 상태에서 001~010이 순서대로 적용되고 기존 원고가 새 열로 옮겨진다', async () => {
+  test('예전(1.0) 데이터가 있는 상태에서 001~011이 순서대로 적용되고 기존 원고가 새 열로 옮겨진다', async () => {
     const db = await freshDb({
       before: {
         '004': async (d) => {
@@ -49,9 +49,10 @@ describe('마이그레이션', () => {
     assert.equal(await val(db, `select verdict from public.program_channels where program_id = 'google_adsense' and channel_id = 'threads'`), '불가');
     assert.equal(await val(db, `select public.compat_verdict('cpa', 'instagram')`), '확인 필요');
     assert.equal(await val(db, `select public.compat_verdict('없는', 'naver_blog')`), '확인 필요', '표에 없는 조합은 확인 필요');
-    // 모든 표에 RLS가 켜져 있어야 함
-    const off = await all(db, `select relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity`);
+    // 모든 표에 RLS가 켜져 있어야 함 (011부터 backup 스키마 표도)
+    const off = await all(db, `select n.nspname, relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname in ('public', 'backup') and c.relkind = 'r' and not c.relrowsecurity`);
     assert.deepEqual(off, []);
+    assert.ok(await val(db, `select count(*)::int from pg_tables where schemaname = 'backup'`) > 0, 'backup 표가 있어야 검사가 의미 있음');
   });
 
   test('010 정책 고침: 쿠팡 공식 가이드 문구로, 공식 근거가 생긴 조합만 가능으로', async () => {
@@ -101,6 +102,15 @@ describe('원고 저장 (add_post)', () => {
     assert.equal(p.status, 'planned');
     assert.equal(p.money, '쿠팡파트너스');
     assert.equal(r.d, kstToday());
+  });
+
+  test('011: 이미 원고가 있는 주제로는 새 원고를 만들지 않음 (휴지통 원고는 셈하지 않음)', async () => {
+    const topic = await val(db, `insert into public.topics (title, status) values ('주제 중복 방지', '채택') returning id`);
+    const first = await one(db, `select post_id from public.add_post($1::jsonb, 1)`, [JSON.stringify({ keyword: '주제 첫 글', body: longBody(), topic_id: topic })]);
+    assert.equal(await val(db, `select status from public.topics where id = $1`, [topic]), '제작 요청됨');
+    await assert.rejects(db.query(`select * from public.add_post($1::jsonb, 1)`, [JSON.stringify({ keyword: '주제 두 번째', body: longBody(), topic_id: topic })]), /topic already has a post/);
+    await db.query(`update public.posts set deleted_at = now() where id = $1`, [first.post_id]);
+    await db.query(`select * from public.add_post($1::jsonb, 1)`, [JSON.stringify({ keyword: '지운 뒤 다시', body: longBody(), topic_id: topic })]);
   });
 
   test('쓸 수 없는 조합(애드센스 × 쓰레드)은 저장 거부', async () => {
@@ -196,6 +206,43 @@ describe('작업 흐름 (요청 → 작성 → 검수)', () => {
     await assert.rejects(db.query(`select public.job_cancel($1)`, [b.job_id]), /cannot be cancelled/);
   });
 
+  test('011: 끝난 작업에 늦게 온 실패 기록은 무시 (완료를 실패로 뒤집지 않음)', async () => {
+    const r = await one(db, `select post_id, job_id from public.request_post($1::jsonb)`, [JSON.stringify({ keyword: '늦은 실패', content_type: 'buying_guide' })]);
+    await db.query(`select public.job_start($1)`, [r.job_id]);
+    await db.query(`select public.fill_post($1, $2::jsonb)`, [r.post_id, JSON.stringify({ body: longBody() })]);
+    await db.query(`select public.job_fail($1, '다른 작가가 늦게 보낸 실패', false)`, [r.job_id]);
+    assert.equal(await val(db, `select status from public.requests where id = $1`, [r.job_id]), 'done');
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [r.post_id]), 'review');
+  });
+
+  test('011: 30분 넘게 멈춘 작업을 취소하면 원고가 실패로 바뀌고, 다시 요청하면 같은 작업이 대기로', async () => {
+    const r = await one(db, `select post_id, job_id from public.request_post($1::jsonb)`, [JSON.stringify({ keyword: '멈춘 작업 취소' })]);
+    await db.query(`select public.job_start($1)`, [r.job_id]);
+    await db.query(`update public.requests set started_at = now() - interval '40 minutes' where id = $1`, [r.job_id]);
+    await db.query(`select public.job_cancel($1)`, [r.job_id]);
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [r.post_id]), 'failed', "'작성 중'에 멈춰 있지 않음");
+    assert.equal(await val(db, `select public.post_retry($1)::text`, [r.post_id]), r.job_id);
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [r.post_id]), 'queued');
+  });
+
+  test('011: 작성 중에 멈춘 원고는 30분이 지나면 다시 요청 가능, 30분 안이면 안 됨', async () => {
+    const r = await one(db, `select post_id, job_id from public.request_post($1::jsonb)`, [JSON.stringify({ keyword: '작성 중 멈춤' })]);
+    await db.query(`select public.job_start($1)`, [r.job_id]);
+    await assert.rejects(db.query(`select public.post_retry($1)`, [r.post_id]), /not failed/);
+    await db.query(`update public.requests set started_at = now() - interval '40 minutes' where id = $1`, [r.job_id]);
+    assert.equal(await val(db, `select public.post_retry($1)::text`, [r.post_id]), r.job_id);
+    const j = await one(db, `select status, started_at from public.requests where id = $1`, [r.job_id]);
+    assert.equal(j.status, 'pending');
+    assert.equal(j.started_at, null);
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [r.post_id]), 'queued');
+  });
+
+  test('011: 대기 중(원고 요청이 살아 있음)인 원고는 다시 요청으로 작업을 두 개 만들지 않음', async () => {
+    const r = await one(db, `select post_id, job_id from public.request_post($1::jsonb)`, [JSON.stringify({ keyword: '이중 요청' })]);
+    await assert.rejects(db.query(`select public.post_retry($1)`, [r.post_id]), /not failed/);
+    assert.equal(await val(db, `select count(*)::int from public.requests where post_id = $1`, [r.post_id]), 1);
+  });
+
   test('주제 추천 결과 저장과 실행 기록', async () => {
     const job = await val(db, `insert into public.requests (keyword, kind, payload) values ('겨울 가전', 'topics', '{"mode":"category"}') returning id`);
     const n = await val(db, `select public.add_topics($1, $2::jsonb)`, [job, JSON.stringify([
@@ -260,14 +307,64 @@ describe('실적 (파일 올리기·통계)', () => {
       { match_text: '모르는 글', period_start: '2026-10-02', period_end: '2026-10-02', clicks: 3 },
     ];
     const first = await importRows(rows);
-    assert.deepEqual(first.res, { ok: 3, dup: 0 });
+    assert.deepEqual(first.res, { ok: 3, dup: 0, changed: 0 });
     const second = await importRows(rows);
-    assert.deepEqual(second.res, { ok: 0, dup: 3 });
+    assert.deepEqual(second.res, { ok: 0, dup: 3, changed: 0 });
     assert.equal(await val(db, `select stage from public.posts where id = $1`, [postA]), 'collecting', '실적이 들어오면 실적 수집 중');
     assert.equal(await val(db, `select note from public.metrics where post_id is null`), '글 연결 안 됨: 모르는 글');
-    // 올리기 취소 = 그 파일로 넣은 줄만 지움
-    await db.query(`delete from public.metrics where import_id = $1`, [first.imp]);
+    // 올리기 취소 = 그 파일로 넣은 줄만 지움 (두 번째 파일은 아무것도 안 넣어서 지울 게 없음)
+    assert.deepEqual(await val(db, `select public.import_cancel($1)`, [second.imp]), { removed: 0, restored: 0 });
+    assert.deepEqual(await val(db, `select public.import_cancel($1)`, [first.imp]), { removed: 3, restored: 0 });
     assert.equal(await val(db, `select count(*)::int from public.metrics`), 0);
+    assert.equal(await val(db, `select status from public.imports where id = $1`, [first.imp]), '취소');
+  });
+
+  test('숫자가 고쳐진 리포트를 다시 올리면 두 번 세지 않고 새 숫자로, 파일 이름이 달라도 같은 줄이면 중복, 취소하면 예전 숫자로', async () => {
+    await db.query(`delete from public.metrics`);
+    const day = (d, o) => ({ post_id: postA, period_start: d, period_end: d, ...o });
+    const a = await importRows([day('2026-10-01', { clicks: 5, revenue_est: 1200 })]);
+    assert.deepEqual(a.res, { ok: 1, dup: 0, changed: 0 });
+    const b = await importRows([day('2026-10-01', { clicks: 5, revenue_est: 900 }), day('2026-10-02', { revenue_est: 300 })]);
+    assert.deepEqual(b.res, { ok: 1, dup: 0, changed: 1 });
+    const s = await val(db, `select public.stats('2026-10-01', '2026-10-31')`);
+    assert.equal(Number(s.totals.revenue_est.sum), 1200, '900 + 300 (예전 1200을 또 더하지 않음)');
+    assert.equal(s.totals.rows, 2);
+    const renamed = await val(db, `insert into public.imports (filename, source_label, program_id) values ('이름 바꾼 파일.csv', '다른 출처 이름', 'coupang_partners') returning id`);
+    assert.deepEqual(await val(db, `select public.import_metrics($1, $2::jsonb)`, [renamed, JSON.stringify([day('2026-10-01', { clicks: 5, revenue_est: 900 })])]), { ok: 0, dup: 1, changed: 0 });
+    assert.deepEqual(await val(db, `select public.import_cancel($1)`, [b.imp]), { removed: 1, restored: 1 });
+    assert.equal(Number(await val(db, `select revenue_est from public.metrics where period_start = '2026-10-01'`)), 1200, '고친 줄은 예전 숫자로');
+    assert.equal(await val(db, `select count(*)::int from public.metrics where period_start = '2026-10-02'`), 0, '새로 넣은 줄은 지움');
+    assert.equal(await val(db, `select import_id::text from public.metrics where period_start = '2026-10-01'`), a.imp);
+  });
+
+  test('한 파일 안 같은 글·같은 날짜 줄(상품별 줄)은 더해서 한 줄로, 같은 파일을 다시 올리면 중복', async () => {
+    await db.query(`delete from public.metrics`);
+    const rows = [
+      { post_id: postB, period_start: '2026-10-03', period_end: '2026-10-03', orders: 1, revenue_est: 500 },
+      { post_id: postB, period_start: '2026-10-03', period_end: '2026-10-03', orders: 2, revenue_est: 700 },
+    ];
+    assert.deepEqual((await importRows(rows)).res, { ok: 2, dup: 0, changed: 0 });
+    const m = await one(db, `select orders, revenue_est, clicks from public.metrics where post_id = $1`, [postB]);
+    assert.equal(m.orders, 3);
+    assert.equal(Number(m.revenue_est), 1200);
+    assert.equal(m.clicks, null, '둘 다 비어 있으면 0이 아니라 데이터 없음');
+    assert.deepEqual((await importRows(rows)).res, { ok: 0, dup: 2, changed: 0 });
+  });
+
+  test('여러 번 고친 뒤 중간 파일을 취소해도 숫자가 꼬이지 않음', async () => {
+    await db.query(`delete from public.metrics`);
+    const day = (v) => [{ post_id: postA, period_start: '2026-10-05', period_end: '2026-10-05', revenue_est: v }];
+    const r1 = await importRows(day(100));
+    const r2 = await importRows(day(200));
+    const r3 = await importRows(day(300));
+    assert.deepEqual(r3.res, { ok: 0, dup: 0, changed: 1 });
+    const now = () => val(db, `select revenue_est::int from public.metrics where period_start = '2026-10-05'`);
+    await db.query(`select public.import_cancel($1)`, [r2.imp]);
+    assert.equal(await now(), 300, '지금 숫자는 그대로');
+    await db.query(`select public.import_cancel($1)`, [r3.imp]);
+    assert.equal(await now(), 100, '취소한 r2의 200이 되살아나지 않고 r1의 100으로');
+    await db.query(`select public.import_cancel($1)`, [r1.imp]);
+    assert.equal(await val(db, `select count(*)::int from public.metrics where period_start = '2026-10-05'`), 0);
   });
 
   test('통계: 빈 칸은 0이 아니라 데이터 없음(n=0), 0은 0으로', async () => {

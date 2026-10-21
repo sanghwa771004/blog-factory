@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.1.1';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.1.2';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -124,8 +124,12 @@ export function withSnsDisclosure(text, post, programs) {
   const d = snsDisclosure(post, programs);
   if (!d) return t;
   if (!t) return d;
-  if (d.split('\n').every((line) => t.includes(line))) return t;
-  return d + '\n\n' + t;
+  if (t.startsWith(d)) return t;
+  // 글 중간·끝에 있던 고지문은 빼고 맨 앞으로 (끝에 두면 글자 수 자를 때 잘려 나감)
+  let rest = t;
+  for (const line of d.split('\n')) if (line.trim()) rest = rest.split(line).join('');
+  rest = rest.replace(/\n{3,}/g, '\n\n').trim();
+  return rest ? d + '\n\n' + rest : d;
 }
 
 // 쓰레드: 블로그 주소가 있으면 블로그로, 없으면 첫 제휴 링크. 제휴 글이면 고지문을 맨 앞에
@@ -295,7 +299,11 @@ export function normalizeRows(rows, mapping, opts = {}) {
     if (!postId && matchText) unmatched.push(line);
     out.post_id = postId;
     out.match_text = matchText.slice(0, 300);
-    const key = [opts.source_label || '', opts.program_id || '', opts.channel_id || '', postId || matchText, start, end, ...NUM_FIELDS.map((f) => (out[f] == null ? '' : out[f]))].join('|');
+    // 파일 안 중복 = 모든 칸이 똑같은 줄 (붙여넣다 두 번 들어간 줄). 상품명·주문번호처럼 안 고른 칸이 하나라도 다르면
+    // 다른 주문이라서 빼지 않아 — 같은 글·같은 날짜 줄은 서버가 더해서 한 줄로 저장해.
+    const cells = (Array.isArray(r) ? r : []).map((c) => String(c == null ? '' : c).trim());
+    while (cells.length && cells[cells.length - 1] === '') cells.pop();
+    const key = JSON.stringify([opts.source_label || '', opts.program_id || '', opts.channel_id || '', postId || '', cells]);
     if (seen.has(key)) { dupInFile++; return; }
     seen.add(key);
     ok.push(out);
@@ -429,11 +437,13 @@ export function makePostResolver(posts) {
 // stats() 결과의 칸: {sum, n} → n = 0 이면 데이터 없음(null), 0 과 구분
 export const val = (agg, f) => (agg && agg[f] && agg[f].n > 0 ? Number(agg[f].sum) : null);
 export const ratio = (num, den) => (num == null || den == null || den <= 0 ? null : num / den);
+// 비용을 한 번도 안 넣었으면 0원으로 계산하되 costMissing 으로 알려줌 (화면에 '비용 입력 없음' 표시)
 export function netProfit(agg) {
   const conf = val(agg, 'revenue_confirmed'), est = val(agg, 'revenue_est'), cost = val(agg, 'cost');
   return {
     confirmed: conf == null ? null : conf - (cost || 0),
     estimated: est == null ? null : est - (cost || 0),
+    costMissing: cost == null,
   };
 }
 // 클릭률·전환율·1,000회 조회당 수익: 분자와 분모가 둘 다 있는 글만 모아서 계산

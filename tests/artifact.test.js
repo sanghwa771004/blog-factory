@@ -8,7 +8,7 @@ const html = readFileSync(new URL('../claude-artifact/blog-factory.html', import
 const pure = html.match(/\/\*PURE-START\*\/([\s\S]*?)\/\*PURE-END\*\//)[1];
 const NAMES = ['parseBody', 'quickCheck', 'normalizePost', 'normalizeTopics', 'normalizeVariants', 'sqlRows', 'dq', 'topicScore',
   'buildWritePrompt', 'buildTopicPrompt', 'buildReformatPrompt', 'exportHtml', 'exportPlain', 'threadsShare', 'instagramText',
-  'disclosureFor', 'typeOkHere', 'dbMsg', 'nextRunText', 'EXAMPLE', 'firstChars', 'VAGUE_DISCLOSURE'];
+  'disclosureFor', 'typeOkHere', 'dbMsg', 'nextRunText', 'EXAMPLE', 'firstChars', 'VAGUE_DISCLOSURE', 'isFakeExperience', 'withSnsDisclosure'];
 const P = new Function(pure + `\nreturn { ${NAMES.join(', ')} };`)();
 const cat = JSON.parse(readFileSync(new URL('./fixtures/catalog.json', import.meta.url), 'utf8'));
 const prog = Object.fromEntries(cat.programs.map((p) => [p.id, p]));
@@ -114,7 +114,22 @@ test('복사: 고지문은 맨 위, 제휴 링크는 그대로 링크 자리에'
   assert.ok(!P.threadsShare({ ...P.EXAMPLE, program_ids: ['naver_adpost'] }, prog).added);
 });
 
+test('1.1.2: 앱과 같은 규칙 — 안내 문장은 써본 척 아님, 애매한 고지 표현 확대, SNS 고지문은 항상 맨 앞', async () => {
+  const app = await import('../checks.js');
+  const samples = ['매장에서 직접 사용해 보면서 소음을 비교해 보세요.', '일주일 사용 중 고장이 나면 교환을 요청하세요.', '제가 한 달 동안 써보니 따뜻했어요.', '한 달 동안 써보니 좋았는데, 이런 경우 고려해 보세요.'];
+  for (const s of samples) assert.equal(P.isFakeExperience(s), app.isFakeExperience(s), s);
+  for (const t of ['수수료가 지급될 수 있습니다', '수수료가 발생할 수 있습니다', '받을 수 도 있어요', prog.coupang_partners.disclosure_template]) {
+    assert.equal(P.VAGUE_DISCLOSURE.test(t), app.VAGUE_DISCLOSURE.test(t), t);
+  }
+  const d = prog.coupang_partners.disclosure_template;
+  const t = P.withSnsDisclosure('본문\n\n' + d, ['coupang_partners'], prog);
+  assert.ok(t.startsWith(d) && t.split(d).length === 2);
+  const r = P.quickCheck({ ...P.EXAMPLE, body: P.EXAMPLE.body + '\n매장에서 직접 사용해 보면서 소음을 비교해 보세요.' }, C);
+  assert.deepEqual(r.errors, [], '정보 글의 안내 문장은 막지 않음');
+});
+
 test('DB 오류 문구와 기타 도우미', () => {
+  assert.ok(P.dbMsg({ code: 'tool_error', message: 'ERROR:  P0001: topic already has a post' }).includes('이미'));
   assert.equal(P.dbMsg({ code: 'tool_error', message: '{"error":{"message":"Failed to run sql query: ERROR:  P0001: job is not pending (already started or finished)"}}' }), '다른 곳에서 이미 처리 중이거나 끝난 요청이야.');
   assert.ok(P.dbMsg({ code: 'tool_error', message: 'ERROR: incompatible: Google 애드센스 × 쓰레드 (이유)' }).includes('Google 애드센스 × 쓰레드'));
   assert.equal(P.nextRunText({ h: 7, m: 0 }), '오늘 오전 8:51');

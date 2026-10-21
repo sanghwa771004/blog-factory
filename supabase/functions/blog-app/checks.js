@@ -131,12 +131,21 @@ const FAKE_EXPERIENCE = [
   /(제가|저는|내가|나는|저희|우리)\s*[^.!?\n]{0,12}(샀|구매했|구입했|주문했)/,
 ];
 const OTHERS_EXPERIENCE = /(사람들|분들|사용자들|후기를 보면|리뷰를 보면|후기들|리뷰들)/;
+// "매장에서 직접 사용해 보면서 비교해 보세요", "일주일 사용 중 고장이 나면…" 같은 안내·조건 문장은 써본 척이 아님.
+// 단, '제가·저는' 같은 1인칭이나 '써보니·샀는데' 같은 겪은 일 표현이 있으면 안내 문장이어도 그대로 검사해.
+const ADVICE = /(보세요|하세요|해\s*보세요|십시오|보자|하자|해\s*봐|면\s|면,|다면|라면|려면|경우|할\s*때|일\s*때|는\s*게\s*좋|보는\s*게)/;
+const FIRST_PERSON = /(제가|저는|저도|내가|나는|나도|저희|우리\s*집|제\s*방|제\s*경험)/;
+const PAST_EXPERIENCE = /(보니|봤|보았|샀|구매했|구입했|주문했|내돈내산|써\s*본|사용해\s*본)/;
+export const isFakeExperience = (text) => !OTHERS_EXPERIENCE.test(text)
+  && !(ADVICE.test(text) && !FIRST_PERSON.test(text) && !PAST_EXPERIENCE.test(text))
+  && FAKE_EXPERIENCE.some((re) => re.test(text));
 const HYPE = ['무조건', '100%', '역대급', '최저가 보장', '부작용 없', '완벽한', '절대 후회', '인생템', '1등', '최고의 선택'];
 const PRICE_EXACT = /(\d{1,3}(?:,\d{3})+|\d{4,})\s*원(?!\s*(대|이하|이상|안팎|선|미만|초과|부터|까지|정도|내외))|\d+(?:\.\d+)?\s*만\s*원(?!\s*(대|이하|이상|안팎|선|미만|초과|부터|까지|정도|내외))/;
 const PRICE_RANGE = /\d+(?:\.\d+)?\s*만?\s*원\s*(대|이하|이상|안팎|선|미만|초과|정도|내외)/;
 const NUM_CLAIM = /\d[\d,.]*\s*(%|퍼센트|배\b|kWh|kW|W\b|와트|mAh|dB|℃|시간|kg|리터)/;
 const DISCLOSURE_MARK = /(광고|협찬|제휴|파트너스|수수료|소정의|대가)/;
-export const VAGUE_DISCLOSURE = /(받을|제공받을|지급받을|받게\s*될)\s*수(도)?\s*있/;
+// '받을 수 있음', '지급될 수 있습니다', '발생할 수도 있어요'처럼 조건을 붙인 표현 (띄어쓰기가 달라도)
+export const VAGUE_DISCLOSURE = /(받을|제공받을|지급받을|받게\s*될|받으실|지급될|제공될|발생할|생길)\s*수\s*(도)?\s*있/;
 
 function shingles(text, n = 4) {
   const s = String(text || '').replace(/\s+/g, '');
@@ -206,7 +215,7 @@ export function checkPost(post, ctx = {}) {
   if (ctype && ctype.needsExperience && !hasExperience) {
     E('needs_experience', '실제 경험 후기인데 경험 내용이 없어. 안 써본 걸 써본 것처럼 올리면 안 돼.', "직접 써본 내용을 적거나, 글 유형을 '장단점 분석'이나 '구매 가이드'로 바꿔줘.");
   }
-  const fake = sents.filter((s) => !OTHERS_EXPERIENCE.test(s.text) && FAKE_EXPERIENCE.some((re) => re.test(s.text))).map((s) => clip(s.text));
+  const fake = sents.filter((s) => isFakeExperience(s.text)).map((s) => clip(s.text));
   if (fake.length) {
     if (hasExperience) W('experience_check', `써본 경험을 말하는 문장이 ${fake.length}곳 있어. 적어준 실제 경험과 맞는지 봐줘.`, '', fake.slice(0, 3));
     else E('fake_experience', `써본 것처럼 쓴 문장이 ${fake.length}곳 있는데 실제 경험이 입력돼 있지 않아.`, '그 문장을 고치거나 실제 경험을 입력해줘.', fake.slice(0, 3));

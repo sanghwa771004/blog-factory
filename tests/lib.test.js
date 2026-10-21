@@ -56,6 +56,14 @@ describe('쓰레드·인스타', () => {
     assert.equal(L.withSnsDisclosure('', POST, PROGRAMS), d, '글이 비어도 고지문은 남김');
     assert.equal(L.snsDisclosure({ ...POST, program_ids: ['cpa_x'] }, { cpa_x: { id: 'cpa_x', kind: 'cpa', needs_disclosure: '필요', disclosure_template: '' } }), L.SNS_FALLBACK_DISCLOSURE);
   });
+  test('1.1.2: 고지문이 글 끝·중간에 있으면 맨 앞으로 옮김 (자를 때 잘리지 않게, 한 번만)', () => {
+    const d = PROGRAMS.coupang_partners.disclosure_template;
+    const t = L.withSnsDisclosure('본문 내용\n\n' + d, POST, PROGRAMS);
+    assert.ok(t.startsWith(d));
+    assert.equal(t.split(d).length - 1, 1);
+    const s = L.threadsShare({ ...POST, threads: '가'.repeat(600) + '\n' + d, blog_url: 'https://x.com' }, { links: [], programs: PROGRAMS });
+    assert.ok(s.text.startsWith(d) && s.text.length <= 480, '긴 글을 잘라도 고지문은 남음');
+  });
   test('블로그 주소가 없으면 제휴 링크 + 고지문을 맨 앞에', () => {
     const s = L.threadsShare(POST, { links: LINKS, programs: PROGRAMS });
     assert.ok(s.text.startsWith('이 포스팅은 쿠팡 파트너스'));
@@ -136,6 +144,17 @@ describe('CSV·엑셀 읽기', () => {
     assert.equal(r2.dupInFile, 1);
     assert.equal(r2.ok.length, 2);
   });
+  test('파일 안 중복은 모든 칸이 같은 줄만: 안 고른 칸(상품명)이 다르면 다른 주문이라 둘 다 남김', () => {
+    const mapping = { date: 0, post_match: 1, orders: 3, revenue_est: 4 }; // 2번 칸(상품명)은 안 고름
+    const rows = [
+      ['2026-10-01', '내 글', '전기요 A', '1', '500'],
+      ['2026-10-01', '내 글', '전기요 B', '1', '500'], // 숫자는 같지만 다른 상품 → 중복 아님
+      ['2026-10-01', '내 글', '전기요 A', '1', '500', ''], // 끝의 빈 칸만 다름 → 첫 줄과 같은 줄
+    ];
+    const r = L.normalizeRows(rows, mapping, {});
+    assert.equal(r.ok.length, 2);
+    assert.equal(r.dupInFile, 1);
+  });
   test('음수 건수는 오류', () => {
     const r = L.normalizeRows([['2026-10-01', '-3']], { date: 0, clicks: 1 });
     assert.equal(r.errors.length, 1);
@@ -151,6 +170,10 @@ describe('통계·주제 점수·추천', () => {
     const n = L.netProfit(agg({ revenue_confirmed: 5000, cost: 1000, revenue_est: null }));
     assert.equal(n.confirmed, 4000);
     assert.equal(n.estimated, null);
+    assert.equal(n.costMissing, false);
+    const noCost = L.netProfit(agg({ revenue_confirmed: 5000, cost: null }));
+    assert.equal(noCost.confirmed, 5000);
+    assert.equal(noCost.costMissing, true, '비용을 안 넣었으면 화면에 비용 입력 없음 표시');
   });
   test('클릭률·전환율·1,000회당 수익은 분자·분모가 둘 다 있는 글만', () => {
     const r = L.rates([

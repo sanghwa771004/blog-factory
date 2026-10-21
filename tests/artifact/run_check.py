@@ -95,6 +95,17 @@ with sync_playwright() as p:
     batch = [json.loads(re.search(r'(\$gf[a-z0-9]+\$)([\s\S]*?)\1', x).group(2)) for x in addq[-3:]]
     check('batch uses offset 1 and topic_id', all(x.rstrip().endswith('::jsonb, 1);') for x in addq[-3:]) and sum(1 for b2 in batch if b2.get('topic_id')) == 3, str([b2.get('topic_id', '')[:8] for b2 in batch]))
     pg.screenshot(path=os.path.join(shots, '3-topics.png'), full_page=True)
+    # 채택 주제를 고른 사이에 자동 작가가 그 주제로 원고를 만든 경우 → 쓰기 전에 목록을 다시 받아서 빼야 함
+    pg.evaluate("window.__addAdopted('겨울 이불 세탁법')")
+    pg.click('#connActs button:has-text("새로고침")')
+    pg.wait_for_function("document.querySelector('#adopted').textContent.includes('겨울 이불 세탁법')", timeout=8000)
+    pg.check('#adopted input')
+    n_before = sum('public.add_post(' in x for x in pg.evaluate('window.__log.queries'))
+    pg.evaluate('window.__dropAdopted()')
+    pg.click('#tWrite')
+    pg.wait_for_function("document.querySelector('#tBarStatus').textContent.includes('그사이')", timeout=8000)
+    n_after = sum('public.add_post(' in x for x in pg.evaluate('window.__log.queries'))
+    check('stale adopted pick dropped before writing (no add_post)', n_after == n_before and '그사이 원고가 생겼거나' in pg.inner_text('#tBarStatus'), pg.inner_text('#tBarStatus'))
     # jobs
     pg.click('#t-jobs')
     jl = pg.inner_text('#jobList')

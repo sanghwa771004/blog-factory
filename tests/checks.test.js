@@ -1,7 +1,7 @@
 // 발행 전 검사(checks.js) 테스트 — 앱과 서버가 같은 파일을 씀
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPost, disclosureFor, compatOf, parseBody, countMe, removeEmptyMe, similarity, CONTENT_TYPES } from '../checks.js';
+import { checkPost, disclosureFor, compatOf, parseBody, countMe, removeEmptyMe, similarity, CONTENT_TYPES, VAGUE_DISCLOSURE, isFakeExperience } from '../checks.js';
 
 const PROGRAMS = {
   coupang_partners: { id: 'coupang_partners', name: '쿠팡파트너스', kind: 'affiliate', needs_link: true, needs_disclosure: '필요', disclosure_template: '이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.', my_status: '사용 중' },
@@ -89,6 +89,12 @@ describe('제휴 링크·고지문', () => {
     assert.ok(codes(checkPost(base(), ctx({ programs: vague }))).e.includes('disclosure_vague'));
     assert.ok(!codes(checkPost(base(), ctx())).e.includes('disclosure_vague'), '공식 문구(제공받습니다)는 통과');
   });
+  test('1.1.2: 애매한 고지 표현을 더 넓게 잡음 (지급될·발생할 수 있습니다, 띄어쓰기 달라도)', () => {
+    for (const t of ['수수료가 지급될 수 있습니다', '수수료가 발생할 수 있습니다', '수수료를 받을 수 도 있어요', '수수료를 받을수도있어요', '소정의 수수료가 생길 수 있음']) {
+      assert.ok(VAGUE_DISCLOSURE.test(t), t);
+    }
+    for (const t of [PROGRAMS.coupang_partners.disclosure_template, PROGRAMS.toss_sharelink.disclosure_template]) assert.ok(!VAGUE_DISCLOSURE.test(t), '공식 문구는 통과: ' + t);
+  });
   test('쿠팡 상품 주소를 그대로 넣은 링크는 경고 (수익 집계 안 됨)', () => {
     const plain = { ...LINK, url: 'https://www.coupang.com/vp/products/12345' };
     const r = checkPost(base({ body: BODY + '\n[링크: 보기]' }), ctx({ links: [plain] }));
@@ -122,6 +128,15 @@ describe('미완성·경험·사실', () => {
     assert.ok(codes(r).e.includes('fake_experience'));
     const others = checkPost(base({ body: BODY + '\n후기를 보면 사람들이 써보니 따뜻하다고 해요.' }), ctx());
     assert.ok(!codes(others).e.includes('fake_experience'), '남의 후기를 전하는 문장은 괜찮음');
+  });
+  test('1.1.2: 안내·조건 문장은 써본 척이 아님 (정보 글을 막지 않음), 1인칭·겪은 일 표현이면 그대로 오류', () => {
+    for (const s of ['매장에서 직접 사용해 보면서 소음을 비교해 보세요.', '일주일 사용 중 고장이 나면 교환을 요청하세요.', '직접 써보면서 무게를 확인해 보는 게 좋아요.']) {
+      assert.ok(!isFakeExperience(s), s);
+      assert.ok(!codes(checkPost(base({ body: BODY + '\n' + s }), ctx())).e.includes('fake_experience'), s);
+    }
+    for (const s of ['제가 한 달 동안 써보니 따뜻했어요.', '한 달 동안 써보니 좋았는데, 이런 경우 고려해 보세요.', '저는 직접 사용해 보면서 비교해 보라고 권해요.']) {
+      assert.ok(isFakeExperience(s), s);
+    }
   });
   test('정확한 가격은 7일 안에 확인한 상품 가격이 없으면 오류, 가격대는 경고', () => {
     const r = checkPost(base({ body: BODY + '\n이 제품은 39,900원이에요.' }), ctx());

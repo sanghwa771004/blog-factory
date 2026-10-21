@@ -1,10 +1,10 @@
-// 글공장 앱 1.1.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 저장은 서버 API)
+// 글공장 앱 1.1.2 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.1.1';
-import * as L from './lib.js?v=1.1.1';
+} from './checks.js?v=1.1.2';
+import * as L from './lib.js?v=1.1.2';
 
-const APP_VER = '1.1.1';
+const APP_VER = '1.1.2';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -71,6 +71,11 @@ function toast(msg, ms = 2600) {
   t.textContent = msg; t.hidden = false;
   clearTimeout(toastT); toastT = setTimeout(() => { t.hidden = true; }, ms);
 }
+// 수익 모델·채널·조합·상품을 바꿨더니 '발행 준비 완료'였던 원고가 검사에서 걸려 되돌아간 경우 알려줌
+function noteDemoted(j) {
+  const n = j && Array.isArray(j.demoted_posts) ? j.demoted_posts.length : 0;
+  if (n) toast(`바꾼 정보 때문에 '발행 준비 완료'였던 원고 ${n}개가 다시 '검수 필요'로 돌아갔어. 검사를 다시 통과해야 해.`, 6000);
+}
 
 // 아래에서 올라오는 창
 let sheetOnClose = null;
@@ -123,6 +128,8 @@ const ERR = {
   bad_ref: '연결하려는 항목이 없어. 새로고침해줘.',
   duplicate: '이미 있는 항목이야.',
   bad_body: '보낸 내용을 읽지 못했어. 다시 해줘.',
+  update_app: '앱이 예전 버전이야. 앱을 닫았다가 다시 열어서 업데이트해줘.',
+  topic_used: '이 주제로 쓴 원고가 이미 있어.',
   server: '서버에서 문제가 생겼어. 잠시 뒤에 다시 해줘.',
 };
 function errText(e) {
@@ -417,7 +424,7 @@ function revenueKpis(tot) {
     kpi('확정 수익', wonOrNone(conf), tot.revenue_confirmed && tot.revenue_confirmed.n ? `기록 ${tot.revenue_confirmed.n}건` : null),
     kpi('지급액', wonOrNone(paid)),
     kpi('비용', wonOrNone(cost)),
-    kpi('확정 기준 순수익', wonOrNone(net.confirmed), net.confirmed == null ? null : '확정 수익 − 비용'),
+    kpi('확정 기준 순수익', wonOrNone(net.confirmed), net.confirmed == null ? null : (net.costMissing ? '비용 입력 없음 — 0원으로 계산' : '확정 수익 − 비용')),
   );
 }
 function trafficKpis(st) {
@@ -793,6 +800,14 @@ function copyPanel(p, r, links) {
   const ctx = { links, programs: M.prog };
   const disc = disclosureFor(p.program_ids, M.prog);
   const box = panel('블로그에 올리기');
+  // 고지문이 없거나 애매하면 복사 자체를 막음 (고지 없이 제휴·협찬 글이 나가지 않게)
+  const discBlock = disc.missing.length
+    ? `${disc.missing.map((x) => x.name).join(', ')} 고지문이 비어 있어서 복사를 막아뒀어. 설정 > 수익 모델에서 공식 문구를 넣어줘.`
+    : (disc.text && VAGUE_DISCLOSURE.test(disc.text) ? "고지문이 '수수료를 받을 수 있습니다'처럼 애매해서 복사를 막아뒀어. 설정 > 수익 모델에서 '…수수료를 제공받습니다'처럼 분명하게 고쳐줘." : '');
+  if (discBlock) {
+    box.append(h('p', { class: 'badbox' }, discBlock), h('div', { class: 'go' }, btn('수익 모델 설정 열기', 'sm ghost', () => go('settings/programs'))));
+    return box;
+  }
   if (r.errors.length) box.append(h('p', { class: 'notice' }, `고칠 것 ${r.errors.length}개가 남아 있어. 이대로 복사하면 그대로 올라가.`));
   box.append(h('div', { class: 'go' },
     btn('서식 그대로 복사', 'sm', (ev) => copyRich(L.exportHtml(p, ctx), L.exportPlain(p, ctx), ev.currentTarget)),
@@ -901,7 +916,7 @@ function productsPanel(p) {
   const box = panel(`상품 (${prods.length})`);
   if (ct && ct.minProducts) box.append(h('p', { class: 'hint' }, `${ct.label} 글은 상품을 ${ct.minProducts}개 이상 연결하는 게 좋아.`));
   for (const x of prods) {
-    box.append(productCard(x, [btn('고치기', 'sm ghost', () => productSheet(x)), btn('연결 빼기', 'sm ghost', async (ev) => { const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/products/${x.id}`, { method: 'DELETE' }), '연결을 뺐어'); if (j) await load(); })]));
+    box.append(productCard(x, [btn('고치기', 'sm ghost', () => productSheet(x)), btn('연결 빼기', 'sm ghost', async (ev) => { const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/products/${x.id}`, { method: 'DELETE' }), '연결을 뺐어'); if (j) { await load(); if (j.demoted) showError({ code: 'check_failed', errors: j.demoted }); } })]));
   }
   const others = S.products.filter((x) => !prods.includes(x));
   const pick = h('select', null, opt('', '저장된 상품에서 고르기'), others.map((x) => opt(x.id, x.name)));
@@ -940,7 +955,7 @@ function productSheet(x, attachTo) {
       if (!body.name) { toast('상품명을 넣어줘'); return; }
       if (!x && attachTo) body.attach_to = attachTo;
       const j = await run(ev.currentTarget, () => api(x ? '/products/' + x.id : '/products', { method: 'POST', body }), '저장했어');
-      if (j) { closeSheet(); await load(); }
+      if (j) { closeSheet(); await load(); noteDemoted(j); }
     }),
     x ? btn('상품 지우기', 'sm danger', async (ev) => { if (!confirmBox(ev.currentTarget, '정말 지울까?')) return; const j = await run(ev.currentTarget, () => api('/products/' + x.id, { method: 'DELETE' }), '지웠어'); if (j) { closeSheet(); await load(); } }) : null);
 }
@@ -1341,7 +1356,7 @@ function drawUpload() {
   box.append(h('p', { class: 'hint' }, '제휴사 리포트나 블로그 통계를 CSV나 엑셀(.xlsx)로 내려받아서 올려줘. 첫 번째 시트만 읽어.'), file);
   if (up.result) {
     const r = up.result;
-    box.append(h('p', { class: 'okbox' }, `올렸어: ${r.ok}줄 저장, ${r.dup}줄 중복이라 건너뜀, ${r.errors}줄 오류.`));
+    box.append(h('p', { class: 'okbox' }, `올렸어: ${r.ok}줄 저장${r.changed ? `, ${r.changed}줄은 새 숫자로 고침` : ''}, ${r.dup}줄 중복이라 건너뜀, ${r.errors}줄 오류.`));
   }
   if (!up.rows.length) return;
   const headers = up.rows[up.header] || [];
@@ -1364,6 +1379,7 @@ function drawUpload() {
   box.append(h('div', { class: 'kpis' }, kpi('저장할 줄', String(res.ok.length)), kpi('파일 안 중복', String(res.dupInFile)), kpi('오류 줄', String(res.errors.length)), kpi('글을 못 찾은 줄', String(res.unmatched.length))));
   if (res.errors.length) box.append(h('details', null, h('summary', null, `오류 ${res.errors.length}줄 보기`), h('ul', { class: 'checks', style: 'margin-top:8px' }, res.errors.slice(0, 30).map((e) => h('li', { class: 'e' }, `${e.line}번째 줄: ${e.msg}`)))));
   if (res.unmatched.length) box.append(h('p', { class: 'notice' }, `${res.unmatched.length}줄은 어느 글인지 못 찾았어 (${res.unmatched.slice(0, 8).join(', ')}번째 줄). 그대로 올리면 '글 연결 안 됨'으로 저장돼.`));
+  box.append(h('p', { class: 'hint' }, '같은 글·같은 기간·같은 수익 모델·채널 줄이 이미 있으면 새 숫자로 바꿔 (제휴사가 숫자를 고친 리포트를 다시 올려도 두 번 세지 않아). 예전 숫자는 \'올리기 취소\'로 되돌릴 수 있어. 한 파일 안에서 같은 글·같은 날짜 줄(상품·주문별 줄)은 더해서 한 줄로 저장하고, 모든 칸이 똑같은 줄만 \'파일 안 중복\'으로 빼.'));
   if (res.ok.length) {
     box.append(h('details', null, h('summary', null, '미리보기 (처음 8줄)'), h('div', { class: 'prev', style: 'margin-top:8px' }, res.ok.slice(0, 8).map((m) => metricRow({ ...m, source: 'csv', source_label: up.label })))));
   }
@@ -1391,11 +1407,11 @@ function importsPanel() {
   if (!list.length) inner.append(h('p', { class: 'hint' }, '아직 올린 파일이 없어.'));
   for (const i of list) {
     inner.append(h('div', { class: 'item' },
-      h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${i.source_label || i.filename}`), h('small', null, `${L.fmtTime(i.created_at)} · 저장 ${i.rows_ok} · 중복 ${i.rows_dup} · 오류 ${i.rows_err}${i.status === '취소' ? ' · 취소함' : ''}`)),
+      h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${i.source_label || i.filename}`), h('small', null, `${L.fmtTime(i.created_at)} · 저장 ${i.rows_ok}${i.rows_changed ? ` · 고침 ${i.rows_changed}` : ''} · 중복 ${i.rows_dup} · 오류 ${i.rows_err}${i.status === '취소' ? ' · 취소함' : ''}`)),
       i.status === '완료' ? h('div', { class: 'side' }, h('button', { type: 'button', class: 'copy', onclick: async (ev) => {
-        if (!confirmBox(ev.currentTarget, '이 파일로 넣은 숫자를 모두 지울까?')) return;
+        if (!confirmBox(ev.currentTarget, '이 파일로 넣은 숫자를 모두 지울까? (이 파일이 고친 줄은 예전 숫자로 돌아가)')) return;
         const j = await run(ev.currentTarget, () => api(`/imports/${i.id}/cancel`, { method: 'POST', body: {} }));
-        if (j) { toast(`${j.removed}줄을 지웠어`); S.stats = {}; S.postMetrics = {}; await load(); render(true); }
+        if (j) { toast(`${j.removed}줄을 지웠어${j.restored ? `, ${j.restored}줄은 예전 숫자로 되돌렸어` : ''}`); S.stats = {}; S.postMetrics = {}; await load(); render(true); }
       } }, '올리기 취소')) : null));
   }
   box.append(inner);
@@ -1528,7 +1544,7 @@ function programSheet(p) {
         data_source: f.data.value.trim(), commission_note: f.note.value.trim(), unverified: f.unv.value.trim(), policy_url: f.url.value.trim(), policy_checked_at: f.at.value || null };
       if (p) body.active = f.active.checked; else body.kind = f.kind.value;
       const j = await run(ev.currentTarget, () => api(p ? '/programs/' + p.id : '/programs', { method: 'POST', body }), '저장했어');
-      if (j) { closeSheet(); await load(); }
+      if (j) { closeSheet(); await load(); noteDemoted(j); }
     }));
 }
 function secChannels() {
@@ -1555,7 +1571,7 @@ function channelSheet(c) {
       const body = { name: f.name.value.trim(), max_chars: max, clickable_links: f.links.checked, html_paste: f.html.checked, notes: f.notes.value.trim() };
       if (c) body.active = f.active.checked; else body.kind = f.kind.value;
       const j = await run(ev.currentTarget, () => api(c ? '/channels/' + c.id : '/channels', { method: 'POST', body }), '저장했어');
-      if (j) { closeSheet(); await load(); }
+      if (j) { closeSheet(); await load(); noteDemoted(j); }
     }));
 }
 function secCompat() {
@@ -1581,7 +1597,7 @@ function compatSheet(p, c, v) {
     btn('저장', 'wide', async (ev) => {
       if (url.value.trim() && !L.safeUrl(url.value)) { toast('주소는 https://로 시작해야 해'); return; }
       const j = await run(ev.currentTarget, () => api('/compat', { method: 'POST', body: { program_id: p.id, channel_id: c.id, verdict: verdict.value, reason: reason.value.trim(), source_url: url.value.trim(), checked_at: at.value || todayS() } }), '저장했어');
-      if (j) { closeSheet(); await load(); }
+      if (j) { closeSheet(); await load(); noteDemoted(j); }
     }));
 }
 function secProducts() {

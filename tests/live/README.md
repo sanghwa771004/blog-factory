@@ -49,3 +49,26 @@ select id, status_code, left(content, 300) from net._http_response where id = <�
 select net.http_post('https://<ref>.supabase.co/functions/v1/blog-app/logout', body => '{}'::jsonb,
   headers => '{"Content-Type":"application/json","x-app-session":"<임시토큰>"}'::jsonb);
 ```
+
+## 5. 남는 행 없이 DB 함수만 확인하기 (1.1.2에서 씀)
+실서버 DB 함수는 `do $$ … $$` 블록 안에서 시험하고 **마지막에 일부러 오류를 내서 전부 되돌려(롤백)**. 결과는 그 오류 메시지에 담아서 봐.
+```sql
+do $$ declare res text := ''; begin
+  -- 시험할 것: 주제 만들기 → add_post 두 번(두 번째는 'topic already has a post'), 끝난 작업에 job_fail(무시돼야 함),
+  -- 검수 필요 원고에 fill_post(거부), import_metrics 새로/이름만 바꾼 같은 파일/고친 리포트 → import_cancel
+  ...
+  raise exception 'RESULT(롤백됨): %', res;   -- 여기서 위의 모든 변경이 취소됨
+end $$;
+```
+끝나고 표의 줄 수가 그대로인지(`select count(*) …`) 한 번 더 확인해.
+
+## 6. 1.1.2에서 더 한 API 점검
+| 요청 | 기대 결과 |
+|---|---|
+| 검사에 걸리는 '발행 준비 완료' 원고 → `stage=scheduled` / `stage=published` | 둘 다 409 check_failed, 상태 그대로 |
+| `POST /programs/{그 원고의 수익 모델}` (값은 그대로 다시 저장) | 200 + `demoted_posts`에 그 원고 → '검수 필요'로 |
+| `POST /imports` 같은 파일 → 이름만 바꿔서 → 숫자를 고쳐서 | ok·dup·changed 가 차례로 (2·0·0) → (0·2·0) → (0·0·2) |
+| `POST /imports/{고친 파일}/cancel` → `{처음 파일}/cancel` | restored 1 (예전 숫자로) → removed 1 |
+| `GET /export` | `counts` 가 DB 줄 수와 같음 |
+| 원고 요청 → `DELETE /posts/{id}` → `restore` → `retry` | 지우면 '작업 실패'·요청 취소, 되살려서 다시 요청하면 같은 요청이 다시 대기로 |
+| 30분 넘게 멈춘 작업(점검용으로 시작 시각을 31분 전으로) → `DELETE /jobs/{id}` → `retry` | 원고 '작업 실패' → 다시 대기로 |

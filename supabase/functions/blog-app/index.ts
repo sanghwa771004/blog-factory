@@ -1,11 +1,11 @@
-// 블로그 글공장 서버 API (1.1.1)
+// 블로그 글공장 서버 API (1.1.2)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
 
-const VERSION = "1.1.1";
+const VERSION = "1.1.2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 // 앱을 여는 주소(쉼표로 여러 개). 기본값은 GitHub Pages 주소
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "https://sanghwa771004.github.io")
@@ -254,9 +254,43 @@ async function runChecks(post: J) {
   const result = checkPost(post, { ...cat, links: links.data ?? [], products, today: kstToday() });
   return { result, disclosure: disclosureFor(post.program_ids as string[], cat.programs).text };
 }
+// PostgREST는 한 번에 최대 1000줄(Supabase 기본 설정)만 돌려줘서, 나눠서 끝까지 가져옴
+// deno-lint-ignore no-explicit-any
+async function fetchAll(table: string, order: [string, boolean][], build?: (q: any) => any): Promise<J[]> {
+  const out: J[] = [];
+  const size = 1000;
+  for (let from = 0; from < 200_000; from += size) {
+    // deno-lint-ignore no-explicit-any
+    let q: any = sb.from(table).select("*");
+    if (build) q = build(q);
+    for (const [col, asc] of order) q = q.order(col, { ascending: asc });
+    const { data, error } = await q.range(from, from + size - 1);
+    if (error) throw error;
+    out.push(...((data ?? []) as J[]));
+    if (!data || data.length < size) break;
+  }
+  return out;
+}
+// 수익 모델·채널·조합·상품이 바뀌면 '발행 준비 완료·예약' 원고를 다시 검사해서, 걸리면 '검수 필요'로 되돌림
+async function recheckReadyPosts(match: (p: J) => boolean): Promise<string[]> {
+  const { data, error } = await sb.from("posts").select("*").in("stage", ["ready", "scheduled"]).is("deleted_at", null).limit(500);
+  if (error) throw error;
+  const demoted: string[] = [];
+  for (const p of (data ?? []) as J[]) {
+    if (!match(p)) continue;
+    const { result } = await runChecks(p);
+    if (result.errors.length) {
+      const r = await sb.from("posts").update({ stage: "review" }).eq("id", p.id).in("stage", ["ready", "scheduled"]);
+      if (r.error) throw r.error;
+      demoted.push(String(p.id));
+    }
+  }
+  return demoted;
+}
 function rpcError(error: { message?: string; code?: string } | null): never {
   const m = String(error?.message ?? "");
   if (m.startsWith("incompatible:")) fail(400, "incompatible", { detail: m.replace("incompatible:", "").trim() });
+  if (/topic already has a post/.test(m)) fail(409, "topic_used");
   if (/not found/.test(m)) fail(404, "not_found");
   if (/cannot be|not pending|not failed|not waiting/.test(m)) fail(409, "bad_state");
   if (/unknown channel|is required/.test(m)) fail(400, "bad_field");
@@ -292,7 +326,7 @@ type Ctx = { req: Request; auth: Auth; params: string[]; url: URL };
 
 async function getState(c: Ctx) {
   const since30 = new Date(Date.now() - 30 * 86400e3).toISOString();
-  const [posts, trash, jobs, settings, runs, channels, programs, compat, topics, products, pp, links, imports] = await Promise.all([
+  const [posts, trash, jobs, settings, runs, channels, programs, compat, topics, imports] = await Promise.all([
     sb.from("posts").select("*").is("deleted_at", null).order("created_at", { ascending: false }).limit(500),
     sb.from("posts").select("id, titles, keyword, deleted_at").not("deleted_at", "is", null).gte("deleted_at", since30).order("deleted_at", { ascending: false }).limit(50),
     sb.from("requests").select("*").order("created_at", { ascending: false }).limit(100),
@@ -302,17 +336,20 @@ async function getState(c: Ctx) {
     sb.from("programs").select("*").order("sort"),
     sb.from("program_channels").select("*"),
     sb.from("topics").select("*").order("created_at", { ascending: false }).limit(300),
-    sb.from("products").select("*").order("updated_at", { ascending: false }).limit(1000),
-    sb.from("post_products").select("*").order("sort"),
-    sb.from("links").select("*").order("sort"),
-    sb.from("imports").select("id, filename, source_label, program_id, channel_id, rows_total, rows_ok, rows_dup, rows_err, errors, status, created_at, cancelled_at").order("created_at", { ascending: false }).limit(30),
+    sb.from("imports").select("id, filename, source_label, program_id, channel_id, rows_total, rows_ok, rows_dup, rows_changed, rows_err, errors, status, created_at, cancelled_at").order("created_at", { ascending: false }).limit(30),
   ]);
-  for (const r of [posts, trash, jobs, settings, runs, channels, programs, compat, topics, products, pp, links, imports]) if (r.error) throw r.error;
+  for (const r of [posts, trash, jobs, settings, runs, channels, programs, compat, topics, imports]) if (r.error) throw r.error;
+  // 1000줄이 넘어도 빠지지 않게 끝까지 (링크·상품이 잘리면 '링크 없음' 같은 잘못된 오류가 뜸)
+  const [products, pp, links] = await Promise.all([
+    fetchAll("products", [["updated_at", false], ["id", true]]),
+    fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
+    fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
+  ]);
   return json({
     version: VERSION, now: nowIso(), today: kstToday(), auth: c.auth.kind,
     posts: posts.data, trash: trash.data, jobs: jobs.data, settings: settings.data, runs: runs.data,
-    channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products: products.data,
-    post_products: pp.data, links: links.data, imports: imports.data,
+    channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products,
+    post_products: pp, links, imports: imports.data,
     requests: jobs.data, lastRun: runs.data?.[0] ?? null, // 예전 화면 호환
   });
 }
@@ -325,14 +362,22 @@ async function getStats(c: Ctx) {
   return json({ stats: data });
 }
 
+// 백업: 표마다 1000줄씩 나눠서 끝까지 담고, 표마다 줄 수를 같이 적음
+const EXPORT_TABLES: [string, [string, boolean][]][] = [
+  ["posts", [["id", true]]], ["requests", [["id", true]]], ["settings", [["id", true]]], ["runs", [["id", true]]],
+  ["channels", [["id", true]]], ["programs", [["id", true]]], ["program_channels", [["program_id", true], ["channel_id", true]]],
+  ["topics", [["id", true]]], ["products", [["id", true]]], ["post_products", [["post_id", true], ["product_id", true]]],
+  ["links", [["id", true]]], ["metrics", [["id", true]]], ["imports", [["id", true]]],
+];
 async function getExport(_c: Ctx) {
-  const tables = ["posts", "requests", "settings", "runs", "channels", "programs", "program_channels", "topics", "products", "post_products", "links", "metrics", "imports"];
   const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아." };
-  for (const t of tables) {
-    const { data, error } = await sb.from(t).select("*").limit(50000);
-    if (error) throw error;
-    out[t] = data;
+  const counts: J = {};
+  for (const [t, order] of EXPORT_TABLES) {
+    const rows = await fetchAll(t, order);
+    out[t] = rows;
+    counts[t] = rows.length;
   }
+  out.counts = counts;
   return json(out);
 }
 
@@ -493,26 +538,22 @@ async function patchPost(c: Ctx) {
   const stage: string | null = "stage" in b ? str(b.stage, 20) : null;
 
   if (!stage && "status" in b && c.auth.kind === "legacy") {
-    // 예전 화면의 '발행 완료' 체크 — 이미 바깥에서 올린 글을 기록만 함
-    if (b.status === "published" && !LIVE.includes(String(post.stage))) {
-      patch.stage = "published";
-      if (!merged.published_on) patch.published_on = kstToday();
-    } else if (b.status === "planned" && LIVE.includes(String(post.stage))) {
-      patch.stage = "review";
-    }
+    // 1.0 화면의 '발행 완료' 체크는 상태 규칙·발행 전 검사를 건너뛰어서 더는 받지 않음 (앱을 다시 열면 새 화면으로 바뀜)
+    fail(409, "update_app");
   } else if (stage && stage !== post.stage) {
     const allowed = (USER_TRANSITIONS as Record<string, string[]>)[String(post.stage)] || [];
     if (!allowed.includes(stage)) fail(409, "bad_transition", { from: post.stage, to: stage });
     if (stage === "queued") fail(400, "use_retry");
-    if (stage === "ready") {
+    if (stage === "scheduled" && !merged.publish_date) fail(400, "need_publish_date");
+    if (stage === "published" && (!merged.blog_url || !merged.published_on)) fail(400, "need_published_info");
+    // 발행 준비 완료·예약·게시 완료로 갈 때는 언제나 다시 검사 (그사이 정책·조합·상품 정보나 가격 확인일이 바뀌었을 수 있음)
+    if (stage === "ready" || stage === "scheduled" || (stage === "published" && !LIVE.includes(String(post.stage)))) {
       const { result, disclosure } = await runChecks(merged);
       if (result.errors.length) fail(409, "check_failed", { errors: result.errors });
       patch.disclosure_text = disclosure;
       patch.disclosure_at = nowIso();
       checked = true;
     }
-    if (stage === "scheduled" && !merged.publish_date) fail(400, "need_publish_date");
-    if (stage === "published" && (!merged.blog_url || !merged.published_on)) fail(400, "need_published_info");
     patch.stage = stage;
   }
 
@@ -538,6 +579,9 @@ async function deletePost(c: Ctx) {
   if (error) throw error;
   await sb.from("requests").update({ status: "cancelled", done_at: nowIso(), note: "글을 지워서 취소" })
     .eq("post_id", id).eq("status", "pending").is("started_at", null);
+  // 기다리던 원고 요청이 취소됐으니 '작업 실패'로 표시 → 휴지통에서 되살린 뒤 '다시 요청'할 수 있음
+  await sb.from("posts").update({ stage: "failed", error: "글을 지워서 요청을 취소했어. 되살렸으면 '다시 요청'을 눌러줘." })
+    .eq("id", id).eq("stage", "queued");
   return json({ ok: true });
 }
 async function restorePost(c: Ctx) {
@@ -598,7 +642,12 @@ async function patchProduct(c: Ctx) {
   const { data, error } = await sb.from("products").update(fields).eq("id", c.params[0]).select().maybeSingle();
   if (error) throw error;
   if (!data) fail(404, "not_found");
-  return json({ product: data });
+  // 가격·확인일·출처가 바뀌면 이 상품이 연결된 발행 준비 원고를 다시 검사
+  const { data: used, error: e2 } = await sb.from("post_products").select("post_id").eq("product_id", c.params[0]);
+  if (e2) throw e2;
+  const ids = new Set(((used ?? []) as J[]).map((x) => String(x.post_id)));
+  const demoted_posts = ids.size ? await recheckReadyPosts((p) => ids.has(String(p.id))) : [];
+  return json({ product: data, demoted_posts });
 }
 async function deleteProduct(c: Ctx) {
   const { count } = await sb.from("post_products").select("post_id", { count: "exact", head: true }).eq("product_id", c.params[0]);
@@ -620,7 +669,7 @@ async function attachProduct(c: Ctx) {
 async function detachProduct(c: Ctx) {
   const { error } = await sb.from("post_products").delete().eq("post_id", c.params[0]).eq("product_id", c.params[1]);
   if (error) throw error;
-  return json({ ok: true });
+  return json({ ok: true, demoted: await recheckAfterLinkChange(c.params[0]) });
 }
 
 // 링크 (바뀌면 '발행 준비 완료' 글은 다시 검사)
@@ -871,18 +920,13 @@ async function createImport(c: Ctx) {
     await sb.from("imports").delete().eq("id", ins.id);
     throw e2;
   }
-  return json({ import_id: ins.id, ok: Number((data as J).ok), dup: Number((data as J).dup) + clientDup, errors: clientErrCount });
+  return json({ import_id: ins.id, ok: Number((data as J).ok), changed: Number((data as J).changed ?? 0), dup: Number((data as J).dup) + clientDup, errors: clientErrCount });
 }
+// 올리기 취소: 이 파일이 새로 넣은 줄은 지우고, 이 파일이 숫자를 고친 줄은 예전 숫자로 되돌림 (DB 함수 하나로 한 번에)
 async function cancelImport(c: Ctx) {
-  const { data: imp, error } = await sb.from("imports").select("id, status").eq("id", c.params[0]).maybeSingle();
-  if (error) throw error;
-  if (!imp) fail(404, "not_found");
-  if (imp.status === "취소") return json({ ok: true, removed: 0 });
-  const { data: del, error: e2 } = await sb.from("metrics").delete().eq("import_id", imp.id).select("id");
-  if (e2) throw e2;
-  const { error: e3 } = await sb.from("imports").update({ status: "취소", cancelled_at: nowIso() }).eq("id", imp.id);
-  if (e3) throw e3;
-  return json({ ok: true, removed: (del ?? []).length });
+  const { data, error } = await sb.rpc("import_cancel", { p_import: c.params[0] });
+  if (error) rpcError(error);
+  return json({ ok: true, removed: Number((data as J)?.removed ?? 0), restored: Number((data as J)?.restored ?? 0) });
 }
 
 // 설정·카탈로그
@@ -935,7 +979,11 @@ async function patchProgram(c: Ctx) {
   const { data, error } = await sb.from("programs").update(p).eq("id", c.params[0]).select().maybeSingle();
   if (error) throw error;
   if (!data) fail(404, "not_found");
-  return json({ program: data });
+  // 고지문·고지 필요·링크 필요·사용 여부가 바뀌면 이 수익 모델을 쓰는 발행 준비 원고를 다시 검사
+  const pid = c.params[0];
+  const demoted_posts = ["disclosure_template", "needs_disclosure", "needs_link", "active"].some((k) => k in p)
+    ? await recheckReadyPosts((x) => ((x.program_ids as string[]) ?? []).includes(pid)) : [];
+  return json({ program: data, demoted_posts });
 }
 async function createProgram(c: Ctx) {
   const b = await readJson(c.req, 20_000);
@@ -977,7 +1025,10 @@ async function patchChannel(c: Ctx) {
   const { data, error } = await sb.from("channels").update(p).eq("id", c.params[0]).select().maybeSingle();
   if (error) throw error;
   if (!data) fail(404, "not_found");
-  return json({ channel: data });
+  const chId = c.params[0];
+  const demoted_posts = ["max_chars", "clickable_links", "active"].some((k) => k in p)
+    ? await recheckReadyPosts((x) => x.channel_id === chId) : [];
+  return json({ channel: data, demoted_posts });
 }
 async function setCompat(c: Ctx) {
   const b = await readJson(c.req, 20_000);
@@ -991,7 +1042,9 @@ async function setCompat(c: Ctx) {
   };
   const { data, error } = await sb.from("program_channels").upsert(row, { onConflict: "program_id,channel_id" }).select().single();
   if (error) throw error;
-  return json({ compat: data });
+  // 판정이 바뀌면 그 조합을 쓰는 발행 준비 원고를 다시 검사 ('불가'가 되면 검수 필요로 되돌아감)
+  const demoted_posts = await recheckReadyPosts((x) => x.channel_id === channel_id && ((x.program_ids as string[]) ?? []).includes(program_id));
+  return json({ compat: data, demoted_posts });
 }
 
 // ───────── 경로표 ─────────
