@@ -9,8 +9,9 @@
 - **주제**: AI 주제 추천(근거·신뢰도 포함), 점수 가중치, 채택·보류·제외
 - **수익**: 기간별 요약(데이터 없음과 0 구분), 글·채널·수익 모델·카테고리별, 직접 입력, CSV·엑셀 올리기(미리보기·열 맞추기·중복 건너뛰기·고친 리포트는 새 숫자로 바꾸기·올리기 취소)
 - **설정**: 자동 글쓰기, 수익 모델·채널 정책 정보, 조합표, 상품, 기기·접속 코드, 백업, 휴지통, 사용 방법
+- **이미지 스튜디오 (1.2.0)**: 원고의 `[이미지: 설명]` 자리마다 AI 이미지 만들기(OpenAI)·실제 사진 찾기(Pexels)·파일 올리기 → 미리보기·자르기 → 검수 → 내려받기, 카드뉴스 PNG, 이미지 보관함, 생성 비용(수익 통계와 따로) — 설정·키·비용 한도는 `docs/image-studio.md`
 
-앱은 블로그에 **대신 게시하지 않아**. 네이버 블로그·티스토리는 글쓰기 API가 없어서 복사해서 붙여넣는 방식이야. 제휴사 실적도 **자동으로 가져오지 않아** (직접 입력이나 파일).
+앱은 블로그에 **대신 게시하지 않아** (이미지도 직접 올려). 네이버 블로그·티스토리는 글쓰기 API가 없어서 복사해서 붙여넣는 방식이야. 제휴사 실적도 **자동으로 가져오지 않아** (직접 입력이나 파일).
 
 ## 구조
 
@@ -19,8 +20,12 @@
 | 앱 화면 | `index.html`, `app.css`, `app.js` (GitHub Pages) |
 | 원고 규칙(발행 전 검사) | `checks.js` — 앱과 서버가 같은 파일을 씀 |
 | 계산 도구(내보내기·CSV·엑셀·통계·추천) | `lib.js` |
-| 서버 API | `supabase/functions/blog-app` (Supabase Edge Function, `index.ts` + `checks.js`) |
-| DB 변경 기록 | `supabase/migrations/001~011` (표를 지우거나 새로 만들지 않고 더하기만) |
+| 이미지 스튜디오 화면 | `studio.js` (사진 자리·만들기·찾기·올리기·미리보기·내려받기·보관함·설정·비용), `cards.js` (카드뉴스 그리기) |
+| 이미지 규칙 | `images.js` — 사진 자리 찾기·용도/비율·프롬프트·위험 요청 검사·비용 계산·파일 검사. 앱과 서버가 같은 파일을 씀 |
+| 서버 API | `supabase/functions/blog-app` (Supabase Edge Function, `index.ts` + `checks.js` + `images.js` + `image_service.js`) |
+| DB 변경 기록 | `supabase/migrations/001~012` (표를 지우거나 새로 만들지 않고 더하기만. 012 = 이미지 스튜디오) |
+| 이미지 스튜디오 안내 (키·비용 한도·사용법) | `docs/image-studio.md` |
+| 1.2.0 보고서·테스트 | `docs/REPORT-1.2.0.md`, `docs/testing-1.2.0.md` |
 | 자동 작가 지시문 | `docs/auto-writer-prompt.md` (Claude 예약 작업, 하루 세 번) |
 | Claude 안 글공장 (바로 쓰기·주제 추천·요청 바로 처리) | `claude-artifact/blog-factory.html` (claude.ai 아티팩트 원본 — 고치면 Claude에서 같은 주소로 다시 게시) |
 | 최종 완료 보고서 | `docs/REPORT-2026-10-21.md` |
@@ -49,5 +54,5 @@ python3 tests/artifact/run_check.py /tmp  # Claude 안 글공장 화면·흐름 
 2. 커밋하고 `main`과 `gh-pages` 둘 다 푸시 (`git push origin main main:gh-pages`)
 3. 1~2분 뒤 GitHub Pages에 반영되고, 앱을 다시 열면 자동으로 새 버전이 떠
 
-서버를 바꿨으면 `supabase/functions/blog-app/index.ts`와 저장소의 `checks.js`를 같이 Edge Function으로 올려줘 (`verify_jwt` 끔 — 자체 로그인 사용).
+서버를 바꿨으면 `supabase/functions/blog-app/`의 `index.ts`·`checks.js`·`images.js`·`image_service.js`를 같이 Edge Function으로 올려줘 (`verify_jwt` 끔 — 자체 로그인 사용). `checks.js`·`images.js`는 저장소 맨 위 파일과 글자 하나까지 같아야 해 (테스트가 확인함).
 아이콘은 `python3 tools/make_icons.py .`로 다시 만들 수 있어.

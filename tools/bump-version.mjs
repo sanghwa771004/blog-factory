@@ -16,11 +16,12 @@ const notes = noteParts.join(' ').trim();
 const edits = [
   ['index.html', [[/(app\.(?:css|js)\?v=)\d+\.\d+\.\d+/g, `$1${ver}`]]],
   ['app.js', [
-    [/(\.\/(?:checks|lib)\.js\?v=)\d+\.\d+\.\d+/g, `$1${ver}`],
+    [/(\.\/(?:checks|lib|images|studio)\.js\?v=)\d+\.\d+\.\d+/g, `$1${ver}`],
     [/^const APP_VER = '\d+\.\d+\.\d+';/m, `const APP_VER = '${ver}';`],
     [/^\/\/ 글공장 앱 \d+\.\d+\.\d+/m, `// 글공장 앱 ${ver}`],
   ]],
   ['lib.js', [[/(\.\/checks\.js\?v=)\d+\.\d+\.\d+/g, `$1${ver}`]]],
+  ['studio.js', [[/(\.\/(?:images|cards)\.js\?v=)\d+\.\d+\.\d+/g, `$1${ver}`]]],
   ['supabase/functions/blog-app/index.ts', [
     [/^const VERSION = "\d+\.\d+\.\d+";/m, `const VERSION = "${ver}";`],
     [/^(\/\/ 블로그 글공장 서버 API \()\d+\.\d+\.\d+\)/m, `$1${ver})`],

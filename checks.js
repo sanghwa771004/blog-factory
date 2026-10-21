@@ -70,7 +70,8 @@ export function parseBody(md) {
     flushList(); flushTbl();
     if (!l) continue;
     if (/^#{1,4}\s/.test(l)) blocks.push({ t: 'h', text: l.replace(/^#+\s/, '') });
-    else if (/^\[이미지/.test(l)) blocks.push({ t: 'img', text: l.replace(/^\[이미지:?\s*|\]$/g, '') });
+    // full: 줄 전체가 [이미지: …] 인 '사진 자리' (images.js 의 parseSlots·countImg 와 같은 기준 → 이미지 연결 순서가 맞음)
+    else if (/^\[이미지/.test(l)) blocks.push({ t: 'img', text: l.replace(/^\[이미지:?\s*|\]$/g, ''), full: /^\[이미지[^\]]*\]$/.test(l) });
     else if (/^\[링크/.test(l)) blocks.push({ t: 'cta', text: l.replace(/^\[링크\s*\d*\s*:?\s*|\]$/g, '') });
     else blocks.push({ t: 'p', text: l.replace(/^>\s?/, '') });
   }
@@ -209,7 +210,7 @@ export function checkPost(post, ctx = {}) {
   const tableUnknown = (body.match(/확인 필요/g) || []).length;
   if (tableUnknown) W('table_unfilled', `본문에 '확인 필요'가 ${tableUnknown}곳 있어. 독자에게는 미완성으로 보여.`, '상품 정보를 확인해서 채우거나 그 칸을 빼줘.');
   const img = countImg(body);
-  if (img) T('image_placeholders', `사진 자리 ${img}곳: 블로그에 붙여넣은 뒤 직접 찍은 사진을 넣어줘.`);
+  if (img) T('image_placeholders', `사진 자리 ${img}곳: 원고 아래 '이미지'에서 사진을 만들거나 찾거나 올려서 연결하고, 내려받아 블로그에 넣어줘.`);
 
   // 4) 경험
   if (ctype && ctype.needsExperience && !hasExperience) {

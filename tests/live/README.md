@@ -72,3 +72,24 @@ end $$;
 | `GET /export` | `counts` 가 DB 줄 수와 같음 |
 | 원고 요청 → `DELETE /posts/{id}` → `restore` → `retry` | 지우면 '작업 실패'·요청 취소, 되살려서 다시 요청하면 같은 요청이 다시 대기로 |
 | 30분 넘게 멈춘 작업(점검용으로 시작 시각을 31분 전으로) → `DELETE /jobs/{id}` → `retry` | 원고 '작업 실패' → 다시 대기로 |
+
+## 7. 1.2.0 이미지 스튜디오 점검 (OpenAI·Pexels 키 없이)
+진짜 OpenAI·Pexels를 부르지 않고 확인할 수 있는 것만 해. 쓰기 점검은 `[테스트]` 표시를 붙이고 끝나면 정리해.
+| 요청 | 기대 결과 |
+|---|---|
+| `GET /ping` | `version` = 1.2.0 |
+| `GET /images/config` · `GET /images` · `POST /images/generate` (세션 없음) | 모두 401 |
+| `GET /images/config` (임시 세션) | `keys.openai`·`keys.pexels`가 키 넣은 상태와 같음, 키 값은 응답 어디에도 없음, 기본 설정(모델·품질·하루 5장·한 달 2달러) |
+| `POST /images/generate` (키 없음, 실제 모델) | 503 `openai_key_missing`, 생성 기록 안 생김 |
+| `GET /stock/search?q=청소기` (키 없음) | 503 `pexels_key_missing`, 호출 기록 안 생김 |
+| `POST /images/upload` JSON(`b64`=작은 JPEG, `rights:true`, `description:"[테스트]"`) | 200, `image.url`이 서명 주소(`/object/sign/post-images/…`), `bytes`·`width`·`height`·`sha256` 채워짐 |
+| 같은 파일 다시 올리기 | `reused: true` (파일을 또 저장하지 않음) |
+| 서명 주소로 받기 (Origin=앱 주소) / 서명 없는 공개 주소로 받기 | 200 이미지 + 허용 머리글 / 400·404 (비공개) |
+| 이름만 바꾼 가짜 파일(`b64`=HTML 글자, `mime=image/jpeg`) | 400 `bad_image` (`reason` 있음), 저장 안 됨 |
+| `rights` 없이 올리기 | 400 `rights_required` |
+| `POST /images/{id}` review_status=사용 가능 | 200 |
+| (점검용 가짜 모델) 설정 `image_gen_model=gf-test-fake` → `POST /images/generate` → `GET /images/generations/{id}` | 202 → '성공', 비용 0, 회색 시험 이미지, OpenAI는 안 부름 → 끝나면 모델 이름을 원래대로 |
+| 쓰는 이미지 `DELETE /images/{id}` / 연결을 뺀 뒤 다시 | 409 `image_in_use` / 200 `file_removed: true` |
+| `GET /stats` | `image_costs` 따로 있음, 기존 숫자는 그대로 |
+| `GET /export` | 새 표 4개(`post_images`·`post_image_slots`·`image_generations`·`post_card_decks`) 줄 수가 DB와 같음 |
+DB 함수(자리 연결·맞바꾸기·옮기기·지우기 거절)는 5번처럼 `do $$ … raise exception … $$`로 실서버 DB 안에서 시험하고 되돌려.

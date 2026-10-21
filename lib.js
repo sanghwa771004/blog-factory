@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.1.2';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.2.0';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -33,6 +33,53 @@ export const pct = (r) => (r == null ? '' : `${(r * 100).toFixed(r < 0.1 ? 2 : 1
 
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 export const safeUrl = (u) => { u = String(u || '').trim(); return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : ''; };
+// 미리보기에 띄울 이미지 주소: https(서명 주소)·blob(이 기기에서 만든 것)·같은 곳(테스트)만
+export const safeImgUrl = (u) => { u = String(u || ''); return /^(https:\/\/|blob:|\/|http:\/\/127\.0\.0\.1[:/])[^\s"'<>]*$/i.test(u) ? u : ''; };
+
+// ───────── ZIP 만들기 (압축 없이 묶기만 — 사진은 이미 압축돼 있음) ─────────
+// files: [{ name, bytes: Uint8Array }] → ZIP 파일 바이트. 한글 파일 이름은 UTF-8 표시(0x0800)
+const CRC_TABLE = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+export function crc32(b) { let c = 0xffffffff; for (let i = 0; i < b.length; i++) c = CRC_TABLE[(c ^ b[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+export function uniqueNames(names) {
+  const seen = new Map();
+  return names.map((n) => {
+    const k = n.toLowerCase();
+    const c = (seen.get(k) || 0) + 1;
+    seen.set(k, c);
+    return c === 1 ? n : n.replace(/(\.[a-z0-9]+)?$/i, (ext) => `-${c}${ext}`);
+  });
+}
+export function makeZip(files, date = new Date()) {
+  const enc = new TextEncoder();
+  const time = ((date.getHours() << 11) | (date.getMinutes() << 5) | (date.getSeconds() >> 1)) & 0xffff;
+  const day = ((Math.max(0, date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate()) & 0xffff;
+  const names = uniqueNames(files.map((f) => String(f.name || 'file').replace(/[\\/:*?"<>|]+/g, '-')));
+  const parts = [], central = [];
+  let offset = 0;
+  files.forEach((f, i) => {
+    const name = enc.encode(names[i]);
+    const data = f.bytes instanceof Uint8Array ? f.bytes : new Uint8Array(f.bytes);
+    const crc = crc32(data);
+    const lh = new Uint8Array(30 + name.length), v = new DataView(lh.buffer);
+    v.setUint32(0, 0x04034b50, true); v.setUint16(4, 20, true); v.setUint16(6, 0x0800, true); v.setUint16(8, 0, true);
+    v.setUint16(10, time, true); v.setUint16(12, day, true); v.setUint32(14, crc, true); v.setUint32(18, data.length, true); v.setUint32(22, data.length, true);
+    v.setUint16(26, name.length, true); v.setUint16(28, 0, true); lh.set(name, 30);
+    const ch = new Uint8Array(46 + name.length), w = new DataView(ch.buffer);
+    w.setUint32(0, 0x02014b50, true); w.setUint16(4, 20, true); w.setUint16(6, 20, true); w.setUint16(8, 0x0800, true); w.setUint16(10, 0, true);
+    w.setUint16(12, time, true); w.setUint16(14, day, true); w.setUint32(16, crc, true); w.setUint32(20, data.length, true); w.setUint32(24, data.length, true);
+    w.setUint16(28, name.length, true); w.setUint32(42, offset, true); ch.set(name, 46);
+    parts.push(lh, data); central.push(ch);
+    offset += lh.length + data.length;
+  });
+  const cdSize = central.reduce((a, c) => a + c.length, 0);
+  const end = new Uint8Array(22), e = new DataView(end.buffer);
+  e.setUint32(0, 0x06054b50, true); e.setUint16(8, files.length, true); e.setUint16(10, files.length, true); e.setUint32(12, cdSize, true); e.setUint32(16, offset, true);
+  const all = [...parts, ...central, end];
+  const out = new Uint8Array(all.reduce((a, x) => a + x.length, 0));
+  let o = 0;
+  for (const x of all) { out.set(x, o); o += x.length; }
+  return out;
+}
 
 // ───────── 원고 내보내기 ─────────
 const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1');
@@ -48,14 +95,21 @@ export function linkForSlot(links, i) {
   return ls[Math.min(i, ls.length - 1)];
 }
 
-export function viewHtml(post, links) {
-  let slot = 0;
+// imgs: 사진 자리 순서(줄 전체가 [이미지: …] 인 자리)대로 연결된 이미지 [{ url, alt, label, caption, fileName }] (없으면 null)
+const imgLabel = (n, b) => `사진 ${n}${b.text ? ' · ' + b.text : ''}`;
+export function viewHtml(post, links, imgs) {
+  let slot = 0, pic = 0;
   return parseBody(post.body).map((b) => {
     if (b.t === 'h') return `<h2>${inlineHtml(b.text, 'view')}</h2>`;
     if (b.t === 'p') return `<p>${inlineHtml(b.text, 'view')}</p>`;
     if (b.t === 'ul') return `<ul>${b.items.map((i) => `<li>${inlineHtml(i, 'view')}</li>`).join('')}</ul>`;
     if (b.t === 'table') return `<div class="tblwrap"><table>${b.rows.map((r, ri) => `<tr>${r.map((c) => (ri ? `<td>${inlineHtml(c, 'view')}</td>` : `<th>${inlineHtml(c, 'view')}</th>`)).join('')}</tr>`).join('')}</table></div>`;
-    if (b.t === 'img') return `<div class="img">📷 ${esc(b.text)}</div>`;
+    if (b.t === 'img') {
+      if (!b.full) return `<div class="img">📷 ${esc(b.text)}</div>`;
+      const n = ++pic, im = imgs && imgs[n - 1];
+      if (im && safeImgUrl(im.url)) return `<figure class="img has"><img src="${esc(im.url)}" alt="${esc(im.alt || b.text)}" loading="lazy" decoding="async"><figcaption>${esc(imgLabel(n, b))}${im.label ? ' · ' + esc(im.label) : ''}</figcaption></figure>`;
+      return `<div class="img">📷 ${esc(imgLabel(n, b))}${im ? ' · 이미지 연결됨' : ''}</div>`;
+    }
     if (b.t === 'cta') {
       const l = linkForSlot(links, slot++);
       return `<div class="cta"><span>🔗 ${esc(b.text || (l && l.cta) || '최저가 확인하기')}</span><small>${l ? esc(l.url) : '제휴 링크를 넣으면 여기에 걸려'}</small></div>`;
@@ -64,7 +118,7 @@ export function viewHtml(post, links) {
   }).join('');
 }
 
-export function exportHtml(post, { links, programs } = {}) {
+export function exportHtml(post, { links, programs, images } = {}) {
   const disc = disclosureFor(post.program_ids, programs).text;
   const out = [];
   const S = {
@@ -74,13 +128,21 @@ export function exportHtml(post, { links, programs } = {}) {
     td: 'border:1px solid #d9d9d9;padding:8px 10px;text-align:left;',
   };
   if (disc) out.push(`<p style="font-size:.9em;color:#555;background:#f4f4f4;padding:10px 12px;border-radius:6px;margin:0 0 1.4em;">${esc(disc).replace(/\n/g, '<br>')}</p>`);
-  let slot = 0;
+  let slot = 0, pic = 0;
   for (const b of parseBody(post.body)) {
     if (b.t === 'h') out.push(`<h2 style="${S.h}">${inlineHtml(b.text, 'export')}</h2>`);
     else if (b.t === 'p') out.push(`<p style="${S.p}">${inlineHtml(b.text, 'export')}</p>`);
     else if (b.t === 'ul') out.push(`<ul style="margin:0 0 1em;padding-left:1.4em;line-height:1.8;">${b.items.map((i) => `<li>${inlineHtml(i, 'export')}</li>`).join('')}</ul>`);
     else if (b.t === 'table') out.push(`<table style="border-collapse:collapse;width:100%;margin:0 0 1.2em;font-size:.95em;">${b.rows.map((r, ri) => `<tr>${r.map((c) => `<${ri ? 'td' : 'th'} style="${ri ? S.td : S.th}">${inlineHtml(c, 'export')}</${ri ? 'td' : 'th'}>`).join('')}</tr>`).join('')}</table>`);
-    else if (b.t === 'img') out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 ${esc(b.text)} (여기에 사진 넣기)</p>`);
+    else if (b.t === 'img') {
+      const im = b.full ? images && images[pic] : null;
+      const n = b.full ? ++pic : 0;
+      if (im && im.fileName) {
+        // 앱이 블로그에 사진을 대신 올리지 않음 → 내려받은 파일 이름을 적어 두고, 붙여넣은 뒤 그 자리에 직접 넣음
+        out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 사진 ${n}: 내려받은 「${esc(im.fileName)}」을 여기에 넣어줘<br><small>${esc(b.text)}</small></p>`);
+        if (im.caption) out.push(`<p style="text-align:center;color:#777;font-size:.85em;margin:-.6em 0 1.2em;">${esc(im.caption)}</p>`);
+      } else out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 ${n ? '사진 ' + n + ': ' : ''}${esc(b.text)} (여기에 사진 넣기)</p>`);
+    }
     else if (b.t === 'cta') {
       const l = linkForSlot(links, slot++);
       const label = b.text || (l && l.cta) || '최저가 확인하기';
@@ -92,17 +154,21 @@ export function exportHtml(post, { links, programs } = {}) {
   return out.join('\n');
 }
 
-export function exportPlain(post, { links, programs } = {}) {
+export function exportPlain(post, { links, programs, images } = {}) {
   const disc = disclosureFor(post.program_ids, programs).text;
   const lines = [];
   if (disc) lines.push(disc, '');
-  let slot = 0;
+  let slot = 0, pic = 0;
   for (const b of parseBody(post.body)) {
     if (b.t === 'h') lines.push('', '■ ' + stripMd(b.text));
     else if (b.t === 'p') lines.push(stripMd(b.text));
     else if (b.t === 'ul') b.items.forEach((i) => lines.push('· ' + stripMd(i)));
     else if (b.t === 'table') b.rows.forEach((r) => lines.push(r.map(stripMd).join(' | ')));
-    else if (b.t === 'img') lines.push('(사진: ' + b.text + ')');
+    else if (b.t === 'img') {
+      const im = b.full ? images && images[pic] : null;
+      const n = b.full ? ++pic : 0;
+      if (im && im.fileName) { lines.push(`(사진 ${n}: ${im.fileName} — ${b.text})`); if (im.caption) lines.push(im.caption); } else lines.push('(사진' + (n ? ' ' + n : '') + ': ' + b.text + ')');
+    }
     else if (b.t === 'cta') {
       const l = linkForSlot(links, slot++);
       lines.push('👉 ' + (b.text || (l && l.cta) || '최저가 확인하기') + (l ? '\n' + l.url : ''));

@@ -1,4 +1,4 @@
-# 보안 점검 (1.1.2, 2026-10-21)
+# 보안 점검 (1.1.2 → 1.2.0, 2026-10-22)
 
 | 항목 | 지금 상태 | 근거·위치 | 남은 할 일 |
 |---|---|---|---|
@@ -17,6 +17,19 @@
 | 백업 | 앱에서 전체 백업(JSON) 내려받기 — 1.1.2부터 1,000줄씩 나눠서 끝까지 담고 표마다 줄 수(`counts`)를 적음. 1.1 직전 데이터는 서버 `backup` 스키마에 복사본 | `index.ts` getExport·fetchAll, `docs/backup-restore.md` | 무료 요금제라 자동 백업 없음 → 한 달에 한 번 받기 |
 | 세션 | 기기별 토큰, 해시만 저장, 180일 안 쓰면 만료, 기기 목록에서 하나씩 로그아웃, 코드 교체 때 다른 기기 모두 로그아웃 가능 | `index.ts` authenticate·revokeSession·rotateCode | — |
 | 예전 방식 로그인 | 1.0 화면용 `x-app-token`(접속 코드 원문) 로그인을 아직 받아줌. 1.1.2부터 이 방식으로 보낸 '발행 완료' 표시는 409 `update_app`으로 거부(상태 규칙·발행 전 검사를 건너뛰던 구멍) | `index.ts` authenticate·patchPost | 모든 기기가 1.1로 바뀐 뒤 꺼도 됨 (P2). 접속 코드 원문이 필요한 경로라 실서버에서는 일부러 시험하지 않음 |
+
+## 1.2.0 이미지 스튜디오에서 더한 것 (2026-10-22)
+| 항목 | 지금 상태 | 근거·위치 |
+|---|---|---|
+| OpenAI·Pexels 키 | Edge Function Secrets(`OPENAI_API_KEY`·`PEXELS_API_KEY`)에서 서버만 읽음. 화면에는 '있음/없음'만. 화면 파일·저장소·브라우저 저장소에 없음. 화면은 OpenAI·Pexels에 직접 연결하지 못함(CSP `connect-src`) | `index.ts` keyOpenAI·keysInfo, `tests/security_static.test.js` |
+| 이미지 요청 인증 | 새 경로(`/images…`, `/stock…`, `/posts/:id/images…`, `/posts/:id/cards`) 모두 기존 세션 검사를 지나야 함 | `index.ts` ROUTES·authenticate |
+| 파일 보관 | 비공개 버킷 `post-images` (public=false, storage 정책 없음 → anon·authenticated 접근 불가). 화면에는 서버가 만든 1시간 서명 주소만 | `012` 9번, `index.ts` signPaths |
+| 올린 파일 검사 | 확장자 말고 파일 첫 바이트로 형식 확인(JPEG·PNG·WebP), 크기·가로세로 확인, 8MB 제한, 숨은 정보(EXIF·GPS·글 정보) 지우기, 같은 파일 중복 확인(SHA-256) | `images.js` sniffImage·checkImageFile·stripMetadata, `image_service.js` saveUploaded |
+| 외부 이미지 내려받기 | 허용한 주소(`images.pexels.com`, https)만, 다른 곳으로 넘기는 주소는 안 따라감, 크기 제한 | `image_service.js` downloadImage |
+| 비용·남용 | 한 번에 한 장(DB 유일 인덱스), 같은 요청 번호는 한 번만, 하루 한도·한 달 예산을 DB 함수가 잠금 안에서 검사, 자동 재시도 없음, 오래 멈춘 생성은 '확인 필요'로 정리 | `012` image_gen_begin, `index.ts` generateImage |
+| DB | 새 표 5개 모두 RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수 9개는 `search_path = ''`·service_role만 실행 | `012` 8번, `tests/sql_images.test.js` |
+| 지우기 | 이미지는 어느 원고(휴지통 포함)·카드뉴스에서 쓰면 못 지움. 원고를 지워도 이미지는 남음. DB에서 먼저 지움 표시 후 파일 삭제 | `012` image_delete, `index.ts` deleteImage |
+| 로그·오류 | OpenAI·Pexels 오류 문구에서 키처럼 생긴 글자를 가림. 생성 기록에 프롬프트는 남지만 키는 남지 않음 | `image_service.js` scrub |
 
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)
 - 로그인 없이 `/state` → 401, 가짜 세션 → 401, 틀린 코드 로그인 → 401

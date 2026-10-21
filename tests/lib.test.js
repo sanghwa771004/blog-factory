@@ -216,3 +216,61 @@ describe('통계·주제 점수·추천', () => {
     assert.deepEqual(L.monthRange(-1, '2026-01-15'), { from: '2025-12-01', to: '2025-12-31' });
   });
 });
+
+describe('1.2.0 이미지가 연결된 원고 내보내기', () => {
+  const body = '## 보관\n[이미지: 작은 원룸 청소기 보관]\n문단\n[이미지: 줄 전체가 아님] 뒤에 글\n[이미지: 두 번째 자리]\n[이미지: 세 번째 자리]';
+  const post = { id: 'p', keyword: '청소기', titles: ['t'], program_ids: [], body };
+  const imgs = [
+    { url: 'https://oxewhsqmdkiasckvnyua.supabase.co/storage/v1/object/sign/post-images/a.jpg?token=x', alt: '원룸 청소기', label: 'AI 생성', fileName: '청소기-01-blog_body.jpg', caption: '※ AI로 만든 예시 이미지' },
+    null,
+    { url: 'javascript:alert(1)', alt: 'x', fileName: '청소기-03-blog_body.jpg', caption: '사진: Kim (Pexels)' },
+  ];
+  test('미리보기: 사진 자리 순서대로 이미지, 안전한 주소만 그림, 연결 없는 자리는 그대로 자리 표시', () => {
+    const html = L.viewHtml(post, [], imgs);
+    assert.equal((html.match(/<img /g) || []).length, 1, '안전한 주소 하나만 그림');
+    assert.match(html, /<figure class="img has"><img src="https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co\/storage[^"]+" alt="원룸 청소기"/);
+    assert.match(html, /사진 1 · 작은 원룸 청소기 보관 · AI 생성/);
+    assert.match(html, /📷 사진 2 · 두 번째 자리<\/div>/);
+    assert.match(html, /📷 사진 3 · 세 번째 자리 · 이미지 연결됨/, '주소가 안전하지 않으면 그림 대신 연결됨 표시');
+    assert.ok(!html.includes('javascript:'));
+    assert.match(html, /📷 줄 전체가 아님\] 뒤에 글<\/div>/, '줄 전체가 아닌 [이미지]는 번호 없이 (예전 그대로)');
+  });
+  test('복사용 HTML·텍스트: 내려받은 파일 이름과 캡션(AI 안내·사진 출처)을 그 자리에, 이미지 주소는 넣지 않음', () => {
+    const html = L.exportHtml(post, { links: [], programs: {}, images: imgs });
+    assert.match(html, /사진 1: 내려받은 「청소기-01-blog_body\.jpg」을 여기에 넣어줘/);
+    assert.match(html, /※ AI로 만든 예시 이미지/);
+    assert.match(html, /사진 2: 두 번째 자리 \(여기에 사진 넣기\)/);
+    assert.match(html, /사진: Kim \(Pexels\)/);
+    assert.ok(!html.includes('supabase.co'), '1시간이면 끝나는 서명 주소를 블로그에 넣지 않음');
+    const txt = L.exportPlain(post, { links: [], programs: {}, images: imgs });
+    assert.match(txt, /\(사진 1: 청소기-01-blog_body\.jpg — 작은 원룸 청소기 보관\)\n※ AI로 만든 예시 이미지/);
+    assert.match(txt, /\(사진 2: 두 번째 자리\)/);
+    assert.equal(L.exportPlain(post, {}).includes('(사진 1: 작은 원룸 청소기 보관)'), true, '이미지 정보가 없으면 예전처럼');
+  });
+  test('ZIP: 압축 없이 묶기, 한글 이름, 같은 이름은 번호 붙임 (파이썬 zipfile 로 열어봄)', async () => {
+    const { spawnSync } = await import('node:child_process');
+    const { writeFileSync, mkdtempSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const a = new Uint8Array([1, 2, 3, 4, 5]), b = new TextEncoder().encode('안녕 zip');
+    const zip = L.makeZip([{ name: '청소기-01.jpg', bytes: a }, { name: '청소기-01.jpg', bytes: b }, { name: 'x/../y.png', bytes: a }], new Date(2026, 9, 22, 10, 30, 0));
+    assert.equal(L.crc32(new TextEncoder().encode('123456789')), 0xcbf43926, 'CRC32 표준 값');
+    const f = join(mkdtempSync(join(tmpdir(), 'gf-zip-')), 't.zip');
+    writeFileSync(f, zip);
+    const r = spawnSync('python3', ['-c', 'import sys,zipfile,json;z=zipfile.ZipFile(sys.argv[1]);print(json.dumps([z.testzip(),z.namelist(),[list(z.read(n)) for n in z.namelist()]]))', f], { encoding: 'utf8' });
+    if (r.error) return; // 파이썬이 없는 컴퓨터면 건너뜀
+    const [bad, names, data] = JSON.parse(r.stdout);
+    assert.equal(bad, null);
+    assert.deepEqual(names, ['청소기-01.jpg', '청소기-01-2.jpg', 'x-..-y.png']);
+    assert.deepEqual(data[0], [1, 2, 3, 4, 5]);
+    assert.equal(new TextDecoder().decode(new Uint8Array(data[1])), '안녕 zip');
+  });
+  test('미리보기 이미지 주소 검사', () => {
+    assert.equal(L.safeImgUrl('https://x.supabase.co/a.jpg'), 'https://x.supabase.co/a.jpg');
+    assert.equal(L.safeImgUrl('blob:https://app/1234'), 'blob:https://app/1234');
+    assert.equal(L.safeImgUrl('javascript:alert(1)'), '');
+    assert.equal(L.safeImgUrl('data:image/svg+xml,<svg onload=alert(1)>'), '');
+    assert.equal(L.safeImgUrl('http://evil.example/a.jpg'), '');
+    assert.equal(L.safeImgUrl('https://a.jpg" onerror="x'), '');
+  });
+});

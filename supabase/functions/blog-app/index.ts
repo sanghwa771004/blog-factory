@@ -1,11 +1,20 @@
-// 블로그 글공장 서버 API (1.1.2)
+// 블로그 글공장 서버 API (1.2.0)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
+// - 이미지 스튜디오: OpenAI·Pexels 키는 이 함수의 환경변수(Secrets)에만 있고 화면으로는 '있음/없음'만 보냄.
+//   이미지 파일은 비공개 버킷(post-images)에, 정보는 post_images 표에. 화면은 1시간짜리 서명 주소로만 봄
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
+import {
+  parseSlots, matchSlots, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
+  validApiSize, buildPrompt, promptRisk, blocksOf, estimateUsd, estimateTokens, DEFAULT_PRICES, MAX_UPLOAD_BYTES, CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
+} from "./images.js";
+import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes } from "./image_service.js";
 
-const VERSION = "1.1.2";
+const VERSION = "1.2.0";
+const BOOT_AT = Date.now(); // 이 서버 일꾼(worker)이 켜진 때 — 무료 요금제는 켜진 뒤 150초까지만 일함
+const WALL_MS = 150_000;
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") ?? "";
 // 앱을 여는 주소(쉼표로 여러 개). 기본값은 GitHub Pages 주소
 const ALLOWED_ORIGINS = (Deno.env.get("ALLOWED_ORIGINS") ?? "https://sanghwa771004.github.io")
@@ -289,6 +298,14 @@ async function recheckReadyPosts(match: (p: J) => boolean): Promise<string[]> {
 }
 function rpcError(error: { message?: string; code?: string } | null): never {
   const m = String(error?.message ?? "");
+  if (/image_busy/.test(m)) fail(409, "image_busy");
+  if (/image_daily_limit/.test(m)) fail(429, "image_daily_limit");
+  if (/image_budget/.test(m)) fail(429, "image_budget");
+  const inUse = /image in use: (\d+)/.exec(m);
+  if (inUse) fail(409, "image_in_use", { uses: Number(inUse[1]) });
+  if (/slot taken/.test(m)) fail(409, "slot_taken");
+  if (/same slot/.test(m)) fail(400, "bad_field", { field: "slot_key" });
+  if (/generation is not running/.test(m)) fail(409, "bad_state");
   if (m.startsWith("incompatible:")) fail(400, "incompatible", { detail: m.replace("incompatible:", "").trim() });
   if (/topic already has a post/.test(m)) fail(409, "topic_used");
   if (/not found/.test(m)) fail(404, "not_found");
@@ -340,16 +357,20 @@ async function getState(c: Ctx) {
   ]);
   for (const r of [posts, trash, jobs, settings, runs, channels, programs, compat, topics, imports]) if (r.error) throw r.error;
   // 1000줄이 넘어도 빠지지 않게 끝까지 (링크·상품이 잘리면 '링크 없음' 같은 잘못된 오류가 뜸)
-  const [products, pp, links] = await Promise.all([
+  const [products, pp, links, imageSlots] = await Promise.all([
     fetchAll("products", [["updated_at", false], ["id", true]]),
     fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
     fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
+    // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (이미지 스튜디오 표가 아직 없으면 빈 목록)
+    sb.from("post_image_slots").select("post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description)")
+      .not("image_id", "is", null).limit(5000),
   ]);
+  if (imageSlots.error) console.error("state image_slots:", imageSlots.error.message);
   return json({
     version: VERSION, now: nowIso(), today: kstToday(), auth: c.auth.kind,
     posts: posts.data, trash: trash.data, jobs: jobs.data, settings: settings.data, runs: runs.data,
     channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products,
-    post_products: pp, links, imports: imports.data,
+    post_products: pp, links, imports: imports.data, image_slots: imageSlots.error ? [] : imageSlots.data,
     requests: jobs.data, lastRun: runs.data?.[0] ?? null, // 예전 화면 호환
   });
 }
@@ -357,9 +378,12 @@ async function getState(c: Ctx) {
 async function getStats(c: Ctx) {
   const from = c.url.searchParams.get("from");
   const to = c.url.searchParams.get("to");
-  const { data, error } = await sb.rpc("stats", { d_from: from ? reqDate(from, "from") : null, d_to: to ? reqDate(to, "to") : null });
-  if (error) throw error;
-  return json({ stats: data });
+  const range = { d_from: from ? reqDate(from, "from") : null, d_to: to ? reqDate(to, "to") : null };
+  // 이미지 생성 비용은 실적의 '비용'과 따로 셈 (같은 돈이 두 번 더해지지 않게 따로 보냄)
+  const [st, ic] = await Promise.all([sb.rpc("stats", range), sb.rpc("image_costs", range)]);
+  if (st.error) throw st.error;
+  if (ic.error) console.error("image_costs:", ic.error.message);
+  return json({ stats: { ...(st.data as J), image_costs: ic.error ? null : ic.data } });
 }
 
 // 백업: 표마다 1000줄씩 나눠서 끝까지 담고, 표마다 줄 수를 같이 적음
@@ -368,9 +392,10 @@ const EXPORT_TABLES: [string, [string, boolean][]][] = [
   ["channels", [["id", true]]], ["programs", [["id", true]]], ["program_channels", [["program_id", true], ["channel_id", true]]],
   ["topics", [["id", true]]], ["products", [["id", true]]], ["post_products", [["post_id", true], ["product_id", true]]],
   ["links", [["id", true]]], ["metrics", [["id", true]]], ["imports", [["id", true]]],
+  ["post_images", [["id", true]]], ["post_image_slots", [["id", true]]], ["image_generations", [["id", true]]], ["post_card_decks", [["post_id", true]]],
 ];
 async function getExport(_c: Ctx) {
-  const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아." };
+  const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결)만 들어 있어." };
   const counts: J = {};
   for (const [t, order] of EXPORT_TABLES) {
     const rows = await fetchAll(t, order);
@@ -569,7 +594,15 @@ async function patchPost(c: Ctx) {
   if (!Object.keys(patch).length) fail(400, "empty");
   const { data, error } = await sb.from("posts").update(patch).eq("id", id).select().single();
   if (error) throw error;
-  return json({ post: data, demoted });
+  // 본문이 바뀌면 사진 자리 연결을 새 본문에 맞춤 (설명을 조금 고친 자리는 옮기고, 사라진 자리의 이미지는 보관함에 그대로)
+  let image_sync: unknown = null;
+  if ("body" in patch) {
+    try {
+      const sy = await syncSlots(data as J);
+      image_sync = { rekeyed: sy.rekeyed, orphans: sy.m.orphans.length };
+    } catch (e) { console.error("image sync:", String((e as Error)?.message ?? e).slice(0, 200)); }
+  }
+  return json({ post: data, demoted, image_sync });
 }
 
 async function deletePost(c: Ctx) {
@@ -955,6 +988,24 @@ async function patchSettings(c: Ctx) {
     const cat = await assertCompat(progs, ch);
     Object.assign(s, { default_channel: ch, default_programs: progs }, legacyNames(cat, progs, ch));
   }
+  // 이미지: 모델 이름(계정에서 안 되면 바꿀 수 있게)·기본 품질·하루 한도·한 달 예산·환율·가격
+  const modelName = (v: unknown, field: string) => { const m = str(v, 64).trim(); if (!/^[a-z0-9][a-z0-9._-]{1,60}$/.test(m)) fail(400, "bad_field", { field }); return m; };
+  if ("image_gen_model" in b) s.image_gen_model = modelName(b.image_gen_model, "image_gen_model");
+  if ("image_edit_model" in b) s.image_edit_model = modelName(b.image_edit_model, "image_edit_model");
+  if ("image_quality" in b) s.image_quality = oneOf(b.image_quality, QUALITIES as readonly string[], "image_quality");
+  if ("image_daily_limit" in b) s.image_daily_limit = optInt(b.image_daily_limit, "image_daily_limit", 0, 50) ?? 0;
+  if ("image_monthly_budget_usd" in b) s.image_monthly_budget_usd = optNum(b.image_monthly_budget_usd, "image_monthly_budget_usd", 0, 500) ?? 0;
+  if ("image_fx_krw" in b) s.image_fx_krw = optNum(b.image_fx_krw, "image_fx_krw", 100, 10000);
+  if ("image_fx_date" in b) s.image_fx_date = optDate(b.image_fx_date, "image_fx_date");
+  if ("image_fx_source" in b) s.image_fx_source = str(b.image_fx_source, 200).trim();
+  if ("image_prices" in b) {
+    const p = (b.image_prices && typeof b.image_prices === "object" ? b.image_prices : {}) as J;
+    const price = (k: string) => optNum(p[k], "image_prices", 0, 1000) ?? (DEFAULT_PRICES as Record<string, number>)[k];
+    s.image_prices = {
+      image_output_per_m: price("image_output_per_m"), image_input_per_m: price("image_input_per_m"), text_input_per_m: price("text_input_per_m"),
+      checked_at: optDate(p.checked_at, "image_prices") ?? kstToday(), source: optUrl(p.source, "image_prices"),
+    };
+  }
   if (!Object.keys(s).length) fail(400, "empty");
   const { data, error } = await sb.from("settings").update(s).eq("id", 1).select().single();
   if (error) throw error;
@@ -1047,6 +1098,518 @@ async function setCompat(c: Ctx) {
   return json({ compat: data, demoted_posts });
 }
 
+// ───────── 이미지 스튜디오 ─────────
+const SIGN_SECONDS = 3600;                       // 비공개 이미지 서명 주소 유효 시간
+const STORAGE_SOFT_LIMIT = 900 * 1024 * 1024;    // 저장 공간이 이만큼 차면 새로 올리기를 멈춤
+const keyOpenAI = () => Deno.env.get("OPENAI_API_KEY") ?? "";
+const keysInfo = () => ({ openai: !!keyOpenAI(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? "") });
+const providersInfo = () => Object.entries(PHOTO_PROVIDERS).map(([id, p]) => ({ id, label: p.label, connected: !!(Deno.env.get(p.envKey) ?? ""), site: p.site, license_url: p.licenseUrl }));
+// 생성 기록을 화면에 보낼 때는 긴 프롬프트를 뺌 (이미지 정보에 따로 있음)
+const GEN_COLS = "id, request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality, output_format, purpose, style, user_prompt, base_image_id, status, provider_called, provider_request_id, error_code, error_message, est_usd, usage, usage_usd, actual_usd, actual_checked_at, cost_status, fx_krw, fx_date, fx_source, image_id, started_at, finished_at, created_at";
+
+// 응답을 보낸 뒤에도 계속 일하게 (이미지 생성). 일꾼이 꺼지기 전에 못 끝나면 4분 뒤 '확인 필요'로 정리됨
+const RUNNING = new Set<string>();
+function inBackground(p: Promise<unknown>) {
+  const rt = (globalThis as unknown as { EdgeRuntime?: { waitUntil(p: Promise<unknown>): void } }).EdgeRuntime;
+  if (rt && typeof rt.waitUntil === "function") rt.waitUntil(p);
+}
+addEventListener("beforeunload", () => {
+  for (const id of RUNNING) {
+    sb.rpc("image_gen_fail", { gen: id, fin: { error_code: "server_stopped", error_message: "서버가 중간에 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.", cost_status: "확인 필요" } })
+      .then(() => {}, () => {});
+  }
+});
+
+function imageDeps() {
+  const bucket = sb.storage.from(BUCKET);
+  return {
+    rpc: (name: string, args: J) => sb.rpc(name, args),
+    upload: (path: string, bytes: Uint8Array, mime: string) => bucket.upload(path, bytes, { contentType: mime, upsert: false, cacheControl: "3600" }),
+    remove: (paths: string[]) => bucket.remove(paths),
+    download: async (path: string) => {
+      const { data, error } = await bucket.download(path);
+      return error || !data ? { ok: false } : { ok: true, bytes: new Uint8Array(await data.arrayBuffer()) };
+    },
+    findImage: async (q: J) => {
+      // deno-lint-ignore no-explicit-any
+      let x: any = sb.from("post_images").select("*").is("deleted_at", null);
+      x = q.sha256 ? x.eq("sha256", q.sha256) : x.eq("provider", q.provider).eq("source_id", q.source_id);
+      const { data } = await x.order("created_at", { ascending: true }).limit(1);
+      return ((data ?? []) as J[])[0] ?? null;
+    },
+    logCall: async (provider: string, kind: string, status: number) => {
+      await sb.from("api_calls").insert({ provider, kind, status });
+      if (Math.random() < 0.02) await sb.from("api_calls").delete().lt("at", new Date(Date.now() - 40 * 86400e3).toISOString());
+    },
+    fetchImpl: fetch,
+    now: () => new Date(),
+    uuid: () => crypto.randomUUID(),
+  };
+}
+async function signPaths(paths: string[]): Promise<Record<string, string>> {
+  const uniq = [...new Set(paths.filter(Boolean))];
+  if (!uniq.length) return {};
+  const { data, error } = await sb.storage.from(BUCKET).createSignedUrls(uniq, SIGN_SECONDS);
+  if (error) throw error;
+  const out: Record<string, string> = {};
+  for (const r of (data ?? []) as { path: string | null; signedUrl: string; error: string | null }[]) if (r.path && r.signedUrl && !r.error) out[r.path] = r.signedUrl;
+  return out;
+}
+// 이미지마다 몇 자리(몇 원고)에서 쓰는지
+async function usesOf(ids: string[]) {
+  const out: Record<string, { uses: number; used_posts: number }> = {};
+  if (!ids.length) return out;
+  const [sl, dk] = await Promise.all([
+    sb.from("post_image_slots").select("image_id, post_id").in("image_id", ids),
+    sb.from("post_card_decks").select("bg_image_id, post_id").in("bg_image_id", ids),
+  ]);
+  if (sl.error) throw sl.error;
+  if (dk.error) throw dk.error;
+  const posts: Record<string, Set<string>> = {};
+  const pairs = [...((sl.data ?? []) as J[]).map((x) => [x.image_id, x.post_id]), ...((dk.data ?? []) as J[]).map((x) => [x.bg_image_id, x.post_id])] as [string, string][];
+  for (const [i, p] of pairs) {
+    (out[i] ??= { uses: 0, used_posts: 0 }).uses++;
+    (posts[i] ??= new Set()).add(p);
+  }
+  for (const [i, s] of Object.entries(posts)) out[i].used_posts = s.size;
+  return out;
+}
+async function withUrls(rows: J[]) {
+  const [urls, uses] = await Promise.all([signPaths(rows.map((i) => String(i.storage_path ?? ""))), usesOf(rows.map((i) => String(i.id)))]);
+  return rows.map((i) => ({ ...i, url: urls[String(i.storage_path)] ?? "", uses: uses[String(i.id)]?.uses ?? 0, used_posts: uses[String(i.id)]?.used_posts ?? 0 }));
+}
+async function imageSettings() {
+  const { data, error } = await sb.from("settings").select("image_gen_model, image_edit_model, image_quality, image_daily_limit, image_monthly_budget_usd, image_fx_krw, image_fx_date, image_fx_source, image_prices").eq("id", 1).single();
+  if (error) throw error;
+  return data as J;
+}
+async function imageUsage() {
+  const { data, error } = await sb.rpc("image_usage");
+  if (error) throw error;
+  return data as J;
+}
+async function storageGuard(adding = 0) {
+  const u = await imageUsage();
+  if (Number(u.storage_bytes ?? 0) + adding > STORAGE_SOFT_LIMIT) fail(507, "storage_full");
+}
+async function safetyIdOf(auth: Auth) {
+  return (await sha256hex("gf-safety:" + (auth.sessionId ?? "legacy"))).slice(0, 32);
+}
+
+// 원고 본문의 사진 자리와 저장된 연결을 맞춤: 설명을 조금 고친 자리는 연결을 옮기고(rekey), 순서만 바뀐 자리는 번호를 고침
+// 본문에서 사라진 자리의 연결은 지우지 않음 (orphans — 화면에서 다른 자리로 옮기거나 뺄 수 있음)
+async function syncSlots(post: J) {
+  const load = async () => {
+    const { data, error } = await sb.from("post_image_slots").select("*").eq("post_id", post.id);
+    if (error) throw error;
+    return (data ?? []) as J[];
+  };
+  const cur = parseSlots(String(post.body ?? ""));
+  let rows = await load();
+  let m = matchSlots(cur, rows);
+  let rekeyed = 0, changed = false;
+  for (const rk of m.rekeys) {
+    const r = await sb.rpc("image_slot_rekey", { p_post: post.id, p: rk });
+    if (!r.error) { rekeyed++; changed = true; }
+  }
+  for (const s of m.slots) {
+    if (s.link && !s.rekey && Number(s.link.slot_index) !== s.index) {
+      const r = await sb.from("post_image_slots").update({ slot_index: s.index }).eq("id", s.link.id);
+      if (!r.error) changed = true;
+    }
+  }
+  if (changed) { rows = await load(); m = matchSlots(cur, rows); }
+  return { cur, rows, m, rekeyed };
+}
+// 요청이 가리키는 원고·사진 자리 (자리는 지금 본문에 있어야 함, 본문 밖 자리는 정해진 것만)
+async function slotTarget(b: J, required: boolean) {
+  if (!isUuid(b.post_id)) {
+    if (required || b.slot_key) fail(400, "bad_field", { field: "post_id" });
+    return { post: null as J | null, slot: null as J | null, purpose: has(PURPOSES, b.purpose) ? String(b.purpose) : "general" };
+  }
+  const post = await getPost(b.post_id as string);
+  const key = str(b.slot_key, 220);
+  let slot: J | null = null;
+  if (key) {
+    if (!validSlotKey(key)) fail(400, "bad_field", { field: "slot_key" });
+    if (isExtraKey(key)) {
+      const x = extraSlot(key)!;
+      slot = { key: x.key, index: 0, n: 0, text: x.label, heading: "", before: "", after: "" };
+    } else {
+      slot = parseSlots(String(post.body ?? "")).find((s: J) => s.key === key) ?? null;
+      if (!slot) fail(409, "slot_gone");
+    }
+  } else if (required) fail(400, "bad_field", { field: "slot_key" });
+  const purpose = has(PURPOSES, b.purpose) ? String(b.purpose) : slotPurpose(key);
+  return { post, slot, purpose };
+}
+async function linkedBrands(postId: string) {
+  const { data } = await sb.from("post_products").select("products(brand)").eq("post_id", postId);
+  return ((data ?? []) as J[]).map((x) => String((x.products as J | null)?.brand ?? "")).filter(Boolean);
+}
+
+async function getImageConfig(_c: Ctx) {
+  const [settings, usage] = await Promise.all([imageSettings(), imageUsage()]);
+  return json({ keys: keysInfo(), providers: providersInfo(), settings, usage, test_model: TEST_MODEL, sign_seconds: SIGN_SECONDS, storage_limit: STORAGE_SOFT_LIMIT });
+}
+
+// 원고 하나의 이미지 화면: 사진 자리(본문 순서) + 본문 밖 자리 + 사라진 자리 + 이미지(서명 주소) + 생성 기록 + 카드뉴스 + 비용
+async function getPostImages(c: Ctx) {
+  const post = await getPost(c.params[0]);
+  const sy = await syncSlots(post);
+  const linkIds = sy.rows.map((r) => r.image_id).filter(Boolean) as string[];
+  const empty = { data: [] as J[], error: null };
+  const [linked, own, gens, deck, usage, costs] = await Promise.all([
+    linkIds.length ? sb.from("post_images").select("*").in("id", linkIds) : Promise.resolve(empty),
+    sb.from("post_images").select("*").eq("origin_post_id", post.id).is("deleted_at", null).order("created_at", { ascending: false }).limit(100),
+    sb.from("image_generations").select(GEN_COLS).eq("post_id", post.id).order("created_at", { ascending: false }).limit(100),
+    sb.from("post_card_decks").select("*").eq("post_id", post.id).maybeSingle(),
+    sb.rpc("image_usage"),
+    sb.rpc("image_costs", { d_from: null, d_to: null, p_post: post.id }),
+  ]);
+  for (const r of [linked, own, gens, deck, usage, costs]) if (r.error) throw r.error;
+  const imgs = new Map<string, J>();
+  for (const r of [...((own.data ?? []) as J[]), ...((linked.data ?? []) as J[])]) imgs.set(String(r.id), r);
+  const bg = (deck.data as J | null)?.bg_image_id;
+  if (bg && !imgs.has(String(bg))) {
+    const { data } = await sb.from("post_images").select("*").eq("id", bg).maybeSingle();
+    if (data) imgs.set(String(bg), data as J);
+  }
+  const extraRows = sy.rows.filter((r) => isExtraKey(String(r.slot_key)));
+  return json({
+    post_id: post.id,
+    slots: sy.m.slots.map((s: J) => ({ index: s.index, n: s.n, text: s.text, key: s.key, heading: s.heading, before: s.before, after: s.after, row: s.link })),
+    extra: EXTRA_SLOTS.map((x) => ({ ...x, row: extraRows.find((r) => r.slot_key === x.key) ?? null })),
+    orphans: sy.m.orphans, rekeyed: sy.rekeyed,
+    images: await withUrls([...imgs.values()]),
+    generations: gens.data, deck: deck.data, usage: usage.data, costs: costs.data,
+    keys: keysInfo(), providers: providersInfo(), signed_at: nowIso(), sign_seconds: SIGN_SECONDS,
+  });
+}
+
+// AI 이미지 만들기: 검사·예상 비용 확인·한도 확인 → '생성 중' 기록 → 응답은 바로, 생성은 뒤에서 (화면은 상태를 물어봄)
+async function generateImage(c: Ctx) {
+  const b = await readJson(c.req, 20_000);
+  const requestKey = str(b.request_key, 80);
+  if (!/^[A-Za-z0-9_-]{8,80}$/.test(requestKey)) fail(400, "bad_field", { field: "request_key" });
+  const { post, slot, purpose } = await slotTarget(b, true);
+  const mode = b.mode === "edit" ? "edit" : "generate";
+  const ratio = ratioOf(purpose, str(b.ratio, 8));
+  const style = has(STYLES, b.style) ? String(b.style) : "life_photo";
+  const text = str(b.text, 300).trim() || String(slot!.text ?? "").trim();
+  const extra = str(b.extra, 400).trim();
+  if (!text) fail(400, "bad_field", { field: "text" });
+  const s = await imageSettings();
+  const quality = (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality);
+  const model = String(mode === "edit" ? s.image_edit_model : s.image_gen_model);
+  const isTest = model === TEST_MODEL;
+  if (!isTest && !keyOpenAI()) fail(503, "openai_key_missing");
+  // 상표·가격·인증·후기 사진·글자 요청은 서버에서도 막음 (화면에서 먼저 알려줌)
+  const risks = blocksOf(promptRisk(text + "\n" + extra, await linkedBrands(String(post!.id))));
+  if (risks.length) fail(400, "prompt_blocked", { risks });
+  let base: J | null = null;
+  if (mode === "edit") {
+    if (!isUuid(b.base_image_id)) fail(400, "bad_field", { field: "base_image_id" });
+    const { data } = await sb.from("post_images").select("*").eq("id", b.base_image_id).is("deleted_at", null).maybeSingle();
+    if (!data) fail(404, "not_found");
+    // 직접 찍은 사진·실제 사진을 AI로 고치면 실제와 다른 '진짜 같은 사진'이 될 수 있어서, AI가 만든 이미지만 고침
+    if ((data as J).kind !== "ai") fail(400, "edit_ai_only");
+    base = data as J;
+  }
+  const size = sizeFor(purpose, ratio);
+  if (!validApiSize(size)) fail(400, "bad_field", { field: "ratio" });
+  const prompt = buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode });
+  const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices });
+  if (est == null) fail(400, "bad_field", { field: "quality" });
+  // 화면에서 보여준 예상 비용보다 비싸지면(설정·가격이 바뀐 경우) 다시 확인받음
+  const seen = Number(b.confirm_usd);
+  if (!isTest && !(Number.isFinite(seen) && seen + 1e-9 >= Number(est))) fail(409, "estimate_changed", { est_usd: est });
+  // 이 일꾼이 꺼질 때까지 시간이 너무 적으면 잠깐 뒤에 다시 (돈이 나가기 전에)
+  const left = WALL_MS - (Date.now() - BOOT_AT) - 12_000;
+  if (left < 50_000) fail(503, "server_busy", { retry_after: 3 });
+  const begin = await sb.rpc("image_gen_begin", {
+    p: {
+      request_key: requestKey, post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, mode, model, size, quality,
+      output_format: "jpeg", purpose, style, user_prompt: [text, extra].filter(Boolean).join("\n"), prompt, base_image_id: base ? base.id : "", est_usd: est,
+    },
+  });
+  if (begin.error) rpcError(begin.error);
+  const gen = begin.data as J;
+  const { prompt: _p, revised_prompt: _r, ...pub } = gen;
+  if (gen.duplicate) return json({ generation: pub, duplicate: true });
+  RUNNING.add(String(gen.id));
+  const task = runGeneration(imageDeps(), gen, {
+    key: keyOpenAI(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), timeoutMs: Math.min(115_000, left),
+    base: base ? { path: String(base.storage_path), mime: String(base.mime) } : null, description: text,
+  }).catch(async (e) => {
+    console.error("image generation:", String((e as Error)?.message ?? e).slice(0, 200));
+    await sb.rpc("image_gen_fail", { gen: gen.id, fin: { error_code: "server_error", error_message: "서버에서 문제가 생겼어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.", cost_status: "확인 필요" } });
+  }).finally(() => RUNNING.delete(String(gen.id)));
+  inBackground(task);
+  return json({ generation: pub, est_usd: est, model, size, quality }, 202);
+}
+async function getGeneration(c: Ctx) {
+  const id = c.params[0];
+  // 4분 넘게 끝나지 않은 생성은 실패(청구됐을 수 있음)로 정리
+  await sb.from("image_generations").update({
+    status: "실패", error_code: "timeout", error_message: "응답이 끝나지 않아 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.", cost_status: "확인 필요", finished_at: nowIso(),
+  }).eq("id", id).eq("status", "생성 중").lt("started_at", new Date(Date.now() - 240e3).toISOString());
+  const { data: g, error } = await sb.from("image_generations").select(GEN_COLS).eq("id", id).maybeSingle();
+  if (error) throw error;
+  if (!g) fail(404, "not_found");
+  let image: J | null = null;
+  if ((g as J).image_id) {
+    const { data: img } = await sb.from("post_images").select("*").eq("id", (g as J).image_id).maybeSingle();
+    if (img) image = (await withUrls([img as J]))[0];
+  }
+  return json({ generation: g, image, usage: await imageUsage() });
+}
+// 실제 청구액 넣기 (OpenAI 사용량 화면에서 확인한 값). 앱이 청구액을 직접 가져오지는 못함
+async function setGenerationCost(c: Ctx) {
+  const b = await readJson(c.req, 5_000);
+  const { data: g, error: e1 } = await sb.from("image_generations").select("id, status, usage_usd").eq("id", c.params[0]).maybeSingle();
+  if (e1) throw e1;
+  if (!g) fail(404, "not_found");
+  if ((g as J).status === "생성 중") fail(409, "bad_state");
+  const st = str(b.cost_status, 20);
+  let patch: J;
+  if (st === "청구 없음") patch = { actual_usd: null, actual_checked_at: optDate(b.actual_checked_at, "actual_checked_at") ?? kstToday(), cost_status: "청구 없음" };
+  else if (st === "확인 필요") patch = { actual_usd: null, actual_checked_at: null, cost_status: "확인 필요" };
+  else if (b.actual_usd === null || b.actual_usd === "" || b.actual_usd === undefined) patch = { actual_usd: null, actual_checked_at: null, cost_status: (g as J).usage_usd != null ? "사용량 기준" : "예상" };
+  else patch = { actual_usd: optNum(b.actual_usd, "actual_usd", 0, 100), actual_checked_at: optDate(b.actual_checked_at, "actual_checked_at") ?? kstToday(), cost_status: "청구액 확인" };
+  const { data, error } = await sb.from("image_generations").update(patch).eq("id", c.params[0]).select(GEN_COLS).single();
+  if (error) throw error;
+  return json({ generation: data });
+}
+
+// 사진 공급자 (Pexels): 검색은 서버가 대신 (키를 화면에 안 보냄), 시간당·월 한도를 앱에서도 지킴
+async function stockGuard(provider: string) {
+  const P = PHOTO_PROVIDERS[provider as keyof typeof PHOTO_PROVIDERS];
+  const since = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const monthStart = new Date(new Date(Date.now() + 9 * 3600e3).toISOString().slice(0, 7) + "-01T00:00:00+09:00").toISOString();
+  const [h, mo] = await Promise.all([
+    sb.from("api_calls").select("id", { count: "exact", head: true }).eq("provider", provider).gte("at", since(3600e3)),
+    sb.from("api_calls").select("id", { count: "exact", head: true }).eq("provider", provider).gte("at", monthStart),
+  ]);
+  if ((h.count ?? 0) >= P.hourLimit) fail(429, "stock_hour_limit");
+  if ((mo.count ?? 0) >= P.monthLimit) fail(429, "stock_month_limit");
+}
+async function stockSearch(c: Ctx) {
+  const provider = c.url.searchParams.get("provider") ?? "pexels";
+  if (!has(PHOTO_PROVIDERS, provider)) fail(400, "bad_field", { field: "provider" });
+  const P = PHOTO_PROVIDERS[provider as keyof typeof PHOTO_PROVIDERS];
+  const q = (c.url.searchParams.get("q") ?? "").trim().slice(0, 100);
+  if (!q) fail(400, "bad_field", { field: "q" });
+  const orientation = c.url.searchParams.get("orientation") ?? "";
+  const page = optInt(c.url.searchParams.get("page") ?? "1", "page", 1, 50) ?? 1;
+  const key = Deno.env.get(P.envKey) ?? "";
+  if (!key) fail(503, "pexels_key_missing");
+  await stockGuard(provider);
+  const r = await P.search({ fetchImpl: fetch, key, query: q, orientation, page, perPage: 24 }) as J;
+  await imageDeps().logCall(provider, "search", Number(r.status ?? 0));
+  if (!r.ok) fail(r.code === "pexels_rate_limited" ? 429 : 502, String(r.code));
+  return json({ provider, label: P.label, site: P.site, license_url: P.licenseUrl, photos: r.photos, total: r.total, page: r.page, has_next: r.hasNext, remaining: r.remaining });
+}
+async function stockSelect(c: Ctx) {
+  const b = await readJson(c.req, 10_000);
+  const provider = str(b.provider, 20) || "pexels";
+  if (!has(PHOTO_PROVIDERS, provider)) fail(400, "bad_field", { field: "provider" });
+  const photoId = optInt(b.photo_id, "photo_id", 1, 9_000_000_000_000);
+  if (!photoId) fail(400, "bad_field", { field: "photo_id" });
+  const { post, slot, purpose } = await slotTarget(b, false);
+  await stockGuard(provider);
+  await storageGuard();
+  const P = PHOTO_PROVIDERS[provider as keyof typeof PHOTO_PROVIDERS];
+  const r = await saveStockPhoto(imageDeps(), { provider, photoId, key: Deno.env.get(P.envKey) ?? "", post, slot, purpose, link: b.link === true && !!slot }) as J;
+  if (!r.ok) { if (r.error) rpcError(r.error as { message?: string }); fail(Number(r.status ?? 500), String(r.code)); }
+  return json({ image: (await withUrls([r.image as J]))[0], slot: r.slot ?? null, reused: !!r.reused });
+}
+
+// 직접 올리기: 앱은 multipart(파일+정보), 점검용으로 JSON(base64)도 받음. 실제 내용으로 형식 검사, 숨은 정보 지움
+async function uploadImage(c: Ctx) {
+  const ct = (c.req.headers.get("content-type") ?? "").toLowerCase();
+  const len = Number(c.req.headers.get("content-length") ?? 0);
+  if (len > MAX_UPLOAD_BYTES * 1.4 + 100_000) fail(413, "too_large");
+  let bytes: Uint8Array = new Uint8Array();
+  let declared = "";
+  let meta: J = {};
+  if (ct.startsWith("multipart/form-data")) {
+    let form: FormData;
+    try { form = await c.req.formData(); } catch { return fail(400, "bad_body"); }
+    const f = form.get("file");
+    if (!(f instanceof Blob)) fail(400, "bad_field", { field: "file" });
+    const file = f as Blob;
+    if (file.size > MAX_UPLOAD_BYTES) fail(413, "too_large");
+    bytes = new Uint8Array(await file.arrayBuffer());
+    declared = file.type;
+    try { meta = JSON.parse(String(form.get("meta") ?? "{}")) as J; } catch { fail(400, "bad_body"); }
+  } else if (ct.startsWith("application/json")) {
+    const b = await readJson(c.req, Math.ceil(MAX_UPLOAD_BYTES * 1.4) + 20_000);
+    if (typeof b.b64 !== "string") fail(400, "bad_field", { field: "b64" });
+    try { bytes = b64ToBytes(b.b64); } catch { fail(400, "bad_field", { field: "b64" }); }
+    declared = str(b.mime, 40);
+    meta = b;
+  } else fail(415, "bad_type");
+  if (!meta || typeof meta !== "object") meta = {};
+  const { post, slot, purpose } = await slotTarget(meta, false);
+  await storageGuard(bytes.length);
+  const r = await saveUploaded(imageDeps(), {
+    bytes, declaredMime: declared, kind: meta.kind === "card" ? "card" : "upload", rights: meta.rights === true,
+    post, slot, purpose, description: str(meta.description, 300), link: meta.link === true && !!slot,
+  }) as J;
+  if (!r.ok) { if (r.error) rpcError(r.error as { message?: string }); fail(Number(r.status ?? 500), String(r.code), r.reason ? { reason: r.reason } : {}); }
+  return json({ image: (await withUrls([r.image as J]))[0], slot: r.slot ?? null, reused: !!r.reused });
+}
+
+// 보관함
+async function listImages(c: Ctx) {
+  const kind = c.url.searchParams.get("kind");
+  const before = c.url.searchParams.get("before");
+  const postId = c.url.searchParams.get("post_id");
+  let q = sb.from("post_images").select("*").is("deleted_at", null).order("created_at", { ascending: false }).limit(48);
+  if (kind) q = q.eq("kind", oneOf(kind, ["ai", "stock", "upload", "card"] as const, "kind"));
+  if (postId) { if (!isUuid(postId)) fail(400, "bad_field", { field: "post_id" }); q = q.eq("origin_post_id", postId); }
+  if (before) { if (isNaN(Date.parse(before))) fail(400, "bad_field", { field: "before" }); q = q.lt("created_at", before); }
+  const { data, error } = await q;
+  if (error) throw error;
+  const rows = (data ?? []) as J[];
+  return json({ images: await withUrls(rows), usage: await imageUsage(), next: rows.length === 48 ? rows[rows.length - 1].created_at : null });
+}
+async function getImage(c: Ctx) {
+  const { data, error } = await sb.from("post_images").select("*").eq("id", c.params[0]).is("deleted_at", null).maybeSingle();
+  if (error) throw error;
+  if (!data) fail(404, "not_found");
+  const [slots, decks, gen] = await Promise.all([
+    sb.from("post_image_slots").select("post_id, slot_key, slot_index, slot_text, used_at, downloaded_at, posts(titles, keyword, deleted_at)").eq("image_id", c.params[0]),
+    sb.from("post_card_decks").select("post_id").eq("bg_image_id", c.params[0]),
+    (data as J).generation_id ? sb.from("image_generations").select(GEN_COLS).eq("id", (data as J).generation_id).maybeSingle() : Promise.resolve({ data: null, error: null }),
+  ]);
+  if (slots.error) throw slots.error;
+  if (decks.error) throw decks.error;
+  return json({ image: (await withUrls([data as J]))[0], used_in: slots.data, decks: decks.data, generation: gen.data });
+}
+async function patchImage(c: Ctx) {
+  const b = await readJson(c.req, 10_000);
+  const p: J = {};
+  if ("review_status" in b) p.review_status = oneOf(b.review_status, ["검수 전", "사용 가능", "사용 안 함"] as const, "review_status");
+  if ("review_note" in b) p.review_note = str(b.review_note, 300).trim();
+  if ("description" in b) p.description = str(b.description, 500).trim();
+  if ("alt_text" in b) p.alt_text = str(b.alt_text, 300).trim();
+  if (!Object.keys(p).length) fail(400, "empty");
+  const { data, error } = await sb.from("post_images").update(p).eq("id", c.params[0]).is("deleted_at", null).select().maybeSingle();
+  if (error) throw error;
+  if (!data) fail(404, "not_found");
+  return json({ image: (await withUrls([data as J]))[0] });
+}
+// 지우기: 어느 원고(휴지통 포함)·카드뉴스에서라도 쓰는 중이면 거절. 기록(비용·출처)은 남기고 파일만 지움
+async function deleteImage(c: Ctx) {
+  const { data, error } = await sb.rpc("image_delete", { p_image: c.params[0] });
+  if (error) rpcError(error);
+  const path = String((data as J)?.storage_path ?? "");
+  let removed = false;
+  if (path) {
+    const r = await sb.storage.from(BUCKET).remove([path]);
+    removed = !r.error;
+    if (r.error) console.error("image file remove:", r.error.message);
+  }
+  return json({ ok: true, file_removed: removed });
+}
+async function markDownloaded(c: Ctx) {
+  const b = await readJson(c.req, 20_000);
+  const items = Array.isArray(b.items) ? (b.items as J[]).slice(0, 40) : [];
+  const ids = [...new Set(items.map((x) => x?.image_id).filter(isUuid))] as string[];
+  if (!ids.length) fail(400, "empty");
+  const now = nowIso();
+  const r = await sb.from("post_images").update({ downloaded_at: now }).in("id", ids);
+  if (r.error) throw r.error;
+  for (const it of items) {
+    if (!isUuid(it?.post_id) || !isUuid(it?.image_id) || !validSlotKey(it?.slot_key)) continue;
+    const u = await sb.from("post_image_slots").update({ downloaded_at: now }).eq("post_id", it.post_id).eq("slot_key", it.slot_key).eq("image_id", it.image_id);
+    if (u.error) throw u.error;
+  }
+  return json({ ok: true, at: now });
+}
+
+// 사진 자리 연결·빼기·맞바꾸기·자르기/사용 완료
+async function linkSlot(c: Ctx) {
+  const b = await readJson(c.req, 10_000);
+  const postId = c.params[0];
+  if (b.image_id === null) {
+    // 빼기: 지금 본문에 없는 자리(사라진 자리)도 뺄 수 있게, 그 원고의 연결 줄을 지움 (이미지는 보관함에 그대로)
+    const key = str(b.slot_key, 220);
+    if (!validSlotKey(key)) fail(400, "bad_field", { field: "slot_key" });
+    await getPost(postId);
+    const { error } = await sb.from("post_image_slots").delete().eq("post_id", postId).eq("slot_key", key);
+    if (error) throw error;
+    return json({ ok: true, slot: null });
+  }
+  if (!isUuid(b.image_id)) fail(400, "bad_field", { field: "image_id" });
+  const { slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
+  const { data, error } = await sb.rpc("image_slot_upsert", { p_post: postId, p: { slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, image_id: b.image_id, purpose } });
+  if (error) rpcError(error);
+  return json({ slot: data });
+}
+async function swapSlots(c: Ctx) {
+  const b = await readJson(c.req, 10_000);
+  const post = await getPost(c.params[0]);
+  const cur = parseSlots(String(post.body ?? ""));
+  const a = cur.find((s: J) => s.key === str(b.a, 220)), z = cur.find((s: J) => s.key === str(b.b, 220));
+  if (!a || !z || a.key === z.key) fail(400, "bad_field", { field: "slot_key" });
+  const { data, error } = await sb.rpc("image_slot_swap", {
+    p_post: post.id, a: { slot_key: a.key, slot_index: a.index, slot_text: a.text }, b: { slot_key: z.key, slot_index: z.index, slot_text: z.text },
+  });
+  if (error) rpcError(error);
+  return json(data);
+}
+async function patchSlot(c: Ctx) {
+  const b = await readJson(c.req, 10_000);
+  const post = await getPost(c.params[0]);
+  const key = str(b.slot_key, 220);
+  if (!validSlotKey(key)) fail(400, "bad_field", { field: "slot_key" });
+  const patch: J = {};
+  if ("crop" in b) {
+    if (b.crop === null) patch.crop = null;
+    else {
+      const cr = (b.crop ?? {}) as J;
+      const ratio = str(cr.ratio, 8), x = Number(cr.x), y = Number(cr.y);
+      if (!has(RATIOS, ratio) || !(x >= 0 && x <= 1) || !(y >= 0 && y <= 1)) fail(400, "bad_field", { field: "crop" });
+      patch.crop = { ratio, x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000 };
+    }
+  }
+  if ("used" in b) patch.used_at = b.used === true ? nowIso() : null;
+  if ("purpose" in b) { if (!has(PURPOSES, b.purpose)) fail(400, "bad_field", { field: "purpose" }); patch.purpose = String(b.purpose); }
+  if (!Object.keys(patch).length) fail(400, "empty");
+  const { data, error } = await sb.from("post_image_slots").update(patch).eq("post_id", post.id).eq("slot_key", key).not("image_id", "is", null).select().maybeSingle();
+  if (error) throw error;
+  if (!data) fail(404, "not_found");
+  return json({ slot: data });
+}
+
+// 카드뉴스 (문구·템플릿 저장. 그림은 앱이 직접 그려서 PNG로 내보냄 — 글자를 이미지 AI로 만들지 않음)
+async function saveCards(c: Ctx) {
+  const b = await readJson(c.req, 40_000);
+  const post = await getPost(c.params[0]);
+  if (!Array.isArray(b.slides)) fail(400, "bad_field", { field: "slides" });
+  const slides = (b.slides as J[]).slice(0, CARD_LIMITS.slides).map((x) => ({
+    title: str(x?.title, CARD_LIMITS.title).trim(), text: str(x?.text, CARD_LIMITS.text).trim(), icon: has(CARD_ICONS, x?.icon) ? String(x.icon) : "",
+  })).filter((x) => x.title || x.text);
+  if (!slides.length) fail(400, "empty");
+  let bg: string | null = null;
+  if (b.bg_image_id !== null && b.bg_image_id !== undefined && b.bg_image_id !== "") {
+    if (!isUuid(b.bg_image_id)) fail(400, "bad_field", { field: "bg_image_id" });
+    const { data } = await sb.from("post_images").select("id").eq("id", b.bg_image_id).is("deleted_at", null).maybeSingle();
+    if (!data) fail(404, "not_found");
+    bg = String(b.bg_image_id);
+  }
+  const row = {
+    post_id: post.id, template: oneOf(b.template ?? "clean", Object.keys(CARD_TEMPLATES), "template"), ratio: oneOf(b.ratio ?? "4:5", CARD_RATIOS as string[], "ratio"),
+    slides, ad_label: b.ad_label !== false, bg_image_id: bg,
+  };
+  const { data, error } = await sb.from("post_card_decks").upsert(row, { onConflict: "post_id" }).select().single();
+  if (error) throw error;
+  return json({ deck: data });
+}
+
 // ───────── 경로표 ─────────
 const U = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
 const R = (s: string) => new RegExp(`^${s}$`);
@@ -1092,6 +1655,24 @@ const ROUTES: [string, RegExp, (c: Ctx) => Promise<Response>][] = [
   ["POST", R("channels"), createChannel],
   ["POST", R("channels/([a-z0-9_]{2,40})"), patchChannel],
   ["POST", R("compat"), setCompat],
+  // 이미지 스튜디오
+  ["GET", R("images/config"), getImageConfig],
+  ["GET", R("images"), listImages],
+  ["POST", R("images/upload"), uploadImage],
+  ["POST", R("images/generate"), generateImage],
+  ["POST", R("images/downloaded"), markDownloaded],
+  ["GET", R(`images/generations/${U}`), getGeneration],
+  ["POST", R(`images/generations/${U}/cost`), setGenerationCost],
+  ["GET", R(`images/${U}`), getImage],
+  ["POST", R(`images/${U}`), patchImage],
+  ["DELETE", R(`images/${U}`), deleteImage],
+  ["GET", R("stock/search"), stockSearch],
+  ["POST", R("stock/select"), stockSelect],
+  ["GET", R(`posts/${U}/images`), getPostImages],
+  ["POST", R(`posts/${U}/images/link`), linkSlot],
+  ["POST", R(`posts/${U}/images/swap`), swapSlots],
+  ["POST", R(`posts/${U}/images/slot`), patchSlot],
+  ["POST", R(`posts/${U}/cards`), saveCards],
 ];
 
 // DB 오류를 사용자 입력 오류로 바꿔서 알려줌 (내부 내용은 기록만)

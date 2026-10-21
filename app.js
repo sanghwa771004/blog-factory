@@ -1,10 +1,12 @@
-// 글공장 앱 1.1.2 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 저장은 서버 API)
+// 글공장 앱 1.2.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.1.2';
-import * as L from './lib.js?v=1.1.2';
+} from './checks.js?v=1.2.0';
+import * as L from './lib.js?v=1.2.0';
+import * as IMG from './images.js?v=1.2.0';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.2.0';
 
-const APP_VER = '1.1.2';
+const APP_VER = '1.2.0';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -82,7 +84,7 @@ let sheetOnClose = null;
 function openSheet(title, ...kids) {
   const box = $('#sheetIn');
   box.textContent = '';
-  box.append(h('div', { class: 'split' }, h('h2', null, title), btn('닫기', 'sm ghost', closeSheet)), ...kids);
+  box.append(h('div', { class: 'split' }, h('h2', null, title), btn('닫기', 'sm ghost', closeSheet)), ...kids.flat(Infinity).filter((k) => k != null && k !== false && k !== ''));
   $('#sheet').hidden = false; $('#dim').hidden = false;
   $('#sheet').scrollTop = 0;
 }
@@ -131,7 +133,9 @@ const ERR = {
   update_app: '앱이 예전 버전이야. 앱을 닫았다가 다시 열어서 업데이트해줘.',
   topic_used: '이 주제로 쓴 원고가 이미 있어.',
   server: '서버에서 문제가 생겼어. 잠시 뒤에 다시 해줘.',
+  ...IMAGE_ERR,
 };
+Object.assign(FIELD, IMAGE_FIELD);
 function errText(e) {
   const code = (e && e.code) || 'server';
   if (code === 'bad_field') {
@@ -139,6 +143,8 @@ function errText(e) {
     return `${FIELD[f] || '입력한 값'}을(를) 확인해줘.`;
   }
   if (code === 'incompatible' && e.detail) return `쓸 수 없는 조합이야: ${e.detail}`;
+  if (code === 'bad_image' && e.reason && IMAGE_REASON[e.reason]) return IMAGE_REASON[e.reason];
+  if (code === 'image_in_use' && e.uses) return `${e.uses}곳에서 쓰는 이미지라 지울 수 없어. 먼저 연결을 빼줘.`;
   return ERR[code] || ERR.server;
 }
 function showError(e) {
@@ -155,10 +161,11 @@ let session = LS.get('gf-session', '');
 async function api(path, { method = 'GET', body } = {}) {
   const headers = {};
   if (session) headers['x-app-session'] = session;
-  if (body !== undefined) headers['content-type'] = 'application/json';
+  const form = typeof FormData !== 'undefined' && body instanceof FormData; // 파일 올리기 (경계 표시는 브라우저가 붙임)
+  if (body !== undefined && !form) headers['content-type'] = 'application/json';
   let r;
   try {
-    r = await fetch(API + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, cache: 'no-store' });
+    r = await fetch(API + path, { method, headers, body: body === undefined ? undefined : form ? body : JSON.stringify(body), cache: 'no-store' });
   } catch { throw { code: 'network' }; }
   let j = {};
   try { j = await r.json(); } catch { /* 빈 응답 */ }
@@ -178,10 +185,10 @@ async function run(button, fn, okMsg) {
 // ───────── 상태 ─────────
 const S = {
   loaded: false, posts: [], trash: [], jobs: [], settings: null, runs: [], channels: [], programs: [], compat: [], topics: [],
-  products: [], post_products: [], links: [], imports: [], stats: {}, postMetrics: {}, manualMetrics: null,
+  products: [], post_products: [], links: [], imports: [], image_slots: [], stats: {}, postMetrics: {}, manualMetrics: null,
 };
-let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {} };
-const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports'];
+let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {}, slotsBy: {} };
+const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots'];
 function index() {
   M = {
     prog: Object.fromEntries(S.programs.map((p) => [p.id, p])),
@@ -191,6 +198,7 @@ function index() {
     linksBy: groupBy(S.links, 'post_id'),
     ppBy: groupBy(S.post_products, 'post_id'),
     jobsBy: groupBy(S.jobs.filter((j) => j.post_id), 'post_id'),
+    slotsBy: groupBy(S.image_slots || [], 'post_id'),
   };
 }
 const linksOf = (id) => L.sortedLinks(M.linksBy[id] || []);
@@ -198,11 +206,24 @@ const productsOf = (id) => (M.ppBy[id] || []).slice().sort((a, b) => a.sort - b.
 const progName = (id) => (M.prog[id] && M.prog[id].name) || id;
 const chName = (id) => (M.ch[id] && M.ch[id].name) || id || '채널 없음';
 function checksFor(p, withOthers) {
-  return checkPost(p, {
+  const r = checkPost(p, {
     programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(),
     others: withOthers ? S.posts.filter((o) => o.id !== p.id && o.body).slice(0, 80).map((o) => ({ id: o.id, title: titleOf(o), body: o.body })) : [],
   });
+  // 이미지 검사(검수 전·실제 사진이 필요한 자리의 AI 이미지 등)는 '확인할 것'으로만 더함 — 발행을 막지 않음
+  const ic = IMG.imageChecks(p, (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images })));
+  r.warnings.push(...ic.warnings);
+  if (ic.tips.length) r.tips = r.tips.filter((t) => t.code !== 'image_placeholders').concat(ic.tips);
+  return r;
 }
+// 이미지 스튜디오 (studio.js) — 화면 도구를 넘겨줌
+const ST = createStudio({
+  h, btn, field, det, opt, L, api: (...a) => api(...a), run: (...a) => run(...a), toast: (...a) => toast(...a), openSheet: (...a) => openSheet(...a), closeSheet: () => closeSheet(),
+  confirmBox: (...a) => confirmBox(...a), go: (x) => go(x), load: () => load(), markDirty, clearDirty: () => { dirty = false; },
+  setSheetOnClose: (f) => { sheetOnClose = f; }, copyPlain: (t, b) => copyPlain(t, b), errText: (e) => errText(e), titleOf,
+  get S() { return S; }, post: (id) => M.post[id], productsOf, slotsOf: (id) => M.slotsBy[id] || [], programs: () => M.prog,
+  onImages: (id) => refreshPreview(id), clearStats: () => { S.stats = {}; },
+});
 let lastLoad = 0, loading = false, pendingRender = false, lastSig = '';
 async function load() {
   if (loading || !session) return;
@@ -303,7 +324,7 @@ const go = (path) => { if (location.hash === '#' + path) render(true); else loca
 window.addEventListener('hashchange', () => { route = parseHash(); dirty = false; closeSheet(); render(true); window.scrollTo(0, 0); });
 document.querySelectorAll('#tabbar button').forEach((b) => b.addEventListener('click', () => go(b.dataset.tab)));
 $('#refreshBtn').addEventListener('click', async () => {
-  const b = $('#refreshBtn'); b.disabled = true; dirty = false; S.stats = {}; S.postMetrics = {}; S.manualMetrics = null;
+  const b = $('#refreshBtn'); b.disabled = true; dirty = false; S.stats = {}; S.postMetrics = {}; S.manualMetrics = null; ST.invalidate();
   await load(); render(true); b.disabled = false; toast('최신으로 불러왔어');
 });
 $('#newDataBtn').addEventListener('click', () => { dirty = false; $('#newData').hidden = true; pendingRender = false; render(true); });
@@ -473,7 +494,9 @@ function recAction(r) {
 const byDate = (a, b) => String(a.publish_date || '9999').localeCompare(String(b.publish_date || '9999')) || String(a.created_at || '').localeCompare(String(b.created_at || ''));
 function viewContent() {
   const [a, b] = route.parts;
+  if (a === 'post' && b && route.parts[2] === 'cards') return M.post[b] ? ST.viewCards(M.post[b]) : viewPost(b);
   if (a === 'post' && b) return viewPost(b);
+  if (a === 'images') return ST.viewLibrary();
   if (a === 'new') return viewNew(route.parts[1] === 'topic' ? route.parts[2] : null);
   return viewList(a === 'f' ? b : 'all');
 }
@@ -498,7 +521,7 @@ const FILTERS = [['all', '전체'], ['you', '확인 필요'], ['work', '작업 �
 const EXTRA_FILTER = { today: '오늘 발행', late: '발행일 지남', links: '링크 빠짐', sources: '출처 빠짐' };
 function viewList(f) {
   const box = h('div', { class: 'view' });
-  box.append(h('div', { class: 'go' }, btn('+ 새 원고 요청', '', () => go('content/new')), btn('이미 올린 글 기록', 'ghost', manualPostSheet)));
+  box.append(h('div', { class: 'go' }, btn('+ 새 원고 요청', '', () => go('content/new')), btn('이미 올린 글 기록', 'ghost', manualPostSheet), btn('이미지 보관함', 'ghost', () => go('content/images'))));
   const seg = h('div', { class: 'seg', role: 'group', 'aria-label': '상태별 보기' },
     FILTERS.map(([k, label]) => h('button', { type: 'button', 'aria-pressed': String(k === f), onclick: () => go(k === 'all' ? 'content' : 'content/f/' + k) }, `${label} ${filterPosts(k).length}`)));
   if (EXTRA_FILTER[f]) seg.append(h('button', { type: 'button', 'aria-pressed': 'true' }, `${EXTRA_FILTER[f]} ${filterPosts(f).length}`));
@@ -525,7 +548,9 @@ function postList(ps, { showDate, flags } = {}) {
     if (flags && !WORK.includes(p.stage) && p.body) {
       const r = checksFor(p, false);
       const me = countMe(p.body);
-      fl = h('span', { class: 'flags' }, r.errors.length ? h('span', { class: 'flag e' }, `고칠 것 ${r.errors.length}`) : null, me ? h('span', { class: 'flag w' }, `✏️${me}`) : null);
+      const ic = ST.slotCount(p);
+      fl = h('span', { class: 'flags' }, r.errors.length ? h('span', { class: 'flag e' }, `고칠 것 ${r.errors.length}`) : null, me ? h('span', { class: 'flag w' }, `✏️${me}`) : null,
+        ic ? h('span', { class: 'flag ' + (ic.linked === ic.total ? 'ok' : 'i'), title: `사진 자리 ${ic.total}곳 중 ${ic.linked}곳 연결` }, `📷${ic.linked}/${ic.total}`) : null);
     }
     return h('div', { class: 'item' },
       h('button', { type: 'button', class: 'main', onclick: () => go('content/post/' + p.id) }, h('b', null, titleOf(p)), h('small', null, meta.join(' · '))),
@@ -676,6 +701,7 @@ function viewPost(id) {
     box.append(panel(`발행 전 검사 (고칠 것 ${r.errors.length} · 확인 ${r.warnings.length})`, checkList(r)));
     box.append(copyPanel(p, r, links));
     box.append(bodyPanel(p));
+    if (!WORK.includes(p.stage)) box.append(ST.postPanel(p));
     box.append(linksPanel(p, links));
     box.append(productsPanel(p));
     box.append(sourcesPanel(p));
@@ -751,7 +777,15 @@ function publishSheet(p) {
 }
 async function patchPost(p, body, button, okMsg) {
   const j = await run(button, () => api('/posts/' + p.id, { method: 'POST', body }), okMsg);
-  if (j) { dirty = false; await load(); if (j.demoted) showError({ code: 'check_failed', errors: j.demoted }); }
+  if (j) {
+    dirty = false;
+    if ('body' in body) ST.invalidate(p.id); // 사진 자리가 바뀌었을 수 있음
+    await load();
+    if (j.demoted) showError({ code: 'check_failed', errors: j.demoted });
+    else if (j.image_sync && (j.image_sync.rekeyed || j.image_sync.orphans)) {
+      toast([j.image_sync.rekeyed ? `설명이 바뀐 사진 자리 ${j.image_sync.rekeyed}곳은 이미지 연결을 옮겼어.` : '', j.image_sync.orphans ? `본문에서 사라진 자리 ${j.image_sync.orphans}곳의 이미지는 그대로 있어 (이미지 칸 아래에서 확인).` : ''].filter(Boolean).join(' '), 6000);
+    }
+  }
   return j;
 }
 
@@ -797,7 +831,7 @@ function flash(button) {
   button._t = setTimeout(() => { button.textContent = button.dataset.label; }, 1600);
 }
 function copyPanel(p, r, links) {
-  const ctx = { links, programs: M.prog };
+  const ctx = { links, programs: M.prog, images: ST.exportImages(p) };
   const disc = disclosureFor(p.program_ids, M.prog);
   const box = panel('블로그에 올리기');
   // 고지문이 없거나 애매하면 복사 자체를 막음 (고지 없이 제휴·협찬 글이 나가지 않게)
@@ -813,6 +847,7 @@ function copyPanel(p, r, links) {
     btn('서식 그대로 복사', 'sm', (ev) => copyRich(L.exportHtml(p, ctx), L.exportPlain(p, ctx), ev.currentTarget)),
     btn('HTML 코드', 'sm ghost', (ev) => copyPlain(L.exportHtml(p, ctx), ev.currentTarget)),
     btn('텍스트만', 'sm ghost', (ev) => copyPlain(L.exportPlain(p, ctx), ev.currentTarget))));
+  if (countImg(p.body)) box.append(h('p', { class: 'hint' }, "📷 사진은 앱이 블로그에 대신 올리지 않아. 복사한 글의 사진 자리마다 내려받을 파일 이름이 적혀 있으니, 원고 아래 '이미지'에서 '모두 내려받기'로 받은 파일을 그 자리에 넣어줘."));
   if (disc.text) box.append(h('p', { class: 'hint' }, '맨 위에 이 고지문이 자동으로 들어가:'), h('p', { class: 'sns' }, disc.text));
   else if ((p.program_ids || []).length) box.append(h('p', { class: 'hint' }, '이 글의 수익 모델에는 넣을 고지문이 없어 (설정 > 수익 모델에서 확인).'));
   const tags = p.hashtags || [];
@@ -839,11 +874,12 @@ function bodyPanel(p) {
         btn('빈 칸 모두 지우기', 'sm ghost', (ev) => patchPost(p, { body: removeEmptyMe(p.body) }, ev.currentTarget, '빈 칸을 지웠어')))));
   }
   const img = countImg(p.body);
-  if (img) box.append(h('p', { class: 'notice' }, `📷 사진 자리 ${img}곳 — 붙여넣은 뒤 직접 찍은 사진을 넣어줘.`));
-  const prev = h('div', { class: 'post' });
-  const disc = disclosureFor(p.program_ids, M.prog).text;
-  if (disc) prev.append(h('p', { class: 'disc' }, disc));
-  prev.insertAdjacentHTML('beforeend', L.viewHtml(p, linksOf(p.id)));
+  if (img) {
+    const c = ST.slotCount(p);
+    box.append(h('p', { class: 'notice' }, `📷 사진 자리 ${img}곳 · 이미지 연결 ${c ? c.linked : 0}곳 — 아래 '이미지'에서 만들거나 찾거나 올려서 연결하고, 블로그에는 내려받아서 직접 넣어줘.`));
+  }
+  const prev = h('div', { class: 'post', id: 'pv-' + p.id });
+  fillPreview(prev, p);
   const editBox = h('div', { class: 'stack' });
   const startEdit = () => {
     const ta = h('textarea', { class: 'body-edit', value: p.body, oninput: markDirty });
@@ -861,6 +897,18 @@ function bodyPanel(p) {
   if (p.ai_notes && p.ai_notes.notes) box.append(h('p', { class: 'hint' }, '자동 작가 메모: ' + p.ai_notes.notes));
   if (fc.length) box.append(h('p', { class: 'notice' }, 'AI가 사실 확인이 필요하다고 표시한 문장: ' + fc.join(' / ')));
   return box;
+}
+// 원고 미리보기 (연결된 이미지는 서명 주소로 보여줌 — 이미지 정보를 받으면 다시 그림)
+function fillPreview(el, p) {
+  el.textContent = '';
+  const disc = disclosureFor(p.program_ids, M.prog).text;
+  if (disc) el.append(h('p', { class: 'disc' }, disc));
+  el.insertAdjacentHTML('beforeend', L.viewHtml(p, linksOf(p.id), ST.previewImages(p)));
+}
+function refreshPreview(id) {
+  const el = document.getElementById('pv-' + id);
+  const p = M.post[id];
+  if (el && p && !el.hidden) fillPreview(el, p);
 }
 function linksPanel(p, links) {
   const box = panel(`제휴 링크 (${links.length})`);
@@ -1121,6 +1169,7 @@ function metricSheet({ postId, linkId } = {}) {
     field('글', post), linkField, h('div', { class: 'row' }, field('시작일', start), field('종료일', end)),
     h('div', { class: 'row' }, field('조회수', numIn('views')), field('링크 클릭', numIn('clicks')), field('구매(인정) 건수', numIn('orders')), field('취소 건수', numIn('cancels')), field('노출 수', numIn('impressions'))),
     h('div', { class: 'row' }, field('발생 수익(원)', numIn('revenue_est', true)), field('확정 수익(원)', numIn('revenue_confirmed', true)), field('지급액(원)', numIn('revenue_paid', true)), field('비용(원)', numIn('cost', true))),
+    h('p', { class: 'hint' }, 'AI 이미지 생성 비용은 앱이 따로 셈해. 비용 칸에 또 넣으면 두 번 더해져.'),
     field('수익 모델', prog), field('어디서 본 숫자야?', label), field('메모', note),
     btn('저장', 'wide', async (ev) => {
       const body = { period_start: start.value, period_end: end.value || start.value, post_id: post.value || undefined, link_id: (post.value && link.value) || undefined, program_id: prog.value || undefined, source_label: label.value.trim(), note: note.value.trim() };
@@ -1287,8 +1336,9 @@ function viewMoney() {
   const box = h('div', { class: 'view' });
   box.append(h('div', { class: 'seg' }, [['month', '이번 달'], ['last', '지난달'], ['30', '최근 30일'], ['all', '전체']].map(([k, l]) => h('button', { type: 'button', 'aria-pressed': String(moneyRange === k), onclick: () => { moneyRange = k; render(true); } }, l))));
   const sum = panel('요약', h('p', { class: 'hint' }, '불러오는 중…'));
+  const imgCost = panel('이미지 생성 비용', h('p', { class: 'hint' }, '불러오는 중…'));
   const brk = panel('어디서 벌었나', h('p', { class: 'hint' }, '불러오는 중…'));
-  box.append(sum, brk);
+  box.append(sum, imgCost, brk);
   const rg = rangeOf(moneyRange);
   getStats(rg.from, rg.to).then((st) => {
     const tot = st.totals || {};
@@ -1296,7 +1346,9 @@ function viewMoney() {
       h('p', { class: 'hint' }, `실적 기록 ${tot.rows || 0}줄 · 마지막 날짜 ${tot.last_date || '없음'}${tot.sources && tot.sources.length ? ' · 출처: ' + tot.sources.join(', ') : ''}`),
       h('p', { class: 'hint' }, '발생 수익은 아직 바뀔 수 있는 숫자, 확정 수익은 제휴사가 확정한 숫자, 지급액은 실제로 들어온 돈이야. 빈 칸은 0이 아니라 데이터가 없는 거야.'),
       h('p', { class: 'hint' }, CLICK_NOTE));
-    brk.replaceChildren(h('h2', null, '어디서 벌었나'), breakdown('글별', st.by_post, (k) => (M.post[k] ? titleOf(M.post[k]) : k ? '지운 글' : '글 연결 안 됨'), (k) => (k && M.post[k] ? () => go('content/post/' + k) : null)),
+    imgCost.replaceChildren(h('h2', null, '이미지 생성 비용'), ST.moneyBlock(st.image_costs, L.netProfit(tot).confirmed));
+    const icOf = (k) => { const c = ST.postCost(st.image_costs, k); return c && Number(c.count) ? h('span', null, '이미지 ', h('b', null, IMG.fmtUsd(Number(c.usd))), ` (${c.billed}번)`) : null; };
+    brk.replaceChildren(h('h2', null, '어디서 벌었나'), breakdown('글별', st.by_post, (k) => (M.post[k] ? titleOf(M.post[k]) : k ? '지운 글' : '글 연결 안 됨'), (k) => (k && M.post[k] ? () => go('content/post/' + k) : null), icOf),
       breakdown('채널별', st.by_channel, (k) => (k ? chName(k) : '채널 없음')), breakdown('수익 모델별', st.by_program, (k) => (k ? progName(k) : '정하지 않음')), breakdown('카테고리별', st.by_category, (k) => k || '카테고리 없음'));
   }).catch((e) => { if (e.code !== 'auth') sum.replaceChildren(h('h2', null, '요약'), h('p', { class: 'hint' }, errText(e))); });
   box.append(panel('실적 넣기',
@@ -1306,7 +1358,7 @@ function viewMoney() {
   box.append(importsPanel(), manualListPanel());
   return box;
 }
-function breakdown(title, rows, labelOf, onClickOf) {
+function breakdown(title, rows, labelOf, onClickOf, extraOf) {
   const list = (rows || []).slice().sort((a, b) => (L.val(b, 'revenue_est') ?? -1) - (L.val(a, 'revenue_est') ?? -1) || (L.val(b, 'clicks') ?? -1) - (L.val(a, 'clicks') ?? -1)).slice(0, 15);
   const d = det('brk:' + title, `${title} (${(rows || []).length})`, title === '글별', '');
   if (!list.length) { d.append(h('p', { class: 'hint' }, '데이터 없음')); return d; }
@@ -1321,7 +1373,8 @@ function breakdown(title, rows, labelOf, onClickOf) {
         h('span', null, '구매 ', h('b', null, numOrDash(orders))), h('span', null, '발생 ', h('b', null, L.val(a, 'revenue_est') == null ? '–' : L.won(L.val(a, 'revenue_est')))),
         h('span', null, '확정 ', h('b', null, L.val(a, 'revenue_confirmed') == null ? '–' : L.won(L.val(a, 'revenue_confirmed')))),
         ctr != null ? h('span', null, '클릭률 ', h('b', null, L.pct(ctr))) : null,
-        conv != null ? h('span', null, '전환율 ', h('b', null, L.pct(conv))) : null));
+        conv != null ? h('span', null, '전환율 ', h('b', null, L.pct(conv))) : null,
+        extraOf ? extraOf(a.key) : null));
   })));
   return d;
 }
@@ -1441,7 +1494,7 @@ function viewSettings() {
   const box = h('div', { class: 'view' });
   const sec = route.parts[0] || '';
   const sections = [
-    ['auto', '자동 글쓰기', secAuto], ['jobs', '작업 기록', secJobs], ['programs', '수익 모델', secPrograms], ['channels', '게시 채널', secChannels],
+    ['auto', '자동 글쓰기', secAuto], ['images', '이미지 (AI·사진·비용 한도)', () => ST.settingsSection()], ['jobs', '작업 기록', secJobs], ['programs', '수익 모델', secPrograms], ['channels', '게시 채널', secChannels],
     ['compat', '수익 모델 × 채널 조합표', secCompat], ['products', '상품 목록', secProducts], ['devices', '기기·접속 코드', secDevices],
     ['backup', '백업·복구', secBackup], ['trash', '휴지통', secTrash], ['guide', '사용 방법', secGuide], ['about', '앱 정보', secAbout],
   ];
@@ -1637,7 +1690,7 @@ function secDevices() {
 }
 function secBackup() {
   return [
-    h('p', { class: 'hint' }, '원고·주제·상품·링크·실적·설정을 파일 하나(JSON)로 받아. 접속 코드와 기기 정보는 들어가지 않아.'),
+    h('p', { class: 'hint' }, '원고·주제·상품·링크·실적·설정·이미지 정보(출처·프롬프트·비용·연결)를 파일 하나(JSON)로 받아. 접속 코드와 기기 정보는 들어가지 않아. 이미지 파일 자체는 안 들어가니 필요한 이미지는 보관함에서 내려받아 둬.'),
     btn('전체 백업 받기', 'sm', async (ev) => {
       const j = await run(ev.currentTarget, () => api('/export'));
       if (!j) return;
@@ -1675,6 +1728,11 @@ function secGuide() {
       h('li', null, '가격은 자주 바뀌어. 본문에 정확한 가격을 쓰려면 7일 안에 확인한 가격을 상품에 넣어둬.'),
       h('li', null, '제휴 링크는 받은 그대로. 줄이거나 다른 주소로 돌리지 마 (제휴사 규정 위반이 될 수 있어).'),
       h('li', null, '내가 산 건 수익으로 인정 안 될 수 있어 (토스 쉐어링크는 본인·지인 구매 불인정).'))),
+    g('이미지 넣기',
+      h('ol', null, h('li', null, "원고 아래 '이미지'에서 사진 자리마다 AI로 만들기·실제 사진 찾기(Pexels)·파일 올리기·보관함에서 고르기 중 하나"),
+        h('li', null, "미리보기에서 자를 곳을 맞추고 '사용 가능'으로 검수"), h('li', null, "'모두 내려받기' → '서식 그대로 복사'로 붙여넣은 뒤, 적힌 파일 이름대로 사진을 넣기"),
+        h('li', null, "블로그에 넣었으면 '사용 완료' 표시")),
+      h('p', null, 'AI 이미지는 일반 상황 삽화·배경용이야. 실제 상품 모습은 공식 이미지나 직접 찍은 사진으로. 이미지 안 글자는 카드뉴스에서 앱이 직접 그려. AI 이미지 키·한도는 설정 > 이미지.')),
     g('실적 넣기', h('p', null, '제휴사·블로그와 자동 연결은 없어. 쿠팡 파트너스·토스 쉐어링크·블로그 통계에서 숫자를 보고 직접 넣거나, 리포트를 CSV·엑셀로 내려받아 수익 탭에서 올려줘. 같은 파일을 두 번 올려도 중복은 건너뛰어.')),
   ];
 }
