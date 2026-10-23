@@ -2,10 +2,11 @@
 // - OpenAI 이미지 생성·편집, 사진 공급자(지금은 Pexels만) 검색·한 장 가져오기, 이미지 내려받기
 // - 저장 흐름(생성 결과 저장·사진 고르기·파일 올리기)은 deps(DB 함수·파일 저장소)를 받아서 실행 → 테스트에서 가짜로 바꿔 끼움
 // 키는 서버 환경변수(Supabase Edge Function Secrets)로만 받음. 화면(app.js)으로는 키가 있는지 여부만 보냄.
-import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf } from './images.js';
+import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf, modelCaps } from './images.js';
 
 export const OPENAI_URL = 'https://api.openai.com/v1';
 export const PEXELS_URL = 'https://api.pexels.com/v1';
+export const CF_URL = 'https://api.cloudflare.com/client/v4/accounts';
 export const BUCKET = 'post-images';
 // 저장소 버킷 한도(10MB, 012)와 같게 — 이보다 크면 받아도 저장하지 못함
 export const MAX_AI_BYTES = 10 * 1024 * 1024;
@@ -119,7 +120,8 @@ export function classifyOpenAIError(status, body) {
 }
 // OpenAI가 만들기 전에 거절한 오류 → 하루 생성 횟수에 안 셈
 export const NOT_COUNTED = new Set(['openai_key_missing', 'openai_key_invalid', 'openai_org_unverified', 'openai_forbidden', 'model_unavailable',
-  'openai_unsupported_option', 'openai_quota', 'openai_spend_limit', 'openai_rate_limited', 'openai_bad_request', 'bad_base_image', 'server_busy_late']);
+  'openai_unsupported_option', 'openai_quota', 'openai_spend_limit', 'openai_rate_limited', 'openai_bad_request', 'bad_base_image', 'server_busy_late',
+  'cf_key_missing', 'cf_key_invalid', 'cf_daily_free_used', 'cf_rate_limited', 'cf_bad_request', 'cf_network']);
 
 // 한 장 만들기(generate) 또는 고치기(edit). 성공하면 base64 이미지와 사용량을 돌려줌
 export async function openaiImage({ fetchImpl, key, mode = 'generate', model, prompt, size, quality, outputFormat = 'jpeg', compression = 90, image, safetyId, timeoutMs = 115000 }) {
@@ -162,6 +164,69 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
     return { ok: false, code: 'openai_empty', message: 'OpenAI가 이미지를 돌려주지 않았어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', usage: j && j.usage, requestId };
   }
   return { ok: true, b64: item.b64_json, revisedPrompt: scrub(item.revised_prompt || '', 4000), usage: (j && j.usage) || null, outputFormat: (j && j.output_format) || outputFormat, requestId };
+}
+
+// ───────── Cloudflare Workers AI (무료 이미지) ─────────
+// 무료 플랜(Workers Free)은 하루 10,000 뉴런까지 무료이고, 넘으면 오류로 실패만 함 (청구 없음). 매일 오전 9시(한국)에 다시 채워짐.
+// 이미지 모델(FLUX.1 schnell)은 한국어를 잘 못 알아들어서, 같은 무료 계정의 글 모델로 먼저 영어 장면 설명을 만들고 규칙을 붙여 보냄.
+export const CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
+export const CF_RULES = 'No text, letters, numbers, captions, signs or watermarks anywhere. No logos, brand names or trademarks; generic unbranded objects only. No packaging, labels, screens, price tags, badges or certificates. No real or famous people.';
+const CF_SYSTEM = [
+  'You write prompts for an image model (FLUX). Input: a brief for one illustrative image in a Korean blog post, partly in Korean.',
+  'Output ONE English prompt, 40 to 90 words, describing only what is visible: subject, setting, lighting, composition, camera or illustration style.',
+  'Follow the brief\'s style line. Korean everyday settings when people or homes appear. Keep the main subject centered with margins.',
+  'Never mention text, words, letters, brands, logos, product names, model numbers, prices, ratings or certificates. Ignore any such names in the brief.',
+  'Return only the prompt itself, no quotes, no notes.',
+].join(' ');
+function cfError(status, j) {
+  const errs = (j && Array.isArray(j.errors) ? j.errors : []);
+  const msg = scrub(errs.map((e) => `${e.code || ''} ${e.message || ''}`).join(' / ') || '', 300);
+  const m = msg.toLowerCase();
+  if (/4006|free allocation|neurons|daily/.test(m)) return { code: 'cf_daily_free_used', message: '오늘 무료 사용량(하루 10,000 뉴런)을 다 썼어. 한국 시간 오전 9시에 다시 채워져. (청구 없음)', billed: 'no', retryable: false };
+  if (status === 401 || status === 403 || /authentication|unauthori[sz]ed|10000\b/.test(m)) return { code: 'cf_key_invalid', message: 'Cloudflare 계정 ID나 토큰이 맞지 않아. Supabase Secrets의 CF_ACCOUNT_ID·CF_API_TOKEN을 확인해줘 (토큰 권한: Workers AI 읽기·편집).', billed: 'no', retryable: false };
+  if (status === 429) return { code: 'cf_rate_limited', message: 'Cloudflare가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.', billed: 'no', retryable: true };
+  if (status >= 500) return { code: 'cf_server', message: 'Cloudflare 서버에 문제가 있어. 조금 뒤에 다시 해줘.', billed: 'no', retryable: true };
+  return { code: 'cf_bad_request', message: '요청이 거절됐어: ' + (msg || status), billed: 'no', retryable: false };
+}
+async function cfRun({ fetchImpl, accountId, token, model, body, timeoutMs }) {
+  let res, j = null;
+  try {
+    ({ res, body: j } = await timed(fetchImpl, `${CF_URL}/${encodeURIComponent(accountId)}/ai/run/${model}`,
+      { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs, jsonOrNull));
+  } catch (e) {
+    return isAbort(e)
+      ? { ok: false, code: 'cf_timeout', message: 'Cloudflare 응답이 너무 오래 걸려서 멈췄어. 다시 해줘.', billed: 'no', retryable: true }
+      : { ok: false, code: 'cf_network', message: 'Cloudflare에 연결하지 못했어. 조금 뒤에 다시 해줘.', billed: 'no', retryable: true };
+  }
+  const requestId = scrub(res.headers && res.headers.get ? res.headers.get('cf-ray') || '' : '', 120);
+  if (!res.ok || !j || j.success === false) return { ok: false, status: res.status, requestId, ...cfError(res.status, j) };
+  return { ok: true, result: j.result || {}, requestId };
+}
+// 한국어가 섞인 요청서 → 영어 이미지 프롬프트. 실패하면 null (그때는 요청서를 그대로 씀)
+export async function cfEnglishPrompt({ fetchImpl, accountId, token, brief, timeoutMs = 25000 }) {
+  const r = await cfRun({ fetchImpl, accountId, token, model: CF_TEXT_MODEL, timeoutMs,
+    body: { messages: [{ role: 'system', content: CF_SYSTEM }, { role: 'user', content: String(brief).slice(0, 6000) }], max_tokens: 220, temperature: 0.4 } });
+  if (!r.ok) return { ok: false, code: r.code, message: r.message };
+  const t = String((r.result && r.result.response) || '').replace(/^["'\s]+|["'\s]+$/g, '').replace(/\s+/g, ' ').trim();
+  // 프롬프트처럼 보이지 않으면(너무 짧음·한국어 남음) 버림
+  if (t.length < 20 || /[가-힣]/.test(t)) return { ok: false, code: 'cf_prompt_bad', message: '' };
+  return { ok: true, text: t.slice(0, 1200) };
+}
+export async function cloudflareImage({ fetchImpl, accountId, token, model, prompt, quality, timeoutMs = 60000 }) {
+  if (!accountId || !token) return { ok: false, code: 'cf_key_missing', message: 'Cloudflare 계정 ID·토큰이 설정되지 않았어.', billed: 'no' };
+  const caps = modelCaps(model);
+  if (caps.provider !== 'cloudflare') return { ok: false, code: 'model_unavailable', message: '무료 모델이 아니야.', billed: 'no' };
+  const started = Date.now();
+  const en = await cfEnglishPrompt({ fetchImpl, accountId, token, brief: prompt, timeoutMs: Math.min(25000, Math.max(1000, timeoutMs - 30000)) });
+  if (!en.ok && (en.code === 'cf_key_invalid' || en.code === 'cf_daily_free_used')) return { ok: false, code: en.code, message: en.message, billed: 'no' };
+  const finalPrompt = ((en.ok ? en.text : prompt) + '\n' + CF_RULES).slice(0, 2048);
+  const steps = (caps.steps && caps.steps[quality]) || 4;
+  const r = await cfRun({ fetchImpl, accountId, token, model: caps.cfModel, timeoutMs: Math.max(5000, timeoutMs - (Date.now() - started)),
+    body: { prompt: finalPrompt, steps } });
+  if (!r.ok) return r;
+  const b64 = r.result && typeof r.result.image === 'string' ? r.result.image : '';
+  if (!b64) return { ok: false, code: 'cf_empty', message: 'Cloudflare가 이미지를 돌려주지 않았어. 다시 해줘. (청구 없음)', billed: 'no', requestId: r.requestId };
+  return { ok: true, b64, revisedPrompt: scrub(finalPrompt, 4000), usage: null, outputFormat: 'jpeg', requestId: r.requestId, provider: 'cloudflare', englishPrompt: en.ok };
 }
 
 // ───────── 사진 공급자 (지금은 Pexels만 실제로 연결) ─────────
@@ -274,10 +339,13 @@ export const MIN_OPENAI_MS = 20000;
 export async function runGeneration(d, gen, opt = {}) {
   const leftMs = () => (opt.deadline ? opt.deadline - d.now().getTime() : Infinity);
   const isTest = gen.model === TEST_MODEL; // 점검용 가짜 모델은 어디서 실패해도 OpenAI를 안 불렀으니 청구 없음·횟수에 안 셈
+  const isFree = modelCaps(gen.model).provider === 'cloudflare'; // 무료 모델(Cloudflare 무료 플랜): 실패해도 청구 없음
+  const who = isFree ? 'Cloudflare' : 'OpenAI';
+  const billedNote = isFree ? '(청구 없음)' : `청구됐을 수 있으니 ${who} 사용량을 확인해줘.`;
   const fail = async (r) => {
     const fin = {
       provider_called: !isTest && !NOT_COUNTED.has(r.code), error_code: r.code, error_message: scrub(r.message, 500),
-      cost_status: isTest || r.billed === 'no' ? '청구 없음' : '확인 필요', request_id: r.requestId || '',
+      cost_status: isTest || isFree || r.billed === 'no' ? '청구 없음' : '확인 필요', request_id: r.requestId || '',
     };
     if (r.usage) { fin.usage = r.usage; fin.usage_usd = usageUsd(r.usage, opt.prices, gen.model); }
     const x = await d.rpc('image_gen_fail', { gen: gen.id, fin });
@@ -293,35 +361,39 @@ export async function runGeneration(d, gen, opt = {}) {
     }
     if (leftMs() < MIN_OPENAI_MS) return fail({ code: 'server_busy_late', message: '서버 준비 시간이 모자라서 시작하지 않았어 (청구 없음). 다시 눌러줘.', billed: 'no', retryable: true });
     const timeoutMs = Math.min(opt.timeoutMs || 115000, leftMs());
-    res = await openaiImage({ fetchImpl: d.fetchImpl, key: opt.key, mode: gen.mode, model: gen.model, prompt: gen.prompt, size: gen.size, quality: gen.quality,
-      outputFormat: gen.output_format || 'jpeg', image, safetyId: opt.safetyId, timeoutMs });
+    res = isFree
+      ? await cloudflareImage({ fetchImpl: d.fetchImpl, accountId: opt.cf && opt.cf.accountId, token: opt.cf && opt.cf.token, model: gen.model, prompt: gen.prompt, quality: gen.quality, timeoutMs })
+      : await openaiImage({ fetchImpl: d.fetchImpl, key: opt.key, mode: gen.mode, model: gen.model, prompt: gen.prompt, size: gen.size, quality: gen.quality,
+        outputFormat: gen.output_format || 'jpeg', image, safetyId: opt.safetyId, timeoutMs });
   } catch (e) {
-    res = { ok: false, code: 'server_error', message: '서버에서 문제가 생겼어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', detail: scrub(e && e.message) };
+    res = { ok: false, code: 'server_error', message: '서버에서 문제가 생겼어. ' + billedNote, billed: isFree ? 'no' : 'maybe', detail: scrub(e && e.message) };
   }
   if (!res.ok) return fail(res);
   let bytes = null;
   try { bytes = b64ToBytes(res.b64); } catch { bytes = null; }
   const sn = bytes && bytes.length <= MAX_AI_BYTES ? sniffImage(bytes) : null;
-  if (!sn) return fail({ code: 'openai_bad_image', message: 'OpenAI가 보낸 이미지를 읽지 못했어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', usage: res.usage, requestId: res.requestId });
+  if (!sn) return fail({ code: 'openai_bad_image', message: `${who}가 보낸 이미지를 읽지 못했어. ${billedNote}`, billed: isFree ? 'no' : 'maybe', usage: res.usage, requestId: res.requestId });
   const path = storagePath('ai', sn.ext, d.now(), d.uuid());
   if (!(await uploadWithRetry(d, path, bytes, sn.mime))) {
-    return fail({ code: 'storage_failed', message: '만든 이미지를 저장하지 못했어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', usage: res.usage, requestId: res.requestId });
+    return fail({ code: 'storage_failed', message: '만든 이미지를 저장하지 못했어. ' + billedNote, billed: isFree ? 'no' : 'maybe', usage: res.usage, requestId: res.requestId });
   }
   const text = opt.description || gen.slot_text || '';
   const img = {
     origin_post_id: gen.post_id || '', origin_slot_index: gen.slot_index ?? '', origin_slot_key: gen.slot_key || '',
-    kind: 'ai', provider: res.test ? '' : 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
+    kind: 'ai', provider: res.test ? '' : isFree ? 'cloudflare' : 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
     ratio: opt.ratio || '', description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
-    sha256: await sha256Hex(bytes), license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)', attribution_text: '',
+    sha256: await sha256Hex(bytes), attribution_text: '',
+    license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : isFree ? 'AI 생성 이미지 (FLUX.1 schnell · Cloudflare Workers AI 약관을 따름)' : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)',
   };
   // 점검용 가짜 모델은 청구가 없고 하루 횟수에도 안 셈
   const fin = res.test
     ? { usage: res.usage, usage_usd: 0, cost_status: '청구 없음', provider_called: false, request_id: res.requestId }
+    : isFree ? { usage: null, usage_usd: 0, cost_status: '청구 없음', revised_prompt: res.revisedPrompt, request_id: res.requestId }
     : { usage: res.usage, usage_usd: usageUsd(res.usage, opt.prices, gen.model), revised_prompt: res.revisedPrompt, request_id: res.requestId };
   const r = await d.rpc('image_save', { img, link: null, gen: gen.id, fin });
   if (r.error) {
     await d.remove([path]);
-    return fail({ code: 'save_failed', message: '만든 이미지를 기록하지 못했어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.', billed: 'maybe', usage: res.usage, requestId: res.requestId });
+    return fail({ code: 'save_failed', message: '만든 이미지를 기록하지 못했어. ' + billedNote, billed: isFree ? 'no' : 'maybe', usage: res.usage, requestId: res.requestId });
   }
   return { ok: true, image: r.data.image, generation: r.data.generation, test: !!res.test };
 }

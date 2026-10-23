@@ -296,6 +296,7 @@ export const STANDARD_SIZES = ['1024x1024', '1536x1024', '1024x1536'];
 export const standardSizeFor = (ratio) => { const R = RATIOS[ratio] || RATIOS['1:1']; return R.w > R.h ? '1536x1024' : R.w < R.h ? '1024x1536' : '1024x1024'; };
 export const sizeFor = (purpose, ratio, model) => {
   const r = ratioOf(purpose, ratio);
+  if (model && modelCaps(model).fixedSize) return modelCaps(model).fixedSize;
   return model && !modelCaps(model).flexible ? standardSizeFor(r) : RATIOS[r].size;
 };
 // 크기 문자열이 OpenAI 규칙에 맞는지 (16의 배수, 비율, 한 변·총 픽셀)
@@ -500,6 +501,11 @@ export const MODEL_CHECKED = '2026-10-22';
 const Q3 = ['low', 'medium', 'high'];
 const per = (a, b) => ({ '1024x1024': a, '1536x1024': b, '1024x1536': b });
 const MODEL_FAMILIES = [
+  // 무료: Cloudflare Workers AI 의 FLUX.1 schnell (무료 플랜 하루 10,000 뉴런 안에서 청구 없음 — 넘으면 실패만 함. 2026-10-24 확인)
+  // 크기는 1024x1024 하나(크기 지정 없음) → 내려받을 때 고른 비율로 자름. 고치기(편집)는 못 함. 품질 = 단계 수(4·6·8)
+  { id: 'cf-flux-1-schnell', re: /^cf-flux-1-schnell$/, flexible: false, fixedSize: '1024x1024', qualities: Q3, free: true, noEdit: true,
+    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-1-schnell', steps: { low: 4, medium: 6, high: 8 },
+    url: 'https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/' },
   { id: 'gpt-image-2.5', re: /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: QUALITIES, settingsPrices: true },
   { id: 'gpt-image-2', re: /^gpt-image-2(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: Q3, conservative: true },
   { id: 'gpt-image-1.5', re: /^gpt-image-1\.5(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
@@ -517,9 +523,11 @@ const CONSERVATIVE = { prices: { image_output_per_m: 40, image_input_per_m: 10, 
 export function modelCaps(model) {
   const m = String(model || '').trim();
   const f = MODEL_FAMILIES.find((x) => x.re.test(m));
-  if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false };
-  return { id: f.id, known: true, flexible: f.flexible, qualities: f.qualities, conservative: !!f.conservative, settingsPrices: !!f.settingsPrices, deprecated: !!f.deprecated, prices: f.prices || null, perImage: f.perImage || null, url: f.url || '' };
+  if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false, provider: 'openai' };
+  return { id: f.id, known: true, flexible: f.flexible, qualities: f.qualities, conservative: !!f.conservative, settingsPrices: !!f.settingsPrices, deprecated: !!f.deprecated, prices: f.prices || null, perImage: f.perImage || null, url: f.url || '',
+    provider: f.provider || 'openai', free: !!f.free, noEdit: !!f.noEdit, fixedSize: f.fixedSize || '', cfModel: f.cfModel || '', steps: f.steps || null };
 }
+export const FREE_MODEL = 'cf-flux-1-schnell';
 export const qualitiesFor = (model) => (model ? modelCaps(model).qualities : QUALITIES);
 // 모델이 못 받는 품질이면 가까운 것으로 (xhigh·max → high, 그 밖 → medium)
 export const normQuality = (model, q) => { const qs = qualitiesFor(model); return qs.includes(q) ? q : qs.includes('high') && (q === 'xhigh' || q === 'max') ? 'high' : 'medium'; };
@@ -540,6 +548,7 @@ const perImageSize = (size) => {
 export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode = 'generate', prices, model } = {}) {
   const tokens = Math.max(0, promptTokens != null ? promptTokens : promptChars); // promptChars 만 주면 글자 수 = 토큰 수로 아주 넉넉히
   const caps = model ? modelCaps(model) : null;
+  if (caps && caps.free) return caps.qualities.includes(quality) ? 0 : null;
   if (!caps || caps.settingsPrices) {
     const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
     if (t == null) return null;
@@ -561,6 +570,7 @@ export function usageUsd(usage, prices, model) {
   if (!usage || typeof usage !== 'object') return null;
   if (model) {
     const caps = modelCaps(model);
+    if (caps.free) return 0;
     if (!caps.settingsPrices) {
       if (!caps.prices) return null;
       prices = caps.prices;

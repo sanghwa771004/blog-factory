@@ -6,9 +6,9 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   classifyOpenAIError, openaiImage, normalizePexels, pexelsSearch, pexelsPhoto, downloadImage, runGeneration, saveStockPhoto, saveUploaded,
-  storagePath, bytesToB64, b64ToBytes, sha256Hex, scrub, TEST_MODEL, NOT_COUNTED, needMsFor, busyRetryAfter,
+  storagePath, bytesToB64, b64ToBytes, sha256Hex, scrub, TEST_MODEL, NOT_COUNTED, needMsFor, busyRetryAfter, cloudflareImage, CF_RULES,
 } from '../supabase/functions/blog-app/image_service.js';
-import { sniffImage } from '../images.js';
+import { sniffImage, modelCaps, sizeFor, estimateUsd, usageUsd, normQuality, FREE_MODEL } from '../images.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fx = (name) => new Uint8Array(readFileSync(join(ROOT, 'tests', 'fixtures', 'img', name)));
@@ -394,5 +394,78 @@ describe('서버 일꾼 시간 (검증 N2: 기다리는 시간 줄이기)', () =
     assert.equal(busyRetryAfter(80000, 150000), 72, '절반 넘음 → 150초에서 2초 뒤');
     assert.equal(busyRetryAfter(149000, 150000), 3);
     assert.equal(busyRetryAfter(10000, 400000), 150, '최대 150초');
+  });
+});
+
+// ───────── 무료 이미지 (Cloudflare Workers AI) ─────────
+const CF = { accountId: 'acc123', token: 'cf-token-xyz' };
+const cfText = (text) => ({ json: { success: true, result: { response: text }, errors: [] } });
+const cfImg = (bytes = fx('photo-4x3.jpg')) => ({ json: { success: true, result: { image: bytesToB64(bytes) }, errors: [] }, headers: { 'cf-ray': 'ray-1' } });
+const EN = 'A cozy small Korean studio apartment desk by a window, soft morning daylight, warm wooden tones, centered composition, natural lifestyle photo';
+describe('무료 이미지 모델 (Cloudflare)', () => {
+  test('모델 규칙: 무료·1024 정사각 고정·편집 못 함·비용 0', () => {
+    const c = modelCaps(FREE_MODEL);
+    assert.equal(c.provider, 'cloudflare');
+    assert.equal(c.free, true);
+    assert.equal(c.noEdit, true);
+    assert.equal(sizeFor('blog_body', '16:9', FREE_MODEL), '1024x1024');
+    assert.equal(estimateUsd({ quality: 'medium', size: '1024x1024', promptTokens: 500, model: FREE_MODEL }), 0);
+    assert.equal(usageUsd({ output_tokens: 100 }, PRICES, FREE_MODEL), 0);
+    assert.equal(normQuality(FREE_MODEL, 'max'), 'high');
+    assert.equal(modelCaps('gpt-image-2.5-flare').provider, 'openai');
+  });
+  test('한국어 요청서 → 글 모델이 영어 프롬프트 → 규칙 붙여 이미지 모델 (주소·토큰·단계 수)', async () => {
+    const f = fakeFetch((url) => (url.includes('llama') ? cfText(EN) : cfImg()));
+    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: FREE_MODEL, prompt: 'Scene to show (Korean): 작은 원룸 책상', quality: 'high' });
+    assert.equal(r.ok, true);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls[0].url, 'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/@cf/meta/llama-3.3-70b-instruct-fp8-fast');
+    assert.equal(f.calls[1].url, 'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/@cf/black-forest-labs/flux-1-schnell');
+    assert.equal(f.calls[1].init.headers.Authorization, 'Bearer cf-token-xyz');
+    const body = JSON.parse(f.calls[1].init.body);
+    assert.equal(body.steps, 8);
+    assert.ok(body.prompt.startsWith(EN));
+    assert.ok(body.prompt.includes(CF_RULES));
+    assert.ok(body.prompt.length <= 2048);
+    assert.equal(r.englishPrompt, true);
+  });
+  test('글 모델이 이상한 답(한국어)을 주면 요청서를 그대로 씀', async () => {
+    const f = fakeFetch((url) => (url.includes('llama') ? cfText('작은 원룸') : cfImg()));
+    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: FREE_MODEL, prompt: 'BRIEF', quality: 'low' });
+    assert.equal(r.ok, true);
+    const body = JSON.parse(f.calls[1].init.body);
+    assert.ok(body.prompt.startsWith('BRIEF'));
+    assert.equal(body.steps, 4);
+  });
+  test('무료 사용량 다 씀·토큰 틀림·키 없음: 이미지 모델을 부르지 않고 청구 없음', async () => {
+    const used = fakeFetch(() => ({ status: 429, json: { success: false, errors: [{ code: 4006, message: 'you have used up your daily free allocation of 10,000 neurons' }] } }));
+    const a = await cloudflareImage({ fetchImpl: used, ...CF, model: FREE_MODEL, prompt: 'p', quality: 'low' });
+    assert.equal(a.code, 'cf_daily_free_used'); assert.equal(a.billed, 'no'); assert.equal(used.calls.length, 1);
+    const bad = fakeFetch(() => ({ status: 401, json: { success: false, errors: [{ code: 10000, message: 'Authentication error' }] } }));
+    assert.equal((await cloudflareImage({ fetchImpl: bad, ...CF, model: FREE_MODEL, prompt: 'p', quality: 'low' })).code, 'cf_key_invalid');
+    const none = fakeFetch(() => cfImg());
+    assert.equal((await cloudflareImage({ fetchImpl: none, accountId: '', token: '', model: FREE_MODEL, prompt: 'p' })).code, 'cf_key_missing');
+    assert.equal(none.calls.length, 0);
+    for (const c of ['cf_key_missing', 'cf_key_invalid', 'cf_daily_free_used']) assert.ok(NOT_COUNTED.has(c), c + '는 하루 횟수에 안 셈');
+  });
+  test('생성 흐름: 공급자 cloudflare·청구 없음·비용 0으로 저장, 영어 프롬프트 기록, 실패도 청구 없음', async () => {
+    const G = { ...GEN, model: FREE_MODEL, size: '1024x1024', quality: 'medium' };
+    const d = fakeDeps({ fetchImpl: fakeFetch((url) => (url.includes('llama') ? cfText(EN) : cfImg())) });
+    const r = await runGeneration(d, G, { cf: CF, prices: PRICES, description: '작은 원룸 사진', ratio: '16:9' });
+    assert.equal(r.ok, true);
+    const save = d.log.rpc.find((x) => x.name === 'image_save').args;
+    assert.equal(save.img.provider, 'cloudflare');
+    assert.equal(save.img.ratio, '16:9', '내려받을 때 고른 비율로 자름');
+    assert.match(save.img.license, /FLUX\.1 schnell/);
+    assert.equal(save.fin.cost_status, '청구 없음');
+    assert.equal(save.fin.usage_usd, 0);
+    assert.ok(save.fin.revised_prompt.startsWith(EN));
+    assert.equal(save.fin.request_id, 'ray-1');
+    const d2 = fakeDeps({ fetchImpl: fakeFetch(() => ({ status: 500, json: { success: false, errors: [{ code: 3000, message: 'internal' }] } })) });
+    const r2 = await runGeneration(d2, G, { cf: CF, prices: PRICES });
+    assert.equal(r2.ok, false);
+    const fin = d2.log.rpc.find((x) => x.name === 'image_gen_fail').args.fin;
+    assert.equal(fin.cost_status, '청구 없음');
+    assert.ok(!/OpenAI/.test(fin.error_message));
   });
 });

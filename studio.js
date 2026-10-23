@@ -39,6 +39,11 @@ export const IMAGE_ERR = {
   openai_unsupported_option: '이 모델이 그 크기·품질을 지원하지 않아. 설정 > 이미지에서 모델이나 품질을 바꿔줘.',
   openai_spend_limit: 'OpenAI에 걸어둔 사용 한도(Spend limit)에 닿았어. OpenAI 설정의 Limits에서 한도를 올리거나 다음 달까지 기다려줘.',
   timeout: '응답이 너무 늦어. 다시 눌러줘 (같은 요청이면 두 번 만들지 않아).',
+  cf_key_missing: '무료 이미지(Cloudflare) 계정 ID·토큰이 아직 없어. 설정 > 이미지에서 방법을 봐줘. 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.',
+  cf_key_invalid: 'Cloudflare 계정 ID나 토큰이 맞지 않아. Supabase Secrets의 CF_ACCOUNT_ID·CF_API_TOKEN을 확인해줘.',
+  cf_daily_free_used: '오늘 무료 사용량을 다 썼어. 한국 시간 오전 9시에 다시 채워져. (청구 없음)',
+  cf_rate_limited: 'Cloudflare가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.',
+  edit_unsupported: '무료 모델은 고치기(편집)를 못 해. 설명을 바꿔서 새로 만들어줘.',
 };
 export const IMAGE_FIELD = {
   request_key: '요청', slot_key: '사진 자리', text: '사진 설명', ratio: '비율', quality: '품질', photo_id: '사진', file: '파일', b64: '파일', q: '검색어',
@@ -50,7 +55,7 @@ export const IMAGE_REASON = {
   empty: '파일이 비어 있어.', too_big: '파일이 너무 커. 8MB까지 올릴 수 있어.', bad_type: 'JPEG·PNG·WebP 이미지만 올릴 수 있어. (이름만 바꾼 파일도 안 돼)',
   type_mismatch: '파일 내용과 형식이 달라. 원래 이미지 파일을 올려줘.', animated: '움직이는 이미지는 올릴 수 없어.', too_many_pixels: '가로·세로가 너무 큰 이미지야. 줄여서 올려줘.',
 };
-const RETRYABLE = new Set(['openai_timeout', 'openai_server', 'openai_network', 'openai_rate_limited', 'server_stopped', 'timeout', 'storage_failed', 'save_failed', 'server_error', 'server_busy_late']);
+const RETRYABLE = new Set(['cf_timeout', 'cf_server', 'cf_network', 'cf_rate_limited', 'cf_empty', 'openai_timeout', 'openai_server', 'openai_network', 'openai_rate_limited', 'server_stopped', 'timeout', 'storage_failed', 'save_failed', 'server_error', 'server_busy_late']);
 
 const MOBILE = typeof navigator !== 'undefined' && (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)));
 const usd = (x) => IMG.fmtUsd(x);
@@ -311,7 +316,9 @@ export function createStudio(ui) {
       if (mine) schedulePoll(p.id);
     }
     const st = settings();
-    if (!(d.keys || {}).openai && st.image_gen_model !== TEST_MODEL) kids.push(h('p', { class: 'hint' }, 'AI 이미지: OpenAI 키가 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
+    const freeGen = IMG.modelCaps(st.image_gen_model || '').free;
+    if (freeGen && !(d.keys || {}).cloudflare) kids.push(h('p', { class: 'hint' }, 'AI 이미지(무료): Cloudflare 계정 ID·토큰이 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
+    if (!freeGen && !(d.keys || {}).openai && st.image_gen_model !== TEST_MODEL) kids.push(h('p', { class: 'hint' }, 'AI 이미지: OpenAI 키가 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
     if (st.image_gen_model === TEST_MODEL) kids.push(h('p', { class: 'notice' }, "설정의 생성 모델이 점검용 가짜 모델(gf-test-fake)이야. 실제 이미지가 아니라 회색 시험 그림이 나와."));
     if (!slots.length) kids.push(h('p', { class: 'hint' }, "본문에 [이미지: 설명] 줄이 없어. '본문 고치기'에서 사진이 들어갈 곳에 [이미지: 설명] 한 줄을 넣으면 여기에 자리가 생겨."));
     slots.forEach((s, i) => kids.push(slotCard(p, d, s, imgs, slots[i - 1], slots[i + 1])));
@@ -501,7 +508,7 @@ export function createStudio(ui) {
     const capsModel = isTest ? 'gpt-image-2.5-flare' : model; // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼 (서버와 같게)
     const caps = IMG.modelCaps(capsModel);
     const qualities = IMG.qualitiesFor(capsModel);
-    const keyOk = !!(d.keys && d.keys.openai) || isTest;
+    const keyOk = caps.free ? !!(d.keys && d.keys.cloudflare) : !!(d.keys && d.keys.openai) || isTest;
     const prevLines = prev ? String(prev.user_prompt || '').split('\n') : [];
     const purpose0 = (prev && prev.purpose) || (s.row && s.row.purpose) || IMG.slotPurpose(s.key);
     const f = {
@@ -553,17 +560,20 @@ export function createStudio(ui) {
       const limit = u && Number(u.today) >= Number(u.daily_limit);
       put(costBox,
         h('span', null, `모델 ${model} · ${size} · 품질 ${IMG.QUALITY_LABEL[f.quality]}`),
-        h('b', { class: 'num' }, est == null ? '예상 비용을 계산하지 못했어' : `예상 ${usd(est)}${fx && est ? ' ≈ ' + L.won(est * fx) : ''}`),
+        caps.free ? h('b', { class: 'num' }, '무료 (Cloudflare 무료 플랜 — 하루 약 100장까지, 넘으면 다음 날)')
+          : h('b', { class: 'num' }, est == null ? '예상 비용을 계산하지 못했어' : `예상 ${usd(est)}${fx && est ? ' ≈ ' + L.won(est * fx) : ''}`),
+        caps.free ? h('span', { class: 'hint' }, '무료 모델은 한국어 설명을 영어로 바꿔서 그려 (사람·글자에는 약해). 마음에 안 들면 설명을 구체적으로 적고 다시 만들어줘.') : null,
         sEst != null && est === sEst ? h('span', { class: 'notice' }, `서버에서 다시 계산한 예상 비용이 ${usd(sEst)}이야 (설정·가격·원고가 바뀐 것 같아). 확인하고 다시 눌러줘.`) : null,
         !caps.flexible && !isTest ? h('span', { class: 'hint' }, `이 모델은 정해진 크기(${size})로만 만들어. 만든 이미지를 이 자리에 연결하면 내려받을 때 ${f.ratio}로 잘라 줄게 (미리보기에서 자르는 곳을 고를 수 있어).`) : null,
-        caps.conservative && !isTest ? h('span', { class: 'notice' }, '이 모델은 공식 가격표에서 장당 가격을 확인하지 못해서 예상 비용을 넉넉하게 잡았어. 실제 청구액은 OpenAI 사용량 화면에서 확인해줘.') : null,
+        caps.conservative && !isTest && !caps.free ? h('span', { class: 'notice' }, '이 모델은 공식 가격표에서 장당 가격을 확인하지 못해서 예상 비용을 넉넉하게 잡았어. 실제 청구액은 OpenAI 사용량 화면에서 확인해줘.') : null,
         caps.deprecated ? h('span', { class: 'hint' }, 'OpenAI가 이전 모델(Deprecated)로 표시한 모델이야. 되도록 gpt-image-2.5-flare를 써줘.') : null,
         h('span', { class: 'hint' }, fx ? `환율 ${L.fmtNum(fx)}원/달러 (${st.image_fx_date || '날짜 없음'}${st.image_fx_source ? ' · ' + st.image_fx_source : ''})` : '환율을 넣으면 원화로도 보여줘 (설정 > 이미지)'),
-        h('span', { class: 'hint' }, `예상 비용이야 (가격표 ${(prices().checked_at) || '확인일 없음'} 기준). 실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`),
+        caps.free ? null : h('span', { class: 'hint' }, `예상 비용이야 (가격표 ${(prices().checked_at) || '확인일 없음'} 기준). 실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`),
         u ? h('span', { class: 'hint' }, usageLine(u)) : null);
       let why = '';
       if (newModel) why = `설정의 ${mode === 'edit' ? '편집' : '생성'} 모델이 바뀌었어 (${model} → ${newModel}). 이 창을 닫고 다시 열어줘.`;
-      else if (!keyOk) why = 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.';
+      else if (!keyOk) why = caps.free ? 'Cloudflare 계정 ID·토큰이 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.' : 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.';
+      else if (caps.free && mode === 'edit') why = '무료 모델은 고치기(편집)를 못 해. 설명을 바꿔서 새로 만들어줘.';
       else if (!clean(f.text)) why = mode === 'edit' ? '바꿀 내용을 적어줘.' : '사진 설명을 적어줘.';
       else if (blocks.length) why = '빨간 내용을 고쳐야 만들 수 있어.';
       else if (sr.real && !genericChk.checked) why = '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
@@ -1312,14 +1322,15 @@ export function createStudio(ui) {
     const status = h('div', { class: 'stack' }, h('p', { class: 'hint' }, '연결 상태 확인 중…'));
     api('/images/config').then((j) => {
       put(status, 
-        h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, 'OpenAI (AI 이미지)'), h('small', null, 'Supabase Secrets: OPENAI_API_KEY')), h('span', { class: 'badge ' + (j.keys.openai ? 'v-ok' : 'v-no') }, j.keys.openai ? '키 연결됨' : '키 없음')),
+        h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, 'Cloudflare (무료 AI 이미지)'), h('small', null, 'Supabase Secrets: CF_ACCOUNT_ID · CF_API_TOKEN')), h('span', { class: 'badge ' + (j.keys.cloudflare ? 'v-ok' : 'v-no') }, j.keys.cloudflare ? '연결됨' : '없음')),
+        h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, 'OpenAI (유료 AI 이미지 · 고치기)'), h('small', null, 'Supabase Secrets: OPENAI_API_KEY')), h('span', { class: 'badge ' + (j.keys.openai ? 'v-ok' : 'v-no') }, j.keys.openai ? '키 연결됨' : '키 없음')),
         ...j.providers.map((x) => h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${x.label} (실제 사진 검색)`), h('small', null, 'Supabase Secrets: PEXELS_API_KEY')), h('span', { class: 'badge ' + (x.connected ? 'v-ok' : 'v-no') }, x.connected ? '키 연결됨' : '키 없음'))),
         h('p', { class: 'hint' }, `${usageLine(j.usage)} · 보관함 ${L.fmtNum(j.usage.image_count || 0)}장 · ${fmtBytes(Number(j.usage.storage_bytes || 0))} (멈추는 선 ${fmtBytes(j.storage_limit)})`),
         j.settings.image_gen_model === j.test_model || j.settings.image_edit_model === j.test_model ? h('p', { class: 'notice' }, '점검용 가짜 모델(gf-test-fake)로 돼 있어. 실제로 쓰려면 모델 이름을 gpt-image-2.5-flare / gpt-image-2.5-sunburst 로 바꿔줘.') : null);
     }).catch((e) => put(status, h('p', { class: 'hint' }, ui.errText(e))));
     const inp = (v, attrs = {}) => h('input', { type: 'text', value: v ?? '', oninput: ui.markDirty, ...attrs });
     const f = {
-      gen: inp(st.image_gen_model || 'gpt-image-2.5-flare', { autocapitalize: 'off', spellcheck: 'false' }),
+      gen: inp(st.image_gen_model || IMG.FREE_MODEL, { autocapitalize: 'off', spellcheck: 'false' }),
       edit: inp(st.image_edit_model || 'gpt-image-2.5-sunburst', { autocapitalize: 'off', spellcheck: 'false' }),
       quality: h('select', { value: st.image_quality || 'medium', onchange: ui.markDirty }, IMG.QUALITIES.map((q) => opt(q, IMG.QUALITY_LABEL[q]))),
       daily: inp(st.image_daily_limit ?? 5, { inputmode: 'numeric' }),
@@ -1333,20 +1344,26 @@ export function createStudio(ui) {
     const num = (el, min, max, label) => { const v = Number(String(el.value).replace(/[,\s$원]/g, '')); if (!Number.isFinite(v) || v < min || v > max) { toast(`${label}: ${min}~${max} 사이 숫자를 넣어줘`); el.focus(); return null; } return v; };
     const guide = det('img-key-guide', '키 받는 방법·넣는 곳 (처음 한 번)', false, '');
     guide.append(h('ol', { class: 'steps' },
-      h('li', null, 'OpenAI: platform.openai.com 에 로그인 → API keys → Create new secret key. 결제(Billing)에 크레딧이 있어야 하고, GPT Image 모델은 조직 인증(Organization Verification)이 필요할 수 있어.'),
+      h('li', null, '무료 AI 이미지(Cloudflare): dash.cloudflare.com 에 무료로 가입해 (플랜은 Free 그대로 — 카드 등록 안 해도 돼).'),
+      h('li', null, '왼쪽 메뉴 AI → Workers AI → Use REST API → Create a Workers AI API Token → Create API Token → Copy API Token 으로 토큰을 복사해 (한 번만 보여줘). 같은 화면의 Get Account ID 에서 계정 ID도 복사해.'),
+      h('li', null, 'Supabase Secrets 에 CF_ACCOUNT_ID(계정 ID), CF_API_TOKEN(토큰) 이름으로 넣어. 무료 플랜은 하루 10,000 뉴런(이 앱 기준 약 100장)까지고, 넘으면 실패만 하고 돈은 안 나가 (매일 오전 9시에 다시 채워짐).'),
+      h('li', null, '(선택) OpenAI: platform.openai.com 에 로그인 → API keys → Create new secret key. 결제(Billing)에 크레딧이 있어야 하고, GPT Image 모델은 조직 인증(Organization Verification)이 필요할 수 있어.'),
       h('li', null, 'OpenAI 쪽 안전장치: OpenAI 설정 → Limits → Spend 에서 한 달 한도를 넣고 Enforce a hard limit 를 켜두면, 앱 한도와 별개로 그 금액에서 막혀.'),
       h('li', null, 'Pexels: 지금(2026-10-22 확인)은 새 키 발급이 멈춰 있어. 다시 열리면 pexels.com/api → Get Started 로 받아 (무료, 시간당 200번·월 20,000번). 그 전까지는 직접 올리기를 써.'),
-      h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 OPENAI_API_KEY, PEXELS_API_KEY 이름으로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
+      h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 CF_ACCOUNT_ID, CF_API_TOKEN (그리고 쓰면 OPENAI_API_KEY, PEXELS_API_KEY) 이름으로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
       h('li', null, '이 화면을 다시 열어 "키 연결됨"이 보이면 끝. 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).')),
       h('div', { class: 'go' }, h('a', { class: 'copy', href: 'https://supabase.com/dashboard/project/oxewhsqmdkiasckvnyua/functions/secrets', target: '_blank', rel: 'noopener noreferrer' }, 'Supabase Secrets 열기 ↗'),
+        h('a', { class: 'copy', href: 'https://dash.cloudflare.com/profile/api-tokens', target: '_blank', rel: 'noopener noreferrer' }, 'Cloudflare 토큰 ↗'),
         h('a', { class: 'copy', href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI 키 ↗'),
         h('a', { class: 'copy', href: 'https://www.pexels.com/api/', target: '_blank', rel: 'noopener noreferrer' }, 'Pexels API ↗')));
     return [
       status, guide,
       h('h3', null, '모델'), field('생성 모델', f.gen), field('편집 모델 (고쳐서 만들기)', f.edit),
       h('p', { class: 'hint' }, '계정에서 이 모델을 못 쓰면 다른 이미지 모델 이름으로 바꿔줘. 앱이 아는 모델 (OpenAI 문서, 2026-10-22 확인):'),
+      h('div', { class: 'go' }, btn('무료 모델로 (cf-flux-1-schnell)', 'sm', () => { f.gen.value = IMG.FREE_MODEL; ui.markDirty(); toast('생성 모델을 무료 모델로 바꿨어. 저장을 눌러줘.'); })),
       h('ul', { class: 'lic' },
-        h('li', null, 'gpt-image-2.5-flare · gpt-image-2.5-sunburst — 기본. 원하는 비율 그대로, 품질 5단계, 가격은 아래 가격표'),
+        h('li', null, 'cf-flux-1-schnell — 무료 (Cloudflare Workers AI · FLUX.1 schnell). 1024×1024로 만들고 내려받을 때 비율대로 잘라. 품질 = 그리는 단계(낮음 4·보통 6·높음 8). 한국어 설명은 같은 무료 계정의 글 모델이 영어로 바꿔서 보내. 고치기(편집)는 못 해. 글자·사람 손은 약해'),
+        h('li', null, 'gpt-image-2.5-flare · gpt-image-2.5-sunburst — 유료(OpenAI). 원하는 비율 그대로, 품질 5단계, 가격은 아래 가격표'),
         h('li', null, 'gpt-image-2 — 원하는 비율 그대로, 품질 3단계. 장당 가격을 확인 못 해서 예상 비용을 넉넉히 잡아'),
         h('li', null, 'gpt-image-1.5 · gpt-image-1 · gpt-image-1-mini — 이전 모델(Deprecated). 정해진 크기 3가지로 만들고 내려받을 때 잘라, 품질 3단계, 모델 페이지의 장당 가격으로 계산'),
         h('li', null, '그 밖의 이름 — 정해진 크기 3가지·품질 3단계로 보내고, 예상 비용은 넉넉히 잡고 사용량 계산은 안 해 (청구액은 직접 확인)')),

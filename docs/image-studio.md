@@ -18,7 +18,8 @@
 ## 2. 필요한 Supabase Secrets (이름만 — 값은 절대 저장소·채팅·앱에 넣지 마)
 | 이름 | 쓰는 곳 | 없으면 |
 |---|---|---|
-| `OPENAI_API_KEY` | AI 이미지 만들기·고치기 | AI 버튼이 잠기고 '키 없음'으로 이유를 보여줌. 사진 검색·올리기·카드뉴스는 그대로 됨 |
+| `CF_ACCOUNT_ID` · `CF_API_TOKEN` | **무료** AI 이미지 만들기 (기본 모델 `cf-flux-1-schnell`) | 무료 모델 AI 버튼이 잠기고 '없음'으로 이유를 보여줌 |
+| `OPENAI_API_KEY` | (선택·유료) AI 이미지 만들기·고치기 | AI 버튼이 잠기고 '키 없음'으로 이유를 보여줌. 사진 검색·올리기·카드뉴스는 그대로 됨 |
 | `PEXELS_API_KEY` | 실제 사진 검색 | 사진 검색이 잠기고 '직접 올리기'로 안내. 나머지는 그대로 됨 |
 | `EDGE_WALL_SECONDS` (선택) | 서버 일꾼 하나가 일하는 최대 초 | 안 넣으면 150 (무료 요금제). 유료 요금제로 바꾸면 400 |
 
@@ -122,3 +123,15 @@ Secrets는 프로젝트에 한 번만 넣으면 서버 함수 두 개(`blog-app`
 | OpenAI 사용 한도(Spend limit)에 닿았어 | OpenAI 설정 > Limits에서 올리거나 다음 달까지 기다려 |
 | 이 모델이 그 크기·품질을 지원하지 않아 | 설정 > 이미지에서 모델이나 품질을 바꿔 |
 | Pexels 키 없음 | 지금은 발급이 멈춰 있어서 직접 올리기 사용 |
+
+
+## 무료 AI 이미지 (Cloudflare Workers AI) — 1.2.0 추가
+
+- 기본 생성 모델은 `cf-flux-1-schnell` (Cloudflare Workers AI의 FLUX.1 schnell). OpenAI 없이 무료로 만든다.
+- 무료 플랜(Workers Free)은 **하루 10,000 뉴런**까지 무료, 넘으면 오류로 실패만 하고 청구되지 않는다 (매일 00:00 UTC = 오전 9시에 다시 채워짐). 공식: https://developers.cloudflare.com/workers-ai/platform/pricing/ (2026-10-24 확인)
+- 한 장 = 글 모델(llama-3.3-70b)로 한국어 요청서를 영어 프롬프트로 바꾸는 데 약 50 뉴런 + 이미지 1024×1024(4타일×4.8 + 단계×9.6) 약 58~96 뉴런 → **하루 약 70~100장** (계산값, 실측 아님).
+- 1024×1024 한 크기로만 만들고, 내려받을 때 고른 비율로 자른다. 품질 = 그리는 단계 수(낮음 4 · 보통 6 · 높음 8, 최대 8).
+- 고치기(편집)는 못 한다 → 설명을 바꿔 새로 만들기. 글자·손은 약하다 (원래 이미지 안에 글자는 넣지 않음).
+- 생성 기록은 공급자 `cloudflare`, 비용 `청구 없음`·$0으로 남는다. 하루 생성 한도(설정)는 그대로 적용된다.
+- 넣는 법: Cloudflare 무료 가입 → 왼쪽 AI → Workers AI → Use REST API → Create a Workers AI API Token → Create API Token → Copy API Token, 같은 화면 Get Account ID 복사 → Supabase Secrets 에 `CF_ACCOUNT_ID`, `CF_API_TOKEN`.
+- 실제 Cloudflare 호출로 그림 품질을 확인하는 시험은 **아직 안 했다** (계정이 없어서). 가짜 Cloudflare로 흐름만 시험함 (`tests/image_service.test.js` '무료 이미지 모델').

@@ -15,7 +15,7 @@ create table if not exists public.post_images (
   origin_slot_index int,
   origin_slot_key text not null default '',  -- 처음 만든 사진 자리 (그 자리의 '만든 이미지 후보'로 보여줌)
   kind text not null check (kind in ('ai','stock','upload','card')),
-  provider text not null default '' check (provider in ('','openai','pexels','upload','cardnews')),
+  provider text not null default '' check (provider in ('','openai','cloudflare','pexels','upload','cardnews')),
   model text not null default '',
   prompt text not null default '',          -- AI에 실제로 보낸 프롬프트
   user_prompt text not null default '',     -- 사용자가 고친 설명·추가 요청
@@ -151,6 +151,13 @@ alter table public.image_generations add column if not exists auto_cost_status t
 update public.image_generations set auto_cost_status = cost_status
   where auto_cost_status = '예상' and cost_status in ('사용량 기준', '청구 없음', '확인 필요') and actual_checked_at is null;
 do $$ begin
+  -- 무료 이미지(Cloudflare Workers AI) 공급자를 더함 — 예전 초안의 검사에 없으면 같은 이름으로 다시 걺 (데이터는 그대로)
+  if exists (select 1 from pg_constraint where conname = 'post_images_provider_check'
+             and pg_get_constraintdef(oid) not like '%cloudflare%') then
+    alter table public.post_images drop constraint post_images_provider_check;
+    alter table public.post_images add constraint post_images_provider_check
+      check (provider in ('','openai','cloudflare','pexels','upload','cardnews'));
+  end if;
   if not exists (select 1 from pg_constraint where conname = 'post_images_ratio_check') then
     alter table public.post_images add constraint post_images_ratio_check check (ratio in ('', '16:9', '4:3', '1:1', '4:5', '9:16'));
   end if;
@@ -163,7 +170,7 @@ end $$;
 -- 6 ───────── 설정
 -- 가격은 OpenAI 공식 가격표(2026-10-22 확인)로 시작하고, 바뀌면 설정에서 고침. 환율은 비워둠 (사용자가 기준과 날짜를 넣음)
 alter table public.settings
-  add column if not exists image_gen_model text not null default 'gpt-image-2.5-flare',
+  add column if not exists image_gen_model text not null default 'cf-flux-1-schnell',
   add column if not exists image_edit_model text not null default 'gpt-image-2.5-sunburst',
   add column if not exists image_quality text not null default 'medium',
   add column if not exists image_daily_limit int not null default 5,
@@ -173,6 +180,8 @@ alter table public.settings
   add column if not exists image_fx_source text not null default '',
   add column if not exists image_prices jsonb not null default
     '{"image_output_per_m":30,"image_input_per_m":8,"text_input_per_m":5,"checked_at":"2026-10-22","source":"https://developers.openai.com/api/docs/pricing"}'::jsonb;
+-- 기본 생성 모델은 무료 모델 (예전 초안을 돌린 DB에도 같은 기본값 — 이미 저장된 설정 값은 건드리지 않음)
+alter table public.settings alter column image_gen_model set default 'cf-flux-1-schnell';
 do $$ begin
   if not exists (select 1 from pg_constraint where conname = 'settings_image_checks') then
     alter table public.settings add constraint settings_image_checks check (
@@ -221,7 +230,8 @@ begin
   insert into public.image_generations (request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality,
       output_format, purpose, style, user_prompt, prompt, base_image_id, est_usd, fx_krw, fx_date, fx_source, risk_override)
     values (p->>'request_key', nullif(p->>'post_id', '')::uuid, coalesce(p->>'slot_key', ''), nullif(p->>'slot_index', '')::int,
-      left(coalesce(p->>'slot_text', ''), 500), coalesce(nullif(p->>'mode', ''), 'generate'), 'openai', p->>'model',
+      left(coalesce(p->>'slot_text', ''), 500), coalesce(nullif(p->>'mode', ''), 'generate'),
+      case when p->>'provider' = 'cloudflare' then 'cloudflare' else 'openai' end, p->>'model',
       coalesce(p->>'size', ''), coalesce(p->>'quality', ''), coalesce(nullif(p->>'output_format', ''), 'jpeg'),
       coalesce(p->>'purpose', ''), coalesce(p->>'style', ''), left(coalesce(p->>'user_prompt', ''), 2000), left(coalesce(p->>'prompt', ''), 32000),
       nullif(p->>'base_image_id', '')::uuid, est, s.image_fx_krw, s.image_fx_date, coalesce(s.image_fx_source, ''), left(coalesce(p->>'risk_override', ''), 200))

@@ -36,7 +36,7 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
     const off = await all(db, `select relname from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' and not c.relrowsecurity`);
     assert.deepEqual(off, []);
     const s = await one(db, `select image_gen_model, image_edit_model, image_quality, image_daily_limit, image_monthly_budget_usd::float as budget, image_fx_krw, image_prices from public.settings where id = 1`);
-    assert.equal(s.image_gen_model, 'gpt-image-2.5-flare');
+    assert.equal(s.image_gen_model, 'cf-flux-1-schnell');
     assert.equal(s.image_edit_model, 'gpt-image-2.5-sunburst');
     assert.equal(s.image_quality, 'medium');
     assert.equal(s.image_daily_limit, 5);
@@ -405,5 +405,14 @@ describe('012를 다시 돌리거나 예전 초안 위에 돌려도 같은 결�
     assert.deepEqual(old.map((x) => [x.request_key, x.auto_cost_status]), [['req-old-usage-01', '사용량 기준'], ['req-old-user-001', '예상']], '서버가 매긴 상태만 처음 상태로 (사용자가 넣은 건 그대로)');
     const d = await val(db, `select public.card_deck_save($1, '{"slides":[{"title":"a"}]}'::jsonb)`, [post]);
     assert.equal(d.template, 'clean');
+    // 예전 초안의 공급자 검사에는 cloudflare(무료 이미지)가 없었음 → 다시 걸려서 무료 이미지도 저장됨
+    await db.query(`update public.image_generations set status = '실패' where status = '생성 중'`);
+    const g2 = await val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ request_key: 'req-key-draft-cf01', model: 'cf-flux-1-schnell', provider: 'cloudflare', est_usd: 0 })]);
+    assert.equal(g2.provider, 'cloudflare');
+    const sv = await val(db, `select public.image_save($1::jsonb, null, $2::uuid, '{"usage_usd":0,"cost_status":"청구 없음"}'::jsonb)`,
+      [JSON.stringify({ kind: 'ai', provider: 'cloudflare', model: 'cf-flux-1-schnell', storage_path: 'ai/x.jpg', mime: 'image/jpeg' }), g2.id]);
+    assert.equal(sv.image.provider, 'cloudflare');
+    assert.equal(sv.generation.cost_status, '청구 없음');
+    await assert.rejects(db.query(`insert into public.post_images (kind, provider) values ('ai', 'midjourney')`), /provider_check/);
   });
 });

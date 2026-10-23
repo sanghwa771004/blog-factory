@@ -23,7 +23,12 @@ test('서버는 키를 환경변수(Supabase Secrets)에서만 읽고, 화면으
   const ts = read('supabase/functions/blog-app/index.ts');
   assert.match(ts, /Deno\.env\.get\("OPENAI_API_KEY"\)/);
   assert.match(ts, /Deno\.env\.get\("PEXELS_API_KEY"\)/);
-  assert.match(ts, /const keysInfo = \(\) => \(\{ openai: !!keyOpenAI\(\), pexels: !!\(Deno\.env\.get\("PEXELS_API_KEY"\) \?\? ""\) \}\);/);
+  assert.match(ts, /const keysInfo = \(\) => \(\{ openai: !!keyOpenAI\(\), pexels: !!\(Deno\.env\.get\("PEXELS_API_KEY"\) \?\? ""\), cloudflare: !!\(keyCf\(\)\.accountId && keyCf\(\)\.token\) \}\);/);
+  // Cloudflare 계정 ID·토큰도 Secrets 에서만 읽고, 생성 호출(runGeneration)에만 넘김
+  assert.match(ts, /Deno\.env\.get\("CF_ACCOUNT_ID"\)/);
+  assert.match(ts, /Deno\.env\.get\("CF_API_TOKEN"\)/);
+  const cfUses = [...ts.matchAll(/keyCf\(\)/g)].map((m) => ts.slice(Math.max(0, m.index - 40), m.index + 30));
+  for (const u of cfUses) assert.ok(/cloudflare: !!\(keyCf|&& keyCf\(\)\.token|cf: keyCf\(\)/.test(u), 'Cloudflare 키를 다른 곳에 씀: ' + u);
   // 키 값(keyOpenAI())은 OpenAI 호출(runGeneration)에만 넘김 — json 응답에 그대로 넣는 곳이 없음
   const uses = [...ts.matchAll(/keyOpenAI\(\)/g)].map((m) => ts.slice(Math.max(0, m.index - 60), m.index + 20));
   for (const u of uses) assert.ok(/!!keyOpenAI|!keyOpenAI|key: keyOpenAI|=> Deno\.env|const keyOpenAI/.test(u), '키를 다른 곳에 씀: ' + u);

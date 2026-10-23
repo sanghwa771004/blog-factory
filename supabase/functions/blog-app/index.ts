@@ -8,7 +8,7 @@ import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
 import {
   parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
-  validApiSize, buildPrompt, promptRisk, blocksOf, slotRisk, estimateUsd, estimateTokens, normQuality, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
+  validApiSize, buildPrompt, promptRisk, blocksOf, slotRisk, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
   CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
 } from "./images.js";
 import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
@@ -1121,7 +1121,9 @@ async function setCompat(c: Ctx) {
 const SIGN_SECONDS = 3600;                       // 비공개 이미지 서명 주소 유효 시간
 const STORAGE_SOFT_LIMIT = 900 * 1024 * 1024;    // 저장 공간이 이만큼 차면 새로 올리기를 멈춤
 const keyOpenAI = () => Deno.env.get("OPENAI_API_KEY") ?? "";
-const keysInfo = () => ({ openai: !!keyOpenAI(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? "") });
+// 무료 이미지(Cloudflare Workers AI): 계정 ID + 'Workers AI' 권한 토큰
+const keyCf = () => ({ accountId: (Deno.env.get("CF_ACCOUNT_ID") ?? "").trim(), token: (Deno.env.get("CF_API_TOKEN") ?? "").trim() });
+const keysInfo = () => ({ openai: !!keyOpenAI(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? ""), cloudflare: !!(keyCf().accountId && keyCf().token) });
 const providersInfo = () => Object.entries(PHOTO_PROVIDERS).map(([id, p]) => ({ id, label: p.label, connected: !!(Deno.env.get(p.envKey) ?? ""), site: p.site, license_url: p.licenseUrl }));
 // 생성 기록을 화면에 보낼 때는 긴 프롬프트를 뺌 (이미지 정보에 따로 있음)
 const GEN_COLS = "id, request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality, output_format, purpose, style, user_prompt, base_image_id, status, provider_called, provider_request_id, risk_override, error_code, error_message, est_usd, usage, usage_usd, actual_usd, actual_checked_at, cost_status, auto_cost_status, fx_krw, fx_date, fx_source, image_id, started_at, finished_at, created_at";
@@ -1351,7 +1353,11 @@ async function generateImage(c: Ctx) {
   const capsModel = isTest ? "gpt-image-2.5-flare" : model; // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼
   // 모델이 못 받는 품질은 가까운 것으로 (xhigh·max는 2.5 계열만 — OpenAI API 레퍼런스)
   const quality = normQuality(capsModel, (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality));
-  if (!isTest && !keyOpenAI()) fail(503, "openai_key_missing");
+  const caps = modelCaps(capsModel);
+  const isFree = caps.provider === "cloudflare";
+  if (isFree && mode === "edit") fail(400, "edit_unsupported");
+  if (isFree && !keysInfo().cloudflare) fail(503, "cf_key_missing");
+  if (!isTest && !isFree && !keyOpenAI()) fail(503, "openai_key_missing");
   // 상표·가격·인증·후기 사진·글자 요청은 서버에서도 막음 (화면에서 먼저 알려줌)
   const products = await linkedProducts(String(post!.id));
   const risks = blocksOf(promptRisk(text + "\n" + extra, products.brands));
@@ -1383,12 +1389,13 @@ async function generateImage(c: Ctx) {
   await storageGuard(2 * 1024 * 1024);
   // 이 일꾼이 꺼질 때까지 남은 시간이 그 품질을 기다리기에 모자라면, 돈이 나가기 전에 '잠깐 뒤에 다시' (그때는 새 일꾼이 받음)
   // 화면은 retry_after 초만큼 기다렸다가 같은 요청 번호로 다시 보냄 (image_service.js busyRetryAfter)
-  if (DEADLINE - Date.now() < needMsFor(quality, mode, WALL_MS)) {
+  if (DEADLINE - Date.now() < (isFree ? 45000 : needMsFor(quality, mode, WALL_MS))) {
     fail(503, "server_busy", { retry_after: busyRetryAfter(Date.now() - BOOT_AT, WALL_MS) });
   }
   const begin = await sb.rpc("image_gen_begin", {
     p: {
       request_key: requestKey, post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, mode, model, size, quality,
+      provider: isFree ? "cloudflare" : "openai",
       output_format: "jpeg", purpose, style, user_prompt: [text, extra].filter(Boolean).join("\n"), prompt, base_image_id: base ? base.id : "", est_usd: est,
       risk_override: real.real ? "일반 장면으로 만들기 확인: " + real.word : "",
     },
@@ -1399,7 +1406,7 @@ async function generateImage(c: Ctx) {
   if (gen.duplicate) return json({ generation: pub, duplicate: true });
   RUNNING.add(String(gen.id));
   const task = runGeneration(imageDeps(), gen, {
-    key: keyOpenAI(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: 115_000, ratio,
+    key: keyOpenAI(), cf: keyCf(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: isFree ? 90_000 : 115_000, ratio,
     base: base ? { path: String(base.storage_path), mime: String(base.mime) } : null,
     // 고치기는 바뀐 내용(지시)이 아니라 원래 이미지 설명을 그대로 씀 (지시는 생성 기록의 user_prompt 에)
     description: mode === "edit" ? String(base?.description || slot!.text || text) : text,
