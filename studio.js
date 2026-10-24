@@ -1,8 +1,8 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.2.1';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.2.1';
+import * as IMG from './images.js?v=1.2.2';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.2.2';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -1360,9 +1360,11 @@ export function createStudio(ui) {
       status, guide,
       h('h3', null, '모델'), field('생성 모델', f.gen), field('편집 모델 (고쳐서 만들기)', f.edit),
       h('p', { class: 'hint' }, '계정에서 이 모델을 못 쓰면 다른 이미지 모델 이름으로 바꿔줘. 앱이 아는 모델 (OpenAI 문서, 2026-10-22 확인):'),
-      h('div', { class: 'go' }, btn('무료 모델로 (cf-flux-1-schnell)', 'sm', () => { f.gen.value = IMG.FREE_MODEL; ui.markDirty(); toast('생성 모델을 무료 모델로 바꿨어. 저장을 눌러줘.'); })),
+      h('div', { class: 'go' }, btn(`무료 모델로 (${IMG.FREE_MODEL})`, 'sm', () => { f.gen.value = IMG.FREE_MODEL; ui.markDirty(); toast('생성 모델을 무료 모델로 바꿨어. 저장을 눌러줘.'); })),
       h('ul', { class: 'lic' },
-        h('li', null, 'cf-flux-1-schnell — 무료 (Cloudflare Workers AI · FLUX.1 schnell). 1024×1024로 만들고 내려받을 때 비율대로 잘라. 품질 = 그리는 단계(낮음 4·보통 6·높음 8). 한국어 설명은 같은 무료 계정의 글 모델이 영어로 바꿔서 보내. 고치기(편집)는 못 해. 글자·사람 손은 약해'),
+        h('li', null, 'cf-flux-2-klein-4b — 무료 기본 (Cloudflare Workers AI · FLUX.2 [klein] 4B). 고른 비율 그대로 만들어 (긴 변 1024). 사진이 더 자연스러워. 품질은 하나(보통). 무료 플랜이면 하루 약 60장'),
+        h('li', null, 'cf-flux-1-schnell — 무료 (FLUX.1 schnell, 예전 기본). 1024×1024로 만들고 내려받을 때 비율대로 잘라. 품질 = 그리는 단계(낮음 4·보통 6·높음 8). 더 많이(하루 약 80장) 만들 수 있지만 AI 티가 더 나'),
+        h('li', null, '무료 모델 둘 다: 한국어 설명은 같은 무료 계정의 글 모델이 영어로 바꿔서 보내고, 폰으로 찍은 생활 사진처럼 그리게 해. 고치기(편집)는 못 해. 글자·사람 손은 약해'),
         h('li', null, 'gpt-image-2.5-flare · gpt-image-2.5-sunburst — 유료(OpenAI). 원하는 비율 그대로, 품질 5단계, 가격은 아래 가격표'),
         h('li', null, 'gpt-image-2 — 원하는 비율 그대로, 품질 3단계. 장당 가격을 확인 못 해서 예상 비용을 넉넉히 잡아'),
         h('li', null, 'gpt-image-1.5 · gpt-image-1 · gpt-image-1-mini — 이전 모델(Deprecated). 정해진 크기 3가지로 만들고 내려받을 때 잘라, 품질 3단계, 모델 페이지의 장당 가격으로 계산'),

@@ -399,24 +399,27 @@ describe('서버 일꾼 시간 (검증 N2: 기다리는 시간 줄이기)', () =
 
 // ───────── 무료 이미지 (Cloudflare Workers AI) ─────────
 const CF = { accountId: 'acc123', token: 'cf-token-xyz' };
+const SCHNELL = 'cf-flux-1-schnell';
+const KLEIN = 'cf-flux-2-klein-4b';
 const cfText = (text) => ({ json: { success: true, result: { response: text }, errors: [] } });
 const cfImg = (bytes = fx('photo-4x3.jpg')) => ({ json: { success: true, result: { image: bytesToB64(bytes) }, errors: [] }, headers: { 'cf-ray': 'ray-1' } });
 const EN = 'A cozy small Korean studio apartment desk by a window, soft morning daylight, warm wooden tones, centered composition, natural lifestyle photo';
 describe('무료 이미지 모델 (Cloudflare)', () => {
+  test('기본 무료 모델은 FLUX.2 klein', () => { assert.equal(FREE_MODEL, KLEIN); });
   test('모델 규칙: 무료·1024 정사각 고정·편집 못 함·비용 0', () => {
-    const c = modelCaps(FREE_MODEL);
+    const c = modelCaps(SCHNELL);
     assert.equal(c.provider, 'cloudflare');
     assert.equal(c.free, true);
     assert.equal(c.noEdit, true);
-    assert.equal(sizeFor('blog_body', '16:9', FREE_MODEL), '1024x1024');
-    assert.equal(estimateUsd({ quality: 'medium', size: '1024x1024', promptTokens: 500, model: FREE_MODEL }), 0);
-    assert.equal(usageUsd({ output_tokens: 100 }, PRICES, FREE_MODEL), 0);
-    assert.equal(normQuality(FREE_MODEL, 'max'), 'high');
+    assert.equal(sizeFor('blog_body', '16:9', SCHNELL), '1024x1024');
+    assert.equal(estimateUsd({ quality: 'medium', size: '1024x1024', promptTokens: 500, model: SCHNELL }), 0);
+    assert.equal(usageUsd({ output_tokens: 100 }, PRICES, SCHNELL), 0);
+    assert.equal(normQuality(SCHNELL, 'max'), 'high');
     assert.equal(modelCaps('gpt-image-2.5-flare').provider, 'openai');
   });
   test('한국어 요청서 → 글 모델이 영어 프롬프트 → 규칙 붙여 이미지 모델 (주소·토큰·단계 수)', async () => {
     const f = fakeFetch((url) => (url.includes('llama') ? cfText(EN) : cfImg()));
-    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: FREE_MODEL, prompt: 'Scene to show (Korean): 작은 원룸 책상', quality: 'high' });
+    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: SCHNELL, prompt: 'Scene to show (Korean): 작은 원룸 책상', quality: 'high' });
     assert.equal(r.ok, true);
     assert.equal(f.calls.length, 2);
     assert.equal(f.calls[0].url, 'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/@cf/meta/llama-3.3-70b-instruct-fp8-fast');
@@ -438,12 +441,12 @@ describe('무료 이미지 모델 (Cloudflare)', () => {
   test('글 모델이 이상한 답을 주면 한 번 더 묻고, 그래도 안 되면 요청서를 그대로 씀', async () => {
     let n = 0;
     const f = fakeFetch((url) => (url.includes('llama') ? (++n === 1 ? cfText('작은 원룸') : cfText(EN)) : cfImg()));
-    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: FREE_MODEL, prompt: 'BRIEF', quality: 'low' });
+    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: SCHNELL, prompt: 'BRIEF', quality: 'low' });
     assert.equal(r.ok, true);
     assert.equal(f.calls.length, 3, '글 모델 두 번 + 이미지 한 번');
     assert.ok(JSON.parse(f.calls[2].init.body).prompt.startsWith(EN));
     const g = fakeFetch((url) => (url.includes('llama') ? cfText('작은 원룸') : cfImg()));
-    const r2 = await cloudflareImage({ fetchImpl: g, ...CF, model: FREE_MODEL, prompt: 'BRIEF', quality: 'low' });
+    const r2 = await cloudflareImage({ fetchImpl: g, ...CF, model: SCHNELL, prompt: 'BRIEF', quality: 'low' });
     assert.equal(r2.ok, true);
     const body = JSON.parse(g.calls[2].init.body);
     assert.ok(body.prompt.startsWith('BRIEF'));
@@ -452,17 +455,17 @@ describe('무료 이미지 모델 (Cloudflare)', () => {
   });
   test('무료 사용량 다 씀·토큰 틀림·키 없음: 이미지 모델을 부르지 않고 청구 없음', async () => {
     const used = fakeFetch(() => ({ status: 429, json: { success: false, errors: [{ code: 4006, message: 'you have used up your daily free allocation of 10,000 neurons' }] } }));
-    const a = await cloudflareImage({ fetchImpl: used, ...CF, model: FREE_MODEL, prompt: 'p', quality: 'low' });
+    const a = await cloudflareImage({ fetchImpl: used, ...CF, model: SCHNELL, prompt: 'p', quality: 'low' });
     assert.equal(a.code, 'cf_daily_free_used'); assert.equal(a.billed, 'no'); assert.equal(used.calls.length, 1);
     const bad = fakeFetch(() => ({ status: 401, json: { success: false, errors: [{ code: 10000, message: 'Authentication error' }] } }));
-    assert.equal((await cloudflareImage({ fetchImpl: bad, ...CF, model: FREE_MODEL, prompt: 'p', quality: 'low' })).code, 'cf_key_invalid');
+    assert.equal((await cloudflareImage({ fetchImpl: bad, ...CF, model: SCHNELL, prompt: 'p', quality: 'low' })).code, 'cf_key_invalid');
     const none = fakeFetch(() => cfImg());
-    assert.equal((await cloudflareImage({ fetchImpl: none, accountId: '', token: '', model: FREE_MODEL, prompt: 'p' })).code, 'cf_key_missing');
+    assert.equal((await cloudflareImage({ fetchImpl: none, accountId: '', token: '', model: SCHNELL, prompt: 'p' })).code, 'cf_key_missing');
     assert.equal(none.calls.length, 0);
     for (const c of ['cf_key_missing', 'cf_key_invalid', 'cf_daily_free_used']) assert.ok(NOT_COUNTED.has(c), c + '는 하루 횟수에 안 셈');
   });
   test('생성 흐름: 공급자 cloudflare·청구 없음·비용 0으로 저장, 영어 프롬프트 기록, 실패도 청구 없음', async () => {
-    const G = { ...GEN, model: FREE_MODEL, size: '1024x1024', quality: 'medium' };
+    const G = { ...GEN, model: SCHNELL, size: '1024x1024', quality: 'medium' };
     const d = fakeDeps({ fetchImpl: fakeFetch((url) => (url.includes('llama') ? cfText(EN) : cfImg())) });
     const r = await runGeneration(d, G, { cf: CF, prices: PRICES, description: '작은 원룸 사진', ratio: '16:9' });
     assert.equal(r.ok, true);
@@ -480,5 +483,40 @@ describe('무료 이미지 모델 (Cloudflare)', () => {
     const fin = d2.log.rpc.find((x) => x.name === 'image_gen_fail').args.fin;
     assert.equal(fin.cost_status, '청구 없음');
     assert.ok(!/OpenAI/.test(fin.error_message));
+  });
+  test('FLUX.2 klein: 고른 비율 그대로(긴 변 1024), 품질은 보통 하나, 비용 0', () => {
+    const c = modelCaps(KLEIN);
+    assert.equal(c.provider, 'cloudflare'); assert.equal(c.multipart, true); assert.equal(c.free, true); assert.equal(c.flexible, true);
+    assert.equal(sizeFor('blog_body', '4:3', KLEIN), '1024x768');
+    assert.equal(sizeFor('blog_cover', '16:9', KLEIN), '1024x576');
+    assert.equal(sizeFor('ig_feed', '4:5', KLEIN), '816x1024');
+    assert.equal(sizeFor('ig_story', '9:16', KLEIN), '576x1024');
+    assert.equal(normQuality(KLEIN, 'high'), 'medium');
+    assert.equal(estimateUsd({ quality: 'medium', size: '1024x768', promptTokens: 500, model: KLEIN }), 0);
+  });
+  test('FLUX.2 klein: multipart로 prompt·width·height를 보내고 (단계 수 없음), 영어 프롬프트 + 규칙', async () => {
+    const f = fakeFetch((url) => (url.includes('llama') ? cfText(EN) : cfImg()));
+    const r = await cloudflareImage({ fetchImpl: f, ...CF, model: KLEIN, prompt: 'BRIEF', quality: 'medium', size: '1024x576' });
+    assert.equal(r.ok, true);
+    assert.equal(f.calls[1].url, 'https://api.cloudflare.com/client/v4/accounts/acc123/ai/run/@cf/black-forest-labs/flux-2-klein-4b');
+    const init = f.calls[1].init;
+    assert.ok(init.body instanceof FormData, 'multipart');
+    assert.equal(init.headers['Content-Type'], undefined, '경계 문자열은 fetch가 붙임');
+    assert.equal(init.headers.Authorization, 'Bearer cf-token-xyz');
+    assert.equal(init.body.get('width'), '1024');
+    assert.equal(init.body.get('height'), '576');
+    assert.equal(init.body.get('steps'), null);
+    assert.ok(init.body.get('prompt').startsWith(EN));
+    assert.ok(init.body.get('prompt').includes(CF_RULES));
+  });
+  test('FLUX.2 klein 생성 흐름: 이미지에 모델 이름이 든 라이선스, 청구 없음', async () => {
+    const G = { ...GEN, model: KLEIN, size: '1024x768', quality: 'medium' };
+    const d = fakeDeps({ fetchImpl: fakeFetch((url) => (url.includes('llama') ? cfText(EN) : cfImg())) });
+    const r = await runGeneration(d, G, { cf: CF, prices: PRICES, description: '작은 원룸 사진', ratio: '4:3' });
+    assert.equal(r.ok, true);
+    const save = d.log.rpc.find((x) => x.name === 'image_save').args;
+    assert.equal(save.img.provider, 'cloudflare');
+    assert.match(save.img.license, /FLUX\.2 \[klein\] 4B/);
+    assert.equal(save.fin.cost_status, '청구 없음');
   });
 });

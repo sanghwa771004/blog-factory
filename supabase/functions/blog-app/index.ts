@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.2.1)
+// 블로그 글공장 서버 API (1.2.2)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -13,7 +13,7 @@ import {
 } from "./images.js";
 import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
 
-const VERSION = "1.2.1";
+const VERSION = "1.2.2";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -1375,7 +1375,7 @@ async function generateImage(c: Ctx) {
     base = data as J;
   }
   const size = sizeFor(purpose, ratio, capsModel);
-  if (!validApiSize(size)) fail(400, "bad_field", { field: "ratio" });
+  if (!isFree && !validApiSize(size)) fail(400, "bad_field", { field: "ratio" }); // 크기 규칙은 OpenAI 것 (무료 모델은 정해 둔 크기)
   // 맥락(제목·소제목·앞뒤 문장)에서 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄
   const prompt = buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode, hide: products.hide });
   const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices, model });

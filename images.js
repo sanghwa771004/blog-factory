@@ -296,7 +296,9 @@ export const STANDARD_SIZES = ['1024x1024', '1536x1024', '1024x1536'];
 export const standardSizeFor = (ratio) => { const R = RATIOS[ratio] || RATIOS['1:1']; return R.w > R.h ? '1536x1024' : R.w < R.h ? '1024x1536' : '1024x1024'; };
 export const sizeFor = (purpose, ratio, model) => {
   const r = ratioOf(purpose, ratio);
-  if (model && modelCaps(model).fixedSize) return modelCaps(model).fixedSize;
+  const c = model ? modelCaps(model) : null;
+  if (c && c.sizes) return c.sizes[r] || c.sizes['1:1'];   // 비율별로 정해 둔 크기로 바로 만드는 모델 (자를 필요 없음)
+  if (c && c.fixedSize) return c.fixedSize;
   return model && !modelCaps(model).flexible ? standardSizeFor(r) : RATIOS[r].size;
 };
 // 크기 문자열이 OpenAI 규칙에 맞는지 (16의 배수, 비율, 한 변·총 픽셀)
@@ -503,8 +505,14 @@ const per = (a, b) => ({ '1024x1024': a, '1536x1024': b, '1024x1536': b });
 const MODEL_FAMILIES = [
   // 무료: Cloudflare Workers AI 의 FLUX.1 schnell (무료 플랜 하루 10,000 뉴런 안에서 청구 없음 — 넘으면 실패만 함. 2026-10-24 확인)
   // 크기는 1024x1024 하나(크기 지정 없음) → 내려받을 때 고른 비율로 자름. 고치기(편집)는 못 함. 품질 = 단계 수(4·6·8)
+  // 무료(기본, 2026-10-25~): FLUX.2 [klein] 4B — 고른 비율 그대로 만들고(긴 변 1024, 512칸 4개 ≈ 104뉴런), 사진이 더 자연스러움.
+  // 단계는 4로 고정(바꿀 수 없음)이라 품질 칸은 '보통' 하나. 요청은 multipart(prompt·width·height). 공식: Cloudflare 변경 기록 2026-01-15
+  { id: 'cf-flux-2-klein-4b', re: /^cf-flux-2-klein-4b$/, flexible: true, qualities: ['medium'], free: true, noEdit: true,
+    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-2-klein-4b', multipart: true, label: 'FLUX.2 [klein] 4B',
+    sizes: { '16:9': '1024x576', '4:3': '1024x768', '1:1': '1024x1024', '4:5': '816x1024', '9:16': '576x1024' },
+    url: 'https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/' },
   { id: 'cf-flux-1-schnell', re: /^cf-flux-1-schnell$/, flexible: false, fixedSize: '1024x1024', qualities: Q3, free: true, noEdit: true,
-    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-1-schnell', steps: { low: 4, medium: 6, high: 8 },
+    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-1-schnell', steps: { low: 4, medium: 6, high: 8 }, label: 'FLUX.1 schnell',
     url: 'https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/' },
   { id: 'gpt-image-2.5', re: /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: QUALITIES, settingsPrices: true },
   { id: 'gpt-image-2', re: /^gpt-image-2(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: Q3, conservative: true },
@@ -525,9 +533,10 @@ export function modelCaps(model) {
   const f = MODEL_FAMILIES.find((x) => x.re.test(m));
   if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false, provider: 'openai' };
   return { id: f.id, known: true, flexible: f.flexible, qualities: f.qualities, conservative: !!f.conservative, settingsPrices: !!f.settingsPrices, deprecated: !!f.deprecated, prices: f.prices || null, perImage: f.perImage || null, url: f.url || '',
-    provider: f.provider || 'openai', free: !!f.free, noEdit: !!f.noEdit, fixedSize: f.fixedSize || '', cfModel: f.cfModel || '', steps: f.steps || null };
+    provider: f.provider || 'openai', free: !!f.free, noEdit: !!f.noEdit, fixedSize: f.fixedSize || '', cfModel: f.cfModel || '', steps: f.steps || null,
+    sizes: f.sizes || null, multipart: !!f.multipart, label: f.label || f.id };
 }
-export const FREE_MODEL = 'cf-flux-1-schnell';
+export const FREE_MODEL = 'cf-flux-2-klein-4b';
 export const qualitiesFor = (model) => (model ? modelCaps(model).qualities : QUALITIES);
 // 모델이 못 받는 품질이면 가까운 것으로 (xhigh·max → high, 그 밖 → medium)
 export const normQuality = (model, q) => { const qs = qualitiesFor(model); return qs.includes(q) ? q : qs.includes('high') && (q === 'xhigh' || q === 'max') ? 'high' : 'medium'; };

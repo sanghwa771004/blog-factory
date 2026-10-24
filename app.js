@@ -1,12 +1,12 @@
-// 글공장 앱 1.2.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.2.2 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.2.1';
-import * as L from './lib.js?v=1.2.1';
-import * as IMG from './images.js?v=1.2.1';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.2.1';
+} from './checks.js?v=1.2.2';
+import * as L from './lib.js?v=1.2.2';
+import * as IMG from './images.js?v=1.2.2';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.2.2';
 
-const APP_VER = '1.2.1';
+const APP_VER = '1.2.2';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';

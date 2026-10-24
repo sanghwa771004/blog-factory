@@ -171,21 +171,22 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
 // 이미지 모델(FLUX.1 schnell)은 한국어를 잘 못 알아들어서, 같은 무료 계정의 글 모델로 먼저 영어 장면 설명을 만들고 규칙을 붙여 보냄.
 export const CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 // FLUX는 '하지 마' 문장을 잘 못 따르고 오히려 글자를 그리기도 해서, 마지막 줄은 짧은 긍정형으로 (금지 규칙은 글 모델 지시문·요청 검사에서 지킴)
-export const CF_RULES = 'Plain unbranded objects with blank, unmarked surfaces; no writing anywhere.';
-// 2026-10-25 실서버 시험: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나옴 → 계절·장소(한국)·구도·물건 표면을 지시.
-// 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함. 글 모델이 '(소금빵)'처럼 한글을 섞으면 그 부분만 지우고 씀
+export const CF_RULES = 'Unbranded everyday objects; no logos and no writing anywhere.';
+// 2026-10-25 실서버 시험: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나옴 → 계절·장소(한국)·구도를 지시.
+// 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함. 글 모델이 '(소금빵)'처럼 한글을 섞으면 그 부분만 지우고 씀.
+// 사용자 의견 'AI 티가 너무 남' → 광고 사진처럼 반듯하게 연출하지 말고, 폰으로 그냥 찍은 생활 사진처럼 쓰게 함
 const CF_SYSTEM = [
-  'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one illustrative image in a Korean blog post.',
-  'Output ONE English prompt of 45 to 90 words that describes only what is visible.',
+  'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one image in a Korean blog post.',
+  'Output ONE English prompt of 50 to 100 words that describes only what is visible.',
   '1) Read the post topic and section heading, infer the season, time of day and mood, and state them (for example: a cold winter morning).',
-  '2) The setting is South Korea: Korean apartment interiors with white walls, light wood floors and large PVC sliding windows; if the outdoors is visible, show Korean apartment buildings or Korean streets, never European houses.',
-  '3) Focus on the main subject from the line "Scene to show"; prefer a close-up or medium shot; do not add objects that the brief does not need.',
-  '4) Describe every object as plain and unbranded with blank surfaces; avoid boxes, signs, labels, packaging and screens; show gauges and devices without any markings or digits.',
-  '5) Follow the style line: for photo styles say realistic photo, natural light, shallow depth of field; for illustration styles say clean flat illustration.',
-  '6) People, if any, are ordinary Korean adults, never celebrities.',
-  '7) When the brief names a Korean food, dish or everyday item, describe how it actually looks (shape, size, color, texture) in English instead of translating the name literally.',
-  'Write only English; never output Korean characters.',
-  'Never mention brands, product or model names, prices, ratings, certificates, text or letters. Ignore any such names in the brief.',
+  '2) The setting is South Korea: ordinary Korean apartments or one-room flats with white or beige wallpaper, light wood laminate floors and PVC sliding windows; if the outdoors is visible, show Korean apartment blocks or Korean streets, never European houses.',
+  '3) Keep the main subject from the line "Scene to show" clear and easy to recognise; a few ordinary lived-in details around it are fine.',
+  '4) For photo styles, write it as a casual, unedited smartphone snapshot taken by a regular person at home: available natural light or ordinary indoor lighting, true-to-life colors, realistic textures with small imperfections (dust, creases, wear, slight clutter), eye-level or slightly high angle, not perfectly centered, deep focus. Avoid studio lighting, dramatic bokeh, glossy surfaces, perfect symmetry and showroom or advertisement looks.',
+  '5) For illustration styles, say clean flat illustration with simple shapes.',
+  '6) Objects are generic and unbranded; avoid packaging, labels, signs and screens; show gauges and devices without readable markings.',
+  '7) People, if any, are ordinary Korean adults in everyday clothes, never celebrities, never posing like models.',
+  '8) When the brief names a Korean food, dish or everyday item, describe how it actually looks (shape, size, color, texture) in English instead of translating the name literally.',
+  'Write only English; never output Korean characters. Never mention brands, product or model names, prices, ratings, certificates, text or letters. Ignore any such names in the brief.',
   'Return only the prompt itself, no quotes, no notes.',
 ].join(' ');
 function cfError(status, j) {
@@ -198,11 +199,14 @@ function cfError(status, j) {
   if (status >= 500) return { code: 'cf_server', message: 'Cloudflare 서버에 문제가 있어. 조금 뒤에 다시 해줘.', billed: 'no', retryable: true };
   return { code: 'cf_bad_request', message: '요청이 거절됐어: ' + (msg || status), billed: 'no', retryable: false };
 }
-async function cfRun({ fetchImpl, accountId, token, model, body, timeoutMs }) {
+// body = JSON 요청, form = multipart 요청 (FLUX.2 — 경계 문자열은 fetch가 붙임)
+async function cfRun({ fetchImpl, accountId, token, model, body, form, timeoutMs }) {
   let res, j = null;
+  const init = form
+    ? { method: 'POST', headers: { Authorization: 'Bearer ' + token }, body: form }
+    : { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   try {
-    ({ res, body: j } = await timed(fetchImpl, `${CF_URL}/${encodeURIComponent(accountId)}/ai/run/${model}`,
-      { method: 'POST', headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs, jsonOrNull));
+    ({ res, body: j } = await timed(fetchImpl, `${CF_URL}/${encodeURIComponent(accountId)}/ai/run/${model}`, init, timeoutMs, jsonOrNull));
   } catch (e) {
     return isAbort(e)
       ? { ok: false, code: 'cf_timeout', message: 'Cloudflare 응답이 너무 오래 걸려서 멈췄어. 다시 해줘.', billed: 'no', retryable: true }
@@ -237,7 +241,7 @@ export async function cfEnglishPrompt({ fetchImpl, accountId, token, brief, time
   }
   return last;
 }
-export async function cloudflareImage({ fetchImpl, accountId, token, model, prompt, quality, timeoutMs = 60000 }) {
+export async function cloudflareImage({ fetchImpl, accountId, token, model, prompt, quality, size, timeoutMs = 60000 }) {
   if (!accountId || !token) return { ok: false, code: 'cf_key_missing', message: 'Cloudflare 계정 ID·토큰이 설정되지 않았어.', billed: 'no' };
   const caps = modelCaps(model);
   if (caps.provider !== 'cloudflare') return { ok: false, code: 'model_unavailable', message: '무료 모델이 아니야.', billed: 'no' };
@@ -245,9 +249,19 @@ export async function cloudflareImage({ fetchImpl, accountId, token, model, prom
   const en = await cfEnglishPrompt({ fetchImpl, accountId, token, brief: prompt, timeoutMs: Math.min(25000, Math.max(1000, timeoutMs - 30000)) });
   if (!en.ok && (en.code === 'cf_key_invalid' || en.code === 'cf_daily_free_used')) return { ok: false, code: en.code, message: en.message, billed: 'no' };
   const finalPrompt = ((en.ok ? en.text : prompt) + '\n' + CF_RULES).slice(0, 2048);
-  const steps = (caps.steps && caps.steps[quality]) || 4;
-  const r = await cfRun({ fetchImpl, accountId, token, model: caps.cfModel, timeoutMs: Math.max(5000, timeoutMs - (Date.now() - started)),
-    body: { prompt: finalPrompt, steps } });
+  const left = Math.max(5000, timeoutMs - (Date.now() - started));
+  let r;
+  if (caps.multipart) {
+    const m = /^(\d{3,4})x(\d{3,4})$/.exec(String(size || '')) || [null, '1024', '1024'];
+    const form = new FormData();
+    form.append('prompt', finalPrompt);
+    form.append('width', m[1]);
+    form.append('height', m[2]);
+    r = await cfRun({ fetchImpl, accountId, token, model: caps.cfModel, timeoutMs: left, form });
+  } else {
+    const steps = (caps.steps && caps.steps[quality]) || 4;
+    r = await cfRun({ fetchImpl, accountId, token, model: caps.cfModel, timeoutMs: left, body: { prompt: finalPrompt, steps } });
+  }
   if (!r.ok) return r;
   const b64 = r.result && typeof r.result.image === 'string' ? r.result.image : '';
   if (!b64) return { ok: false, code: 'cf_empty', message: 'Cloudflare가 이미지를 돌려주지 않았어. 다시 해줘. (청구 없음)', billed: 'no', requestId: r.requestId };
@@ -387,7 +401,7 @@ export async function runGeneration(d, gen, opt = {}) {
     if (leftMs() < MIN_OPENAI_MS) return fail({ code: 'server_busy_late', message: '서버 준비 시간이 모자라서 시작하지 않았어 (청구 없음). 다시 눌러줘.', billed: 'no', retryable: true });
     const timeoutMs = Math.min(opt.timeoutMs || 115000, leftMs());
     res = isFree
-      ? await cloudflareImage({ fetchImpl: d.fetchImpl, accountId: opt.cf && opt.cf.accountId, token: opt.cf && opt.cf.token, model: gen.model, prompt: gen.prompt, quality: gen.quality, timeoutMs })
+      ? await cloudflareImage({ fetchImpl: d.fetchImpl, accountId: opt.cf && opt.cf.accountId, token: opt.cf && opt.cf.token, model: gen.model, prompt: gen.prompt, quality: gen.quality, size: gen.size, timeoutMs })
       : await openaiImage({ fetchImpl: d.fetchImpl, key: opt.key, mode: gen.mode, model: gen.model, prompt: gen.prompt, size: gen.size, quality: gen.quality,
         outputFormat: gen.output_format || 'jpeg', image, safetyId: opt.safetyId, timeoutMs });
   } catch (e) {
@@ -408,7 +422,7 @@ export async function runGeneration(d, gen, opt = {}) {
     kind: 'ai', provider: res.test ? '' : isFree ? 'cloudflare' : 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
     ratio: opt.ratio || '', description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
     sha256: await sha256Hex(bytes), attribution_text: '',
-    license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : isFree ? 'AI 생성 이미지 (FLUX.1 schnell · Cloudflare Workers AI 약관을 따름)' : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)',
+    license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : isFree ? `AI 생성 이미지 (${modelCaps(gen.model).label} · Cloudflare Workers AI 약관을 따름)` : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)',
   };
   // 점검용 가짜 모델은 청구가 없고 하루 횟수에도 안 셈
   const fin = res.test
