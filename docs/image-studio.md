@@ -134,4 +134,6 @@ Secrets는 프로젝트에 한 번만 넣으면 서버 함수 두 개(`blog-app`
 - 고치기(편집)는 못 한다 → 설명을 바꿔 새로 만들기. 글자·손은 약하다 (원래 이미지 안에 글자는 넣지 않음).
 - 생성 기록은 공급자 `cloudflare`, 비용 `청구 없음`·$0으로 남는다. 하루 생성 한도(설정)는 그대로 적용된다.
 - 넣는 법: Cloudflare 무료 가입 → 왼쪽 AI → Workers AI → Use REST API → Create a Workers AI API Token → Create API Token → Copy API Token, 같은 화면 Get Account ID 복사 → Supabase Secrets 에 `CF_ACCOUNT_ID`, `CF_API_TOKEN`.
-- 실제 Cloudflare 호출로 그림 품질을 확인하는 시험은 **아직 안 했다** (계정이 없어서). 가짜 Cloudflare로 흐름만 시험함 (`tests/image_service.test.js` '무료 이미지 모델').
+- 2026-10-25 실서버에서 5장 만들어 봄: 장당 6초 안팎, 모두 성공·청구 없음. 결과는 `docs/testing-1.2.0.md` '실서버 점검'.
+- 잘 나오게 쓰는 법: 사진 자리 설명은 **눈에 보이는 것**으로 (무엇이·어디에·어떤 빛). 글 모델이 모르는 한국 음식·물건(예: 소금빵)은 '추가 요청'에 생김새를 적어줘 (예: 작은 롤빵 모양, 윗면에 굵은 소금). 글자·숫자가 있어야 하는 물건(포장·화면·계기판)은 피하거나 카드뉴스로.
+- 하루 생성 한도(설정 > 이미지, 기본 5장)는 무료 모델에도 적용돼. 무료 모델만 쓸 거면 20~30장으로 올려도 Cloudflare 무료 한도(하루 약 70~100장) 안이야.

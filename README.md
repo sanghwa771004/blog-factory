@@ -9,7 +9,7 @@
 - **주제**: AI 주제 추천(근거·신뢰도 포함), 점수 가중치, 채택·보류·제외
 - **수익**: 기간별 요약(데이터 없음과 0 구분), 글·채널·수익 모델·카테고리별, 직접 입력, CSV·엑셀 올리기(미리보기·열 맞추기·중복 건너뛰기·고친 리포트는 새 숫자로 바꾸기·올리기 취소)
 - **설정**: 자동 글쓰기, 수익 모델·채널 정책 정보, 조합표, 상품, 기기·접속 코드, 백업, 휴지통, 사용 방법
-- **이미지 스튜디오 (1.2.0)**: 원고의 `[이미지: 설명]` 자리마다 AI 이미지 만들기(OpenAI)·실제 사진 찾기(Pexels)·파일 올리기 → 미리보기·자르기 → 검수 → 내려받기, 카드뉴스 PNG, 이미지 보관함, 생성 비용(수익 통계와 따로) — 설정·키·비용 한도는 `docs/image-studio.md`
+- **이미지 스튜디오 (1.2.0)**: 원고의 `[이미지: 설명]` 자리마다 AI 이미지 만들기(기본 무료 — Cloudflare Workers AI, OpenAI는 선택)·실제 사진 찾기(Pexels)·파일 올리기 → 미리보기·자르기 → 검수 → 내려받기, 카드뉴스 PNG, 이미지 보관함, 생성 비용(수익 통계와 따로) — 설정·키·비용 한도는 `docs/image-studio.md`
 
 앱은 블로그에 **대신 게시하지 않아** (이미지도 직접 올려). 네이버 블로그·티스토리는 글쓰기 API가 없어서 복사해서 붙여넣는 방식이야. 제휴사 실적도 **자동으로 가져오지 않아** (직접 입력이나 파일).
 
@@ -55,4 +55,5 @@ python3 tests/artifact/run_check.py /tmp  # Claude 안 글공장 화면·흐름 
 3. 1~2분 뒤 GitHub Pages에 반영되고, 앱을 다시 열면 자동으로 새 버전이 떠
 
 서버를 바꿨으면 `supabase/functions/blog-app/`의 `index.ts`·`checks.js`·`images.js`·`image_service.js`를 같이 Edge Function **`blog-app`과 `blog-gen` 두 이름으로** 올려줘 (둘 다 `verify_jwt` 끔 — 자체 로그인 사용). `blog-gen`은 같은 코드인데 'AI 이미지 만들기' 요청만 받아서, 생성이 다른 요청과 섞이지 않는 서버 일꾼에서 시작해 ('서버 준비 중' 대기·중간에 끊김이 줄어들게). CLI로는 `supabase functions deploy blog-app --no-verify-jwt` / `supabase functions deploy blog-gen --no-verify-jwt` (`supabase/functions/blog-gen/index.ts`가 blog-app 코드를 불러옴). `blog-gen`이 없거나(404) 켜지지 못하면(5xx 등 우리 서버의 답이 아닐 때) 앱이 같은 요청 번호로 본 서버에 보내서 그대로 돼 (두 번 만들지 않음). `checks.js`·`images.js`는 저장소 맨 위 파일과 글자 하나까지 같아야 해 (테스트가 확인함).
+MCP·대시보드로 올릴 때(1.2.0부터 이 방법으로 올림)는 파일 네 개를 붙여넣는 대신 한 줄짜리 `index.ts`만 올려: `import "https://raw.githubusercontent.com/sanghwa771004/blog-factory/<커밋 전체 번호>/supabase/functions/blog-app/index.ts";` — 그 커밋의 서버 코드를 배포할 때 묶어 넣고(실행 중에는 GitHub를 안 부름), `blog-app`·`blog-gen` 두 이름 모두 같은 줄. 되돌릴 때는 예전 커밋 번호로 다시 올리면 돼. 커밋은 먼저 푸시해 둬야 해.
 아이콘은 `python3 tools/make_icons.py .`로 다시 만들 수 있어.
