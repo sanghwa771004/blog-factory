@@ -173,7 +173,7 @@ export const CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 // FLUX는 '하지 마' 문장을 잘 못 따르고 오히려 글자를 그리기도 해서, 마지막 줄은 짧은 긍정형으로 (금지 규칙은 글 모델 지시문·요청 검사에서 지킴)
 export const CF_RULES = 'Plain unbranded objects with blank, unmarked surfaces; no writing anywhere.';
 // 2026-10-25 실서버 시험: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나옴 → 계절·장소(한국)·구도·물건 표면을 지시.
-// 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함
+// 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함. 글 모델이 '(소금빵)'처럼 한글을 섞으면 그 부분만 지우고 씀
 const CF_SYSTEM = [
   'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one illustrative image in a Korean blog post.',
   'Output ONE English prompt of 45 to 90 words that describes only what is visible.',
@@ -183,7 +183,8 @@ const CF_SYSTEM = [
   '4) Describe every object as plain and unbranded with blank surfaces; avoid boxes, signs, labels, packaging and screens; show gauges and devices without any markings or digits.',
   '5) Follow the style line: for photo styles say realistic photo, natural light, shallow depth of field; for illustration styles say clean flat illustration.',
   '6) People, if any, are ordinary Korean adults, never celebrities.',
-  '7) When the brief names a Korean food, dish or everyday item (for example 소금빵, 김치찌개, 온수매트), describe how it actually looks (shape, size, color, texture) instead of translating the name literally.',
+  '7) When the brief names a Korean food, dish or everyday item, describe how it actually looks (shape, size, color, texture) in English instead of translating the name literally.',
+  'Write only English; never output Korean characters.',
   'Never mention brands, product or model names, prices, ratings, certificates, text or letters. Ignore any such names in the brief.',
   'Return only the prompt itself, no quotes, no notes.',
 ].join(' ');
@@ -211,15 +212,30 @@ async function cfRun({ fetchImpl, accountId, token, model, body, timeoutMs }) {
   if (!res.ok || !j || j.success === false) return { ok: false, status: res.status, requestId, ...cfError(res.status, j) };
   return { ok: true, result: j.result || {}, requestId };
 }
-// 한국어가 섞인 요청서 → 영어 이미지 프롬프트. 실패하면 null (그때는 요청서를 그대로 씀)
+// 글 모델 답 정리: 따옴표·줄바꿈을 지우고, 섞여 나온 한글(괄호 속 원래 이름 등)은 빼고 씀. 너무 짧으면 버림
+export function cleanEnglishPrompt(raw) {
+  const t = String(raw || '').replace(/\([^)]*[가-힣][^)]*\)/g, ' ').replace(/[가-힣]+/g, ' ')
+    .replace(/^\s*(?:prompt\s*:)?/i, '').replace(/^["'\s]+|["'\s]+$/g, '').replace(/\s+([,.;:])/g, '$1').replace(/\s+/g, ' ').trim();
+  return t.length >= 20 ? t.slice(0, 1200) : '';
+}
+// 한국어가 섞인 요청서 → 영어 이미지 프롬프트. 한 번 더 시도해도 안 되면 실패 (그때는 요청서를 그대로 씀)
 export async function cfEnglishPrompt({ fetchImpl, accountId, token, brief, timeoutMs = 25000 }) {
-  const r = await cfRun({ fetchImpl, accountId, token, model: CF_TEXT_MODEL, timeoutMs,
-    body: { messages: [{ role: 'system', content: CF_SYSTEM }, { role: 'user', content: String(brief).slice(0, 6000) }], max_tokens: 220, temperature: 0.4 } });
-  if (!r.ok) return { ok: false, code: r.code, message: r.message };
-  const t = String((r.result && r.result.response) || '').replace(/^["'\s]+|["'\s]+$/g, '').replace(/\s+/g, ' ').trim();
-  // 프롬프트처럼 보이지 않으면(너무 짧음·한국어 남음) 버림
-  if (t.length < 20 || /[가-힣]/.test(t)) return { ok: false, code: 'cf_prompt_bad', message: '' };
-  return { ok: true, text: t.slice(0, 1200) };
+  let last = { ok: false, code: 'cf_prompt_bad', message: '' };
+  const until = Date.now() + timeoutMs;
+  for (const temperature of [0.4, 0.2]) {
+    const left = until - Date.now();
+    if (left < 3000) break;
+    const r = await cfRun({ fetchImpl, accountId, token, model: CF_TEXT_MODEL, timeoutMs: left,
+      body: { messages: [{ role: 'system', content: CF_SYSTEM }, { role: 'user', content: String(brief).slice(0, 6000) }], max_tokens: 220, temperature } });
+    if (!r.ok) {
+      last = { ok: false, code: r.code, message: r.message };
+      if (r.code === 'cf_key_invalid' || r.code === 'cf_daily_free_used') return last;
+      continue;
+    }
+    const t = cleanEnglishPrompt(r.result && r.result.response);
+    if (t) return { ok: true, text: t };
+  }
+  return last;
 }
 export async function cloudflareImage({ fetchImpl, accountId, token, model, prompt, quality, timeoutMs = 60000 }) {
   if (!accountId || !token) return { ok: false, code: 'cf_key_missing', message: 'Cloudflare 계정 ID·토큰이 설정되지 않았어.', billed: 'no' };

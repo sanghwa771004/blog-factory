@@ -6,7 +6,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   classifyOpenAIError, openaiImage, normalizePexels, pexelsSearch, pexelsPhoto, downloadImage, runGeneration, saveStockPhoto, saveUploaded,
-  storagePath, bytesToB64, b64ToBytes, sha256Hex, scrub, TEST_MODEL, NOT_COUNTED, needMsFor, busyRetryAfter, cloudflareImage, CF_RULES,
+  storagePath, bytesToB64, b64ToBytes, sha256Hex, scrub, TEST_MODEL, NOT_COUNTED, needMsFor, busyRetryAfter, cloudflareImage, CF_RULES, cleanEnglishPrompt,
 } from '../supabase/functions/blog-app/image_service.js';
 import { sniffImage, modelCaps, sizeFor, estimateUsd, usageUsd, normQuality, FREE_MODEL } from '../images.js';
 
@@ -429,13 +429,26 @@ describe('무료 이미지 모델 (Cloudflare)', () => {
     assert.ok(body.prompt.length <= 2048);
     assert.equal(r.englishPrompt, true);
   });
-  test('글 모델이 이상한 답(한국어)을 주면 요청서를 그대로 씀', async () => {
-    const f = fakeFetch((url) => (url.includes('llama') ? cfText('작은 원룸') : cfImg()));
+  test('글 모델 답에 섞인 한글(괄호 속 원래 이름)은 빼고 씀', () => {
+    assert.equal(cleanEnglishPrompt('"Freshly baked Korean salt butter rolls (소금빵), cut open to show soft layers, on a plain plate"'),
+      'Freshly baked Korean salt butter rolls, cut open to show soft layers, on a plain plate');
+    assert.equal(cleanEnglishPrompt('Prompt: A cozy 원룸 desk by a window in soft winter light'), 'A cozy desk by a window in soft winter light');
+    assert.equal(cleanEnglishPrompt('작은 원룸'), '', '거의 다 한글이면 버림');
+  });
+  test('글 모델이 이상한 답을 주면 한 번 더 묻고, 그래도 안 되면 요청서를 그대로 씀', async () => {
+    let n = 0;
+    const f = fakeFetch((url) => (url.includes('llama') ? (++n === 1 ? cfText('작은 원룸') : cfText(EN)) : cfImg()));
     const r = await cloudflareImage({ fetchImpl: f, ...CF, model: FREE_MODEL, prompt: 'BRIEF', quality: 'low' });
     assert.equal(r.ok, true);
-    const body = JSON.parse(f.calls[1].init.body);
+    assert.equal(f.calls.length, 3, '글 모델 두 번 + 이미지 한 번');
+    assert.ok(JSON.parse(f.calls[2].init.body).prompt.startsWith(EN));
+    const g = fakeFetch((url) => (url.includes('llama') ? cfText('작은 원룸') : cfImg()));
+    const r2 = await cloudflareImage({ fetchImpl: g, ...CF, model: FREE_MODEL, prompt: 'BRIEF', quality: 'low' });
+    assert.equal(r2.ok, true);
+    const body = JSON.parse(g.calls[2].init.body);
     assert.ok(body.prompt.startsWith('BRIEF'));
     assert.equal(body.steps, 4);
+    assert.equal(r2.englishPrompt, false);
   });
   test('무료 사용량 다 씀·토큰 틀림·키 없음: 이미지 모델을 부르지 않고 청구 없음', async () => {
     const used = fakeFetch(() => ({ status: 429, json: { success: false, errors: [{ code: 4006, message: 'you have used up your daily free allocation of 10,000 neurons' }] } }));
