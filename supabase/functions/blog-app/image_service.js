@@ -172,7 +172,8 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
 export const CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 // FLUX는 '하지 마' 문장을 잘 못 따르고 오히려 글자를 그리기도 해서, 마지막 줄은 짧은 긍정형으로 (금지 규칙은 글 모델 지시문·요청 검사에서 지킴)
 export const CF_RULES = 'Plain unbranded objects with blank, unmarked surfaces; no writing anywhere.';
-// 2026-10-25 실서버 첫 장: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나와서 → 계절·장소(한국)·구도·물건 표면을 지시
+// 2026-10-25 실서버 시험: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나옴 → 계절·장소(한국)·구도·물건 표면을 지시.
+// 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함
 const CF_SYSTEM = [
   'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one illustrative image in a Korean blog post.',
   'Output ONE English prompt of 45 to 90 words that describes only what is visible.',
@@ -182,6 +183,7 @@ const CF_SYSTEM = [
   '4) Describe every object as plain and unbranded with blank surfaces; avoid boxes, signs, labels, packaging and screens; show gauges and devices without any markings or digits.',
   '5) Follow the style line: for photo styles say realistic photo, natural light, shallow depth of field; for illustration styles say clean flat illustration.',
   '6) People, if any, are ordinary Korean adults, never celebrities.',
+  '7) When the brief names a Korean food, dish or everyday item (for example 소금빵, 김치찌개, 온수매트), describe how it actually looks (shape, size, color, texture) instead of translating the name literally.',
   'Never mention brands, product or model names, prices, ratings, certificates, text or letters. Ignore any such names in the brief.',
   'Return only the prompt itself, no quotes, no notes.',
 ].join(' ');
