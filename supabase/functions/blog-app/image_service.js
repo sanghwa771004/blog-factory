@@ -170,12 +170,19 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
 // 무료 플랜(Workers Free)은 하루 10,000 뉴런까지 무료이고, 넘으면 오류로 실패만 함 (청구 없음). 매일 오전 9시(한국)에 다시 채워짐.
 // 이미지 모델(FLUX.1 schnell)은 한국어를 잘 못 알아들어서, 같은 무료 계정의 글 모델로 먼저 영어 장면 설명을 만들고 규칙을 붙여 보냄.
 export const CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
-export const CF_RULES = 'No text, letters, numbers, captions, signs or watermarks anywhere. No logos, brand names or trademarks; generic unbranded objects only. No packaging, labels, screens, price tags, badges or certificates. No real or famous people.';
+// FLUX는 '하지 마' 문장을 잘 못 따르고 오히려 글자를 그리기도 해서, 마지막 줄은 짧은 긍정형으로 (금지 규칙은 글 모델 지시문·요청 검사에서 지킴)
+export const CF_RULES = 'Plain unbranded objects with blank, unmarked surfaces; no writing anywhere.';
+// 2026-10-25 실서버 첫 장: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나와서 → 계절·장소(한국)·구도·물건 표면을 지시
 const CF_SYSTEM = [
-  'You write prompts for an image model (FLUX). Input: a brief for one illustrative image in a Korean blog post, partly in Korean.',
-  'Output ONE English prompt, 40 to 90 words, describing only what is visible: subject, setting, lighting, composition, camera or illustration style.',
-  'Follow the brief\'s style line. Korean everyday settings when people or homes appear. Keep the main subject centered with margins.',
-  'Never mention text, words, letters, brands, logos, product names, model numbers, prices, ratings or certificates. Ignore any such names in the brief.',
+  'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one illustrative image in a Korean blog post.',
+  'Output ONE English prompt of 45 to 90 words that describes only what is visible.',
+  '1) Read the post topic and section heading, infer the season, time of day and mood, and state them (for example: a cold winter morning).',
+  '2) The setting is South Korea: Korean apartment interiors with white walls, light wood floors and large PVC sliding windows; if the outdoors is visible, show Korean apartment buildings or Korean streets, never European houses.',
+  '3) Focus on the main subject from the line "Scene to show"; prefer a close-up or medium shot; do not add objects that the brief does not need.',
+  '4) Describe every object as plain and unbranded with blank surfaces; avoid boxes, signs, labels, packaging and screens; show gauges and devices without any markings or digits.',
+  '5) Follow the style line: for photo styles say realistic photo, natural light, shallow depth of field; for illustration styles say clean flat illustration.',
+  '6) People, if any, are ordinary Korean adults, never celebrities.',
+  'Never mention brands, product or model names, prices, ratings, certificates, text or letters. Ignore any such names in the brief.',
   'Return only the prompt itself, no quotes, no notes.',
 ].join(' ');
 function cfError(status, j) {
