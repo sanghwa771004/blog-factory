@@ -47,9 +47,12 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
   });
 
   test('설정 범위 검사: 품질·한도·예산·환율·모델 이름', async () => {
-    for (const bad of [`image_quality = 'ultra'`, `image_daily_limit = 51`, `image_monthly_budget_usd = -1`, `image_fx_krw = 5`, `image_gen_model = 'Bad Model!'`]) {
+    for (const bad of [`image_quality = 'ultra'`, `image_daily_limit = 101`, `image_monthly_budget_usd = -1`, `image_fx_krw = 5`, `image_gen_model = 'Bad Model!'`]) {
       await assert.rejects(db.query(`update public.settings set ${bad} where id = 1`), /check/, bad);
     }
+    // 013: 하루 한도는 100까지 (무료 모델용)
+    await db.query(`update public.settings set image_daily_limit = 100 where id = 1`);
+    await db.query(`update public.settings set image_daily_limit = 5 where id = 1`);
   });
 
   test('anon·authenticated 는 새 표·함수를 못 씀', async () => {

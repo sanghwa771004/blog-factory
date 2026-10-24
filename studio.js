@@ -1,8 +1,8 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.2.0';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.2.0';
+import * as IMG from './images.js?v=1.2.1';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.2.1';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -1369,7 +1369,7 @@ export function createStudio(ui) {
         h('li', null, '그 밖의 이름 — 정해진 크기 3가지·품질 3단계로 보내고, 예상 비용은 넉넉히 잡고 사용량 계산은 안 해 (청구액은 직접 확인)')),
       field('기본 품질', f.quality, '보통(medium) 1024×1024 한 장 예상 약 $0.013, 높음은 약 $0.05 (2.5 모델, 2026-10-22 가격표 기준). 모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내.'),
       h('h3', null, '비용 한도'),
-      h('div', { class: 'row' }, field('하루 생성 한도 (번)', f.daily, '0이면 AI 생성을 막아.'), field('한 달 예산 (달러)', f.budget, '넘게 되면 새 생성을 멈춰.')),
+      h('div', { class: 'row' }, field('하루 생성 한도 (번)', f.daily, '0~100. 0이면 AI 생성을 막아. 무료 모델은 Cloudflare 무료 한도(하루 약 70~100장)가 실제 상한이야.'), field('한 달 예산 (달러)', f.budget, '넘게 되면 새 생성을 멈춰.')),
       h('p', { class: 'hint' }, '예산은 실제 청구액 > 사용량 기준 > 예상 순으로 더해서 셈해. 청구됐는지 모르는 실패도 예상 비용으로 셈해서 넉넉하게 막아.'),
       h('h3', null, '환율 (원화로 볼 때)'),
       h('div', { class: 'row' }, field('원/달러', f.fx), field('기준 날짜', f.fxDate)), field('기준 (어디 환율)', f.fxSrc),
@@ -1378,7 +1378,7 @@ export function createStudio(ui) {
       h('div', { class: 'row' }, field('이미지 출력', f.pOut), field('이미지 입력', f.pIn), field('텍스트 입력', f.pText)),
       h('div', { class: 'row' }, field('확인한 날', f.pAt), field('가격표 주소', f.pSrc)),
       btn('저장', 'sm', async (ev) => {
-        const daily = num(f.daily, 0, 50, '하루 한도'); if (daily == null) return;
+        const daily = num(f.daily, 0, 100, '하루 한도'); if (daily == null) return;
         const budget = num(f.budget, 0, 500, '한 달 예산'); if (budget == null) return;
         let fx = null;
         if (String(f.fx.value).trim()) { fx = num(f.fx, 100, 10000, '환율'); if (fx == null) return; }
