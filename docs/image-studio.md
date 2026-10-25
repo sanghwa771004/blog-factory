@@ -125,7 +125,10 @@ Secrets는 프로젝트에 한 번만 넣으면 서버 함수 두 개(`blog-app`
 | Pexels 키 없음 | 지금은 발급이 멈춰 있어서 직접 올리기 사용 |
 
 
-## 무료 AI 이미지 (Cloudflare Workers AI) — 1.2.0 추가
+## 무료 AI 이미지 (Cloudflare Workers AI) — 1.2.0 추가, 1.2.2에서 기본 모델 바꿈
+
+- **1.2.2부터 기본은 `cf-flux-2-klein-4b`** (FLUX.2 [klein] 4B). 고른 비율 그대로(긴 변 1024) 만들고, 글 모델이 '폰으로 그냥 찍은 생활 사진'처럼(자연광·작은 흠·약간 어수선·깊은 초점, 한국 원룸·아파트, 음식은 식탁 위) 프롬프트를 써서 AI 티가 덜 남. 한 장 25~35초, 512칸 4개(≈104뉴런) + 글 모델 ≈45뉴런 → 무료로 하루 약 60장 (계산값). 품질 칸은 '보통' 하나(단계 4 고정).
+- 아래는 예전 기본 `cf-flux-1-schnell` 설명 (설정에서 다시 고를 수 있음 — 빠르고(6초) 더 많이 만들지만 AI 티가 더 남).
 
 - 기본 생성 모델은 `cf-flux-1-schnell` (Cloudflare Workers AI의 FLUX.1 schnell). OpenAI 없이 무료로 만든다.
 - 무료 플랜(Workers Free)은 **하루 10,000 뉴런**까지 무료, 넘으면 오류로 실패만 하고 청구되지 않는다 (매일 00:00 UTC = 오전 9시에 다시 채워짐). 공식: https://developers.cloudflare.com/workers-ai/platform/pricing/ (2026-10-24 확인)
