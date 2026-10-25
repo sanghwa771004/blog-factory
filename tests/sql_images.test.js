@@ -387,7 +387,7 @@ describe('012를 다시 돌리거나 예전 초안 위에 돌려도 같은 결�
     assert.ok(c1.some((x) => x.conname === 'post_images_ratio_check') && c1.some((x) => x.conname === 'image_generations_auto_cost_status_check'));
   });
   test('예전 초안(77c6d5f)을 먼저 돌린 DB에 지금 012를 돌리면: 빠졌던 열·검사가 생기고 함수가 동작', async () => {
-    const fresh = await freshDb();
+    const fresh = await freshDb({ upTo: '012' }); // 같은 단계(012까지)끼리 비교 — 뒤 마이그레이션(014 주력 주제 열 등)은 따로 검사
     const db = await freshDb({ upTo: '011' });
     await db.exec(DRAFT);
     // 초안 시절의 생성 기록: 서버가 매긴 '사용량 기준' / 사용자가 넣은 '청구 없음'(확인일 있음)

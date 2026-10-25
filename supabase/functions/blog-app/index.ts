@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.2.2)
+// 블로그 글공장 서버 API (1.3.0)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -13,7 +13,7 @@ import {
 } from "./images.js";
 import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
 
-const VERSION = "1.2.2";
+const VERSION = "1.3.0";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -986,6 +986,7 @@ async function patchSettings(c: Ctx) {
   const s: J = {};
   if ("per_day" in b) s.per_day = optInt(b.per_day, "per_day", 1, 3);
   if ("auto_topics" in b) s.auto_topics = str(b.auto_topics, 300);
+  if ("focus_topic" in b) s.focus_topic = str(b.focus_topic, 60).trim();
   if ("auto_enabled" in b) s.auto_enabled = b.auto_enabled === true;
   if ("len" in b) s.len = oneOf(String(b.len), ["1500", "2500", "3500"] as const, "len");
   if ("score_weights" in b) {

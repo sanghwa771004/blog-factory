@@ -282,3 +282,48 @@ describe('1.2.0 이미지가 연결된 원고 내보내기', () => {
     assert.equal(new Set(u.map((x) => x.toLowerCase())).size, 4, u.join(','));
   });
 });
+
+describe('검색 노출 도우미 (1.3.0)', () => {
+  test('시즌 달력: 2주 뒤·4주 뒤 달의 주제 (같은 달이면 한 번만)', () => {
+    const a = L.seasonAhead('2026-10-25');
+    assert.deepEqual(a.months, [11]);
+    assert.deepEqual(a.themes, L.SEASON_CALENDAR[11]);
+    const b = L.seasonAhead('2026-10-10');
+    assert.deepEqual(b.months, [10, 11]);
+    assert.equal(new Set(b.themes).size, b.themes.length, '겹치는 주제는 한 번만');
+    assert.ok(b.themes.includes('김장 준비') && b.themes.includes('결로·외풍 막기'));
+    assert.deepEqual(L.seasonAhead('2026-12-20').months, [1], '해가 바뀌어도');
+    for (let m = 1; m <= 12; m++) assert.ok(L.SEASON_CALENDAR[m].length >= 3, m + '월');
+  });
+  test('주력 주제 비율: 최근 n개 중 (지운 글·실패한 글 빼고)', () => {
+    const posts = [
+      { category: '겨울 가전', created_at: '2026-10-20', stage: 'review' },
+      { category: '겨울 가전', created_at: '2026-10-19', stage: 'published' },
+      { category: '디지털', created_at: '2026-10-18', stage: 'ready' },
+      { category: '디지털', created_at: '2026-10-17', stage: 'failed' },
+      { category: '디지털', created_at: '2026-10-16', stage: 'review', deleted_at: '2026-10-17' },
+      { category: '디지털', created_at: '2026-01-01', stage: 'published' },
+    ];
+    assert.deepEqual(L.focusShare(posts, '겨울 가전'), { total: 4, hit: 2, ratio: 0.5 });
+    assert.deepEqual(L.focusShare(posts, '겨울 가전', 3), { total: 3, hit: 2, ratio: 2 / 3 }, '최근 3개만');
+    assert.deepEqual(L.focusShare([], '겨울 가전'), { total: 0, hit: 0, ratio: null });
+    const m = L.focusShare(posts, '계절템·겨울 가전', 30, (c, f) => f.includes(c));
+    assert.equal(m.hit, 2, '맞는지 보는 방법을 넘길 수 있음');
+  });
+  test('하루 2편 이상 잡힌 날 (지난 7일~다음 7일, 발행 준비·예약·게시만)', () => {
+    const t = '2026-10-25';
+    const posts = [
+      { stage: 'ready', publish_date: '2026-10-27' },
+      { stage: 'scheduled', publish_date: '2026-10-27' },
+      { stage: 'review', publish_date: '2026-10-27' },
+      { stage: 'published', published_on: '2026-10-22', publish_date: '2026-10-21' },
+      { stage: 'published', published_on: '2026-10-22' },
+      { stage: 'published', published_on: '2026-10-22', deleted_at: '2026-10-23' },
+      { stage: 'scheduled', publish_date: '2026-11-10' },
+      { stage: 'scheduled', publish_date: '2026-11-10' },
+      { stage: 'ready', publish_date: '2026-10-26' },
+    ];
+    assert.deepEqual(L.crowdedDays(posts, t), [{ day: '2026-10-22', n: 2 }, { day: '2026-10-27', n: 2 }]);
+    assert.deepEqual(L.crowdedDays([], t), []);
+  });
+});

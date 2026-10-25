@@ -162,8 +162,32 @@ export function similarity(a, b) {
   return inter / (A.size + B.size - inter);
 }
 
+// ───────── 검색 노출 도우미 ─────────
+// 주력 주제와 맞는지: 같은 말이거나 서로 포함하거나, 2글자 이상 낱말이 하나라도 겹치면 맞는 걸로 ('계절템·겨울 가전' ↔ '겨울 가전')
+// 낱말은 앞부분이 같아도 맞는 걸로 ('겨울철' ↔ '겨울', '가전제품' ↔ '가전')
+const topicWords = (s) => String(s || '').toLowerCase().split(/[\s·,/|&+()]+/).map((w) => w.trim()).filter((w) => w.length >= 2);
+export function focusMatch(category, focus) {
+  const f = String(focus || '').trim();
+  if (!f) return true;
+  const c = String(category || '').trim();
+  if (!c) return false;
+  if (c === f || (f.length >= 2 && c.includes(f)) || (c.length >= 2 && f.includes(c))) return true;
+  const fw = topicWords(f);
+  return topicWords(c).some((w) => fw.some((x) => w === x || w.startsWith(x) || x.startsWith(w)));
+}
+export const keywordWords = (kw) => String(kw || '').trim().split(/\s+/).filter(Boolean).length;
+// 첫 링크 자리가 글 앞부분(첫 소제목 앞, 또는 앞 15%)에 있는지
+export function linkTooEarly(body) {
+  const lines = String(body || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const li = lines.findIndex((l) => /^\[링크/.test(l));
+  if (li < 0) return false;
+  const hi = lines.findIndex((l) => /^#{1,4}\s/.test(l));
+  return (hi > 0 && li < hi) || li < Math.max(2, Math.floor(lines.length * 0.15));
+}
+
 // ───────── 원고 검사 ─────────
-// ctx: { programs: {id: program}, channels: {id: channel}, compat: [], links: [], products: [], others: [{id, title, body}], today: 'YYYY-MM-DD' }
+// ctx: { programs: {id: program}, channels: {id: channel}, compat: [], links: [], products: [], others: [{id, title, body}], today: 'YYYY-MM-DD',
+//        focus: 설정의 주력 주제 (없으면 주제 검사 안 함) }
 // 결과: { errors, warnings, tips } — errors 가 하나라도 있으면 '발행 준비 완료' 불가
 export function checkPost(post, ctx = {}) {
   const errors = [], warnings = [], tips = [];
@@ -306,6 +330,20 @@ export function checkPost(post, ctx = {}) {
       const first = txt.split('\n').slice(0, 2).join(' ');
       if (txt && !DISCLOSURE_MARK.test(first)) W('variant_disclosure', `${key === 'threads' ? '쓰레드' : '인스타'} 버전 첫 부분에 광고·제휴 표시가 없어.`, '첫 줄에 #광고 또는 제휴 사실을 적어줘.');
     }
+  }
+
+  // 12) 검색 노출 — 막지 않고 알려만 줌 (검색으로 들어오는 블로그·사이트 글만)
+  const searchCh = channel && (channel.kind === 'blog' || channel.kind === 'site') && !isShort;
+  if (searchCh) {
+    const kwN = keywordWords(post.keyword);
+    if (kwN > 0 && kwN < 3) W('short_keyword', `키워드가 ${kwN}단어로 짧아. 짧은 키워드는 오래된 큰 블로그들과 경쟁해서 묻히기 쉬워.`, '3~5단어로 좁혀줘. 예: "제습기" → "원룸 겨울 결로 제습기 용량"');
+    if (ctx.focus && !focusMatch(post.category, ctx.focus)) {
+      W('off_focus', `주력 주제(${clip(String(ctx.focus), 30)}) 밖의 글이야${post.category ? ` (카테고리: ${clip(String(post.category), 20)})` : ' (카테고리 없음)'}. 한 주제로 꾸준히 쌓인 블로그가 그 주제 검색에서 더 잘 보여.`, '주력 주제 안의 글을 먼저 쓰거나, 카테고리를 주력 주제에 맞춰줘.');
+    }
+    const nLinks = Math.max(cta, links.length);
+    if (nLinks > 2) W('too_many_links', `링크가 ${nLinks}개야. 링크가 많으면 광고 글로 보이기 쉬워.`, '본문 중간 1곳, 끝 1곳으로 줄여줘.');
+    if (cta && linkTooEarly(body)) W('link_too_early', '글 첫 부분에 링크가 있어. 정보를 먼저 보여주고 링크는 중간·끝에 두는 게 좋아.', '첫 소제목 앞에서는 링크 자리를 빼줘.');
+    if (!hasExperience && !me) W('no_own_experience', '직접 겪은 내용이 한 줄도 없어. 상품을 안 써봤어도 내 상황(내 방·내 물건·재 본 숫자·매장에서 본 것)을 한 줄 넣으면 다른 글과 달라져.', "원고 정보의 '내 경험' 칸에 적거나, 본문에 [내 경험] 자리를 넣고 '내 경험 채우기'로 채워줘.");
   }
 
   return { errors, warnings, tips };

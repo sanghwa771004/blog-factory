@@ -9,7 +9,7 @@ import {
   buildPrompt, PROMPT_RULES, promptRisk, blocksOf, slotRisk, descriptionMismatch, estimateUsd, usageUsd, OUTPUT_TOKENS, QUALITIES,
   sniffImage, checkImageFile, MAX_UPLOAD_BYTES, attributionFor, captionHint, altTextFor, fileNameFor, deckFromPost, EXTRA_SLOTS, isExtraKey, fmtUsd,
   stripMetadata, validSlotKey, slotPurpose, extraSlot, sameRatio, orientationFor, searchSuggestions, imageChecks, extOf, estimateTokens,
-  ctxOf, modelCaps, qualitiesFor, normQuality, sanitizeContext, STANDARD_SIZES,
+  ctxOf, modelCaps, qualitiesFor, normQuality, sanitizeContext, STANDARD_SIZES, isOwnPhotoSlot, stripOwnMark,
 } from '../images.js';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
@@ -618,6 +618,47 @@ describe('이미지 검사 (발행 전 검사에 더하는 확인할 것)', () =
     assert.deepEqual(r.warnings, []);
     assert.equal(r.tips.length, 1);
     assert.deepEqual(imageChecks({ body: '사진 없음' }, []), { warnings: [], tips: [] });
+  });
+});
+
+describe("'직접 찍기' 자리와 검색 노출 (1.3.0)", () => {
+  const body = '## 결로 막기\n[이미지: (직접 찍기) 내 방 창틀에 맺힌 물방울]\n[이미지: 원룸 창가에 놓인 제습기]\n[이미지: 직접 찍은 현관 외풍 막이 테이프]';
+  const [own, plain, own2] = parseSlots(body);
+  test("'직접 찍기·직접 촬영·직접 찍은' 자리를 알아보고, '파일 올리기'를 권함", () => {
+    assert.equal(isOwnPhotoSlot(own.text), true);
+    assert.equal(isOwnPhotoSlot(own2.text), true);
+    assert.equal(isOwnPhotoSlot('(직접 촬영) 책상 위 머그컵'), true);
+    assert.equal(isOwnPhotoSlot(plain.text), false);
+    const r = slotRisk(own.text);
+    assert.deepEqual([r.real, r.word], [true, '직접 찍기']);
+    assert.match(r.msg, /파일 올리기/);
+  });
+  test('표시는 검색어·대체 텍스트·AI에 보내는 장면 설명에서 빠짐 (자리 열쇠는 그대로)', () => {
+    assert.equal(stripOwnMark('(직접 찍기) 내 방 창틀'), '내 방 창틀');
+    assert.equal(stripOwnMark('( 직접 촬영 )책상'), '책상');
+    assert.equal(stripOwnMark('직접 찍은 사진'), '직접 찍은 사진', '문장 속 말은 그대로');
+    assert.equal(own.text, '(직접 찍기) 내 방 창틀에 맺힌 물방울');
+    assert.equal(searchSuggestions({ keyword: '원룸 결로' }, own)[0], '내 방 창틀에 맺힌 물방울');
+    assert.equal(altTextFor(own.text), '내 방 창틀에 맺힌 물방울');
+    const pr = buildPrompt({ post: { keyword: '원룸 결로' }, slot: own });
+    assert.ok(pr.includes('Scene to show (Korean): 내 방 창틀에 맺힌 물방울'), pr);
+    assert.ok(!pr.includes('직접 찍기'));
+  });
+  test("검색 채널이면: 연결한 이미지 중 직접 올린 사진이 없으면 경고, AI 이미지는 'AI 활용' 표시 안내", () => {
+    const ai = { kind: 'ai', review_status: '사용 가능', description: '' };
+    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }], { search: true });
+    assert.ok(r.warnings.some((w) => w.code === 'no_own_photo'));
+    assert.match(r.tips.find((t) => t.code === 'ai_label').msg, /AI 이미지가 1곳/);
+    const ok = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }, { slot_key: own.key, image: { kind: 'upload', review_status: '사용 가능', description: '' } }], { search: true });
+    assert.ok(!ok.warnings.some((w) => w.code === 'no_own_photo'));
+    const sns = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }]);
+    assert.ok(!sns.warnings.some((w) => w.code === 'no_own_photo') && !sns.tips.some((t) => t.code === 'ai_label'), '검색 채널이 아니면 안 봄');
+    assert.ok(!imageChecks({ body }, [], { search: true }).warnings.some((w) => w.code === 'no_own_photo'), '아직 아무것도 연결 안 했으면 경고 없음');
+  });
+  test("'직접 찍기' 자리에 AI 이미지를 넣으면 따로 알려줌 (실제 상품 자리 경고와 겹치지 않게)", () => {
+    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: own.key, image: { kind: 'ai', review_status: '사용 가능', description: '' } }]);
+    assert.deepEqual(r.warnings.map((w) => w.code), ['ai_in_own_slot']);
+    assert.match(r.warnings[0].msg, /사진 1/);
   });
 });
 

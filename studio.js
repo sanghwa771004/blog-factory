@@ -1,8 +1,8 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.2.2';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.2.2';
+import * as IMG from './images.js?v=1.3.0';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.3.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -528,7 +528,8 @@ export function createStudio(ui) {
     const qualSel = h('select', { value: f.quality }, qualities.map((q) => opt(q, IMG.QUALITY_LABEL[q])));
     const f0 = { text: f.text, extra: f.extra }; // 처음 채워 둔 값 (이것과 같으면 '적던 내용'이 아님)
     const genericChk = h('input', { type: 'checkbox' });
-    const genericRow = h('label', { class: 'chk' }, genericChk, ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (AI 예시 이미지 — 실제 구성품·라벨·화면은 직접 찍은 사진으로)');
+    const genericText = h('span', null, '');
+    const genericRow = h('label', { class: 'chk' }, genericChk, genericText);
     const riskBox = h('div', { class: 'stack' });
     const costBox = h('div', { class: 'costbox' });
     const promptPre = h('pre', { class: 'prompt' });
@@ -553,6 +554,8 @@ export function createStudio(ui) {
       const risks = IMG.promptRisk(f.text + '\n' + f.extra, brands);
       const blocks = IMG.blocksOf(risks);
       const sr = IMG.slotRisk(f.text + ' ' + f.extra);
+      const ownSlot = sr.word === '직접 찍기';
+      genericText.textContent = ownSlot ? ' 직접 찍기 어려워서 이번엔 AI 예시 이미지로 만들게' : ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (AI 예시 이미지 — 실제 구성품·라벨·화면은 직접 찍은 사진으로)';
       put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)), sr.real ? h('p', { class: 'notice' }, sr.msg) : '', sr.real ? genericRow : '');
       const u = usage();
       const fx = Number(st.image_fx_krw) || 0;
@@ -576,7 +579,7 @@ export function createStudio(ui) {
       else if (caps.free && mode === 'edit') why = '무료 모델은 고치기(편집)를 못 해. 설명을 바꿔서 새로 만들어줘.';
       else if (!clean(f.text)) why = mode === 'edit' ? '바꿀 내용을 적어줘.' : '사진 설명을 적어줘.';
       else if (blocks.length) why = '빨간 내용을 고쳐야 만들 수 있어.';
-      else if (sr.real && !genericChk.checked) why = '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
+      else if (sr.real && !genericChk.checked) why = ownSlot ? "'직접 찍기' 자리야. 휴대폰으로 찍어서 '파일 올리기'로 넣거나, 그래도 AI로 만들려면 위에 체크해줘." : '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
       else if (limit) why = '오늘 만들 수 있는 횟수를 다 썼어. (설정 > 이미지에서 하루 한도)';
       else if (over) why = '이번 달 예산을 넘게 돼서 못 만들어. (설정 > 이미지에서 한 달 예산)';
       else if (u && u.running) why = '다른 이미지를 만드는 중이야. 끝나면 다시 해줘.';

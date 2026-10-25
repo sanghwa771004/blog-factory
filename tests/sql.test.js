@@ -1,7 +1,9 @@
 // DB 마이그레이션·함수 테스트 (PGlite = 진짜 Postgres 17). 실행: npm test
 import { test, describe, before } from 'node:test';
 import assert from 'node:assert/strict';
-import { freshDb, one, all, val, kstToday, addDays, longBody } from './helpers/db.js';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { freshDb, one, all, val, kstToday, addDays, longBody, MIGRATIONS_DIR } from './helpers/db.js';
 
 describe('마이그레이션', () => {
   test('예전(1.0) 데이터가 있는 상태에서 001~011이 순서대로 적용되고 기존 원고가 새 열로 옮겨진다', async () => {
@@ -391,5 +393,27 @@ describe('실적 (파일 올리기·통계)', () => {
   test('음수 건수, 거꾸로 된 기간은 DB가 막음', async () => {
     await assert.rejects(db.query(`insert into public.metrics (period_start, period_end, clicks, source) values ('2026-10-01', '2026-10-01', -1, 'manual')`), /check/);
     await assert.rejects(db.query(`insert into public.metrics (period_start, period_end, clicks, source) values ('2026-10-02', '2026-10-01', 1, 'manual')`), /check/);
+  });
+});
+
+describe('주력 주제 (014, 1.3.0)', () => {
+  test('설정에 주력 주제 열이 생기고(기본은 빈칸), 자동 작가가 받는 설정에도 들어감', async () => {
+    const db = await freshDb({ upTo: '013' });
+    await db.query(`update public.settings set per_day = 1, auto_topics = '계절템·겨울 가전, 디지털' where id = 1`);
+    await db.exec(readFileSync(join(MIGRATIONS_DIR, '014_focus_topic.sql'), 'utf8'));
+    const st = await one(db, `select focus_topic, per_day, auto_topics from public.settings where id = 1`);
+    assert.deepEqual(st, { focus_topic: '', per_day: 1, auto_topics: '계절템·겨울 가전, 디지털' }, '기존 설정은 그대로');
+    await db.query(`update public.settings set focus_topic = '계절템·겨울 가전' where id = 1`);
+    const ctx = await val(db, `select public.writer_context()`);
+    assert.equal(ctx.settings.focus_topic, '계절템·겨울 가전');
+  });
+  test('60자 넘으면 거절, 다시 돌려도 오류 없이 검사는 하나만', async () => {
+    const db = await freshDb();
+    await assert.rejects(db.query(`update public.settings set focus_topic = repeat('가', 61) where id = 1`), /settings_focus_topic_len/);
+    await db.query(`update public.settings set focus_topic = repeat('가', 60) where id = 1`);
+    await db.exec(readFileSync(join(MIGRATIONS_DIR, '014_focus_topic.sql'), 'utf8'));
+    assert.equal(await val(db, `select count(*)::int from pg_constraint where conname = 'settings_focus_topic_len'`), 1);
+    assert.equal(await val(db, `select length(focus_topic) from public.settings where id = 1`), 60, '다시 돌려도 값은 그대로');
+    await assert.rejects(db.query(`update public.settings set focus_topic = null where id = 1`), /null/);
   });
 });

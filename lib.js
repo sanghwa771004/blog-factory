@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.2.2';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.3.0';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -556,6 +556,46 @@ export function topicScore(topic, weights) {
   const total = max ? Math.round((sum / max) * 100) : null;
   const confidence = total == null ? '데이터 없음' : measured === 0 ? '낮음 (실측 데이터 없이 AI 추정만)' : coverage < 0.6 ? '낮음 (빈 항목 많음)' : '보통';
   return { total, coverage, measured, confidence, parts };
+}
+
+// ───────── 검색 노출 도우미 ─────────
+// 달마다 사람들이 많이 찾기 시작하는 생활 주제 (앱이 정해 둔 달력 — 실제 검색량 숫자가 아님)
+export const SEASON_CALENDAR = {
+  1: ['설 선물', '연말정산', '겨울 방학', '동파 예방', '새해 다이어트'],
+  2: ['졸업·입학 선물', '신학기 준비', '봄 이사 준비', '봄맞이 대청소'],
+  3: ['신학기', '미세먼지·공기청정기', '봄 이사', '환절기 건강'],
+  4: ['봄나들이·캠핑', '꽃가루 알레르기', '자외선 차단', '봄옷 정리'],
+  5: ['어린이날·어버이날 선물', '에어컨 점검·청소', '여름 준비'],
+  6: ['장마·제습기', '선풍기·서큘레이터', '여름 휴가 준비', '모기 퇴치'],
+  7: ['폭염·냉방', '여름 휴가', '전기요금 아끼기', '여름 캠핑'],
+  8: ['휴가 막바지', '개학 준비', '태풍 대비', '추석 선물 준비'],
+  9: ['추석 선물', '환절기', '가을 캠핑', '가을 이사'],
+  10: ['난방 준비', '가을 나들이', '핼러윈', '김장 준비', '가습기'],
+  11: ['김장', '난방·전기장판', '결로·외풍 막기', '블랙프라이데이', '수능'],
+  12: ['크리스마스·연말 선물', '한파·동파 대비', '연말정산 준비', '겨울 여행'],
+};
+// 2~4주 뒤 달의 주제 (그때 검색이 늘기 전에 미리 써 두기)
+export function seasonAhead(today = todayStr()) {
+  const months = [...new Set([14, 28].map((n) => parseYmd(addDays(today, n)).getMonth() + 1))];
+  return { months, themes: [...new Set(months.flatMap((m) => SEASON_CALENDAR[m] || []))] };
+}
+// 최근 글 중 주력 주제 비율 (지운 글·실패한 글은 빼고, 최근 n개)
+export function focusShare(posts, focus, n = 30, match = (c, f) => String(c || '').includes(String(f || ''))) {
+  const list = (posts || []).filter((p) => !p.deleted_at && p.stage !== 'failed')
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))).slice(0, n);
+  const hit = list.filter((p) => match(p.category, focus)).length;
+  return { total: list.length, hit, ratio: list.length ? hit / list.length : null };
+}
+// 하루에 2편 넘게 올렸거나 잡아 둔 날 (지난 7일 ~ 다음 7일)
+export function crowdedDays(posts, today = todayStr()) {
+  const from = addDays(today, -7), to = addDays(today, 7);
+  const count = {};
+  for (const p of posts || []) {
+    if (p.deleted_at || !['ready', 'scheduled', 'published', 'collecting', 'analyzed'].includes(p.stage)) continue;
+    const d = p.published_on || p.publish_date;
+    if (d && d >= from && d <= to) count[d] = (count[d] || 0) + 1;
+  }
+  return Object.entries(count).filter(([, n]) => n > 1).map(([day, n]) => ({ day, n })).sort((a, b) => a.day.localeCompare(b.day));
 }
 
 // ───────── 다음 할 일 추천 (규칙 기반, 근거 데이터 같이 표시) ─────────

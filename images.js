@@ -393,7 +393,7 @@ export function buildPrompt({ post, slot, text, style, purpose, ratio, extra, mo
   const r = ratioOf(purpose, ratio);
   const sc = (s, n) => clip(sanitizeContext(s, hide), n);
   const title = sc((post && ((post.titles && post.titles[0]) || post.keyword)) || '', 120);
-  const scene = clip(text != null && String(text).trim() ? text : (slot && slot.text) || '', 300);
+  const scene = clip(stripOwnMark(text != null && String(text).trim() ? text : (slot && slot.text) || ''), 300);
   const lines = [];
   lines.push(mode === 'edit'
     ? 'Edit the provided image for a Korean blog post. Keep what works and apply the change below.'
@@ -459,7 +459,13 @@ export const blocksOf = (risks) => (risks || []).filter((r) => r.level === 'bloc
 // 실제 상품·화면 사진이 필요해 보이는 자리 (AI로 만들면 실제와 다르게 보일 수 있음 → 직접 찍은 사진·공식 이미지 권장)
 // '로고 없이'처럼 빼라는 말은 넘어감. 포장마차·리포트·실내처럼 다른 뜻으로 쓰인 말도 넘어감
 const REAL_NEEDED = /(구성품|박스|포장(?!마차)|뒷면|라벨|원재료|성분표|표기(?!법)|설명서|화면\s*캡처|캡처|스크린샷|실물|실사용|착용|사용\s*후기|후기\s*사진|언박싱|영수증|인증서|단자|(?<![리서어스])포트(?!폴|라이트)|버튼|조작부|컨트롤러|디스플레이|화면|제품\s*사진|상품\s*사진|모델명|로고|내부)/;
+// '(직접 찍기)'로 표시한 자리 — 자동 작가가 '내가 직접 찍을 수 있는 장면'으로 남긴 자리 (원본 사진이 있어야 다른 글과 달라짐)
+const OWN_PHOTO = /직접\s*(찍|촬영)/;
+export const isOwnPhotoSlot = (text) => OWN_PHOTO.test(String(text || ''));
+// '(직접 찍기)' 표시만 뺀 설명 (검색어·대체 텍스트·AI에 보내는 장면 설명에는 표시를 안 넣음)
+export const stripOwnMark = (text) => String(text || '').replace(/\(\s*직접\s*(찍기|촬영)\s*\)\s*/g, '').trim();
 export function slotRisk(text) {
+  if (isOwnPhotoSlot(text)) return { real: true, word: '직접 찍기', msg: "'직접 찍기'로 표시한 자리야. 네가 찍은 사진이 들어가야 다른 글과 달라져 — 휴대폰으로 찍어서 '파일 올리기'로 넣어줘." };
   const m = firstHit(REAL_NEEDED, String(text || ''));
   return m ? { real: true, word: m[1], msg: `'${m[1]}'처럼 실제 상품·화면이 보여야 하는 자리야. AI로 만들면 실제와 다르게 보일 수 있어서, 직접 찍은 사진이나 쓸 수 있는 공식 이미지를 권해.` } : { real: false };
 }
@@ -786,7 +792,7 @@ export function captionHint(img) {
   }
   return '';
 }
-export const altTextFor = (text) => clip(String(text || '').replace(/\s*(사진|이미지)$/, ''), 120);
+export const altTextFor = (text) => clip(stripOwnMark(text).replace(/\s*(사진|이미지)$/, ''), 120);
 // 내려받을 파일 이름: 본문 자리는 '키워드-01-blog_body.jpg' (사진 순서), 본문 밖 자리는 '키워드-cover.jpg'
 export function fileNameFor(post, n, purpose, ext) {
   const base = String((post && (post.keyword || (post.titles && post.titles[0]))) || '글공장')
@@ -804,7 +810,7 @@ export function searchSuggestions(post, slot) {
     const t = clip(String(s || '').replace(/[[\]#*]/g, ' ').replace(/\s*(하는|있는|된)?\s*(모습|사진|이미지|장면)$/, '').trim(), 40);
     if (t && !out.includes(t)) out.push(t);
   };
-  if (slot) add(slot.text);
+  if (slot) add(stripOwnMark(slot.text));
   if (post) add(post.keyword);
   if (slot && slot.heading) add(slot.heading);
   return out.slice(0, 4);
@@ -812,27 +818,35 @@ export function searchSuggestions(post, slot) {
 
 // ───────── 이미지 검사 (발행 전 검사에 '확인할 것'으로 더함 — 막지는 않음) ─────────
 // post: {body, content_type}, rows: 이 원고의 자리 연결 [{slot_key, image: {kind, provider, review_status, description}}]
-export function imageChecks(post, rows) {
+// opts.search: 검색으로 들어오는 채널(블로그·사이트)이면 직접 찍은 사진·AI 표시도 알려줌
+export function imageChecks(post, rows, opts = {}) {
   const W = [], T = [];
   const slots = parseSlots(post && post.body);
   const byKey = new Map((rows || []).filter((r) => r && r.image).map((r) => [r.slot_key, r.image]));
   const list = (ns) => ns.map((n) => '사진 ' + n).join(', ');
-  const unrev = [], rejected = [], aiReal = [], ai = [], mismatch = [];
+  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [];
   for (const s of slots) {
     const img = byKey.get(s.key);
     if (!img) continue;
     if (img.review_status === '검수 전') unrev.push(s.n);
     if (img.review_status === '사용 안 함') rejected.push(s.n);
-    if (img.kind === 'ai') { ai.push(s.n); if (slotRisk(s.text).real) aiReal.push(s.n); }
+    if (img.kind === 'ai') { ai.push(s.n); if (isOwnPhotoSlot(s.text)) aiOwn.push(s.n); else if (slotRisk(s.text).real) aiReal.push(s.n); }
     if (img.description && descriptionMismatch(s.text, img.description)) mismatch.push(s.n);
   }
   if (unrev.length) W.push({ code: 'image_unreviewed', msg: `아직 검수하지 않은 이미지가 ${unrev.length}곳 있어 (${list(unrev)}).`, fix: "이미지 미리보기에서 확인하고 '사용 가능'으로 바꿔줘." });
   if (rejected.length) W.push({ code: 'image_rejected', msg: `'사용 안 함'으로 표시한 이미지가 연결돼 있어 (${list(rejected)}).`, fix: '다른 이미지로 바꾸거나 연결을 빼줘.' });
   if (aiReal.length) W.push({ code: 'ai_real_needed', msg: `실제 상품·화면이 보여야 하는 자리에 AI 이미지가 있어 (${list(aiReal)}).`, fix: '직접 찍은 사진이나 쓸 수 있는 공식 이미지로 바꿔줘.' });
+  if (aiOwn.length) W.push({ code: 'ai_in_own_slot', msg: `'직접 찍기' 자리에 AI 이미지가 있어 (${list(aiOwn)}).`, fix: "휴대폰으로 직접 찍어서 '파일 올리기'로 바꾸면 다른 글과 달라져." });
   if (ai.length && ['comparison', 'experience_review', 'pros_cons'].includes(post && post.content_type)) {
     W.push({ code: 'ai_in_product_post', msg: `상품을 다루는 글에 AI 이미지가 ${ai.length}곳 있어 (${list(ai)}).`, fix: "실제 상품 사진처럼 보이지 않게 'AI로 만든 예시 이미지' 캡션을 지우지 마. 상품 모습은 실제 사진으로." });
   }
   if (mismatch.length) W.push({ code: 'image_mismatch', msg: `사진 자리 설명과 이미지 설명이 많이 달라 (${list(mismatch)}).`, fix: '맞는 이미지인지 확인해줘.' });
+  if (opts.search) {
+    const linkedImgs = slots.map((s) => byKey.get(s.key)).filter(Boolean);
+    const own = linkedImgs.filter((i) => i.kind === 'upload').length;
+    if (linkedImgs.length && !own) W.push({ code: 'no_own_photo', msg: '직접 찍은 사진이 하나도 없어. AI 이미지·남의 사진만 있으면 다른 글과 같아 보이기 쉬워.', fix: "사진 자리 하나는 휴대폰으로 직접 찍어서 '파일 올리기'로 넣어줘 (내 방·내 물건·매장에서 본 것)." });
+    if (ai.length) T.push({ code: 'ai_label', msg: `AI 이미지가 ${ai.length}곳 있어. 네이버 글쓰기에서 'AI 활용' 표시를 켜두면 안전해 (지금은 자율).` });
+  }
   if (slots.length) {
     const linked = slots.filter((s) => byKey.has(s.key)).length;
     T.push({ code: 'image_progress', msg: `사진 자리 ${slots.length}곳 중 ${linked}곳에 이미지가 연결돼 있어.`, fix: linked < slots.length ? "원고 아래 '이미지'에서 만들거나 찾거나 올려서 채워줘." : '' });

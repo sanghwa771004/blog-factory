@@ -1,12 +1,12 @@
-// 글공장 앱 1.2.2 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.3.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
-  STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.2.2';
-import * as L from './lib.js?v=1.2.2';
-import * as IMG from './images.js?v=1.2.2';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.2.2';
+  STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE, focusMatch,
+} from './checks.js?v=1.3.0';
+import * as L from './lib.js?v=1.3.0';
+import * as IMG from './images.js?v=1.3.0';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.3.0';
 
-const APP_VER = '1.2.2';
+const APP_VER = '1.3.0';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -224,11 +224,12 @@ const progName = (id) => (M.prog[id] && M.prog[id].name) || id;
 const chName = (id) => (M.ch[id] && M.ch[id].name) || id || '채널 없음';
 function checksFor(p, withOthers) {
   const r = checkPost(p, {
-    programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(),
+    programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(), focus: (S.settings || {}).focus_topic || '',
     others: withOthers ? S.posts.filter((o) => o.id !== p.id && o.body).slice(0, 80).map((o) => ({ id: o.id, title: titleOf(o), body: o.body })) : [],
   });
   // 이미지 검사(검수 전·실제 사진이 필요한 자리의 AI 이미지 등)는 '확인할 것'으로만 더함 — 발행을 막지 않음
-  const ic = IMG.imageChecks(p, (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images })));
+  const chKind = (M.ch[p.channel_id] || {}).kind;
+  const ic = IMG.imageChecks(p, (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images })), { search: chKind === 'blog' || chKind === 'site' });
   r.warnings.push(...ic.warnings);
   if (ic.tips.length) r.tips = r.tips.filter((t) => t.code !== 'image_placeholders').concat(ic.tips);
   return r;
@@ -416,6 +417,8 @@ function viewHome() {
   box.append(h('section', { class: 'panel hi' }, h('h2', null, '오늘 할 일'), todo,
     h('div', { class: 'go' }, btn('+ 새 원고 요청', 'sm', () => go('content/new')), btn('주제 추천 보기', 'sm ghost', () => go('topics')))));
 
+  box.append(seoPanel(t, checked));
+
   // 자동 작가
   const pend = pendingJobs();
   const lr = S.runs[0];
@@ -449,6 +452,34 @@ function viewHome() {
       h('div', { class: 'go' }, btn('실적으로 다음 주제 추천받기', 'sm', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', count: 6 }))));
     if (needMetrics && !recs.length) recBox.append(h('p', { class: 'hint' }, `게시한 지 7일 지난 글 ${needMetrics}개에 실적을 넣어줘.`));
   }).catch((e) => { if (e.code !== 'auth') { money.replaceChildren(h('h2', null, '이번 달 수익'), h('p', { class: 'hint' }, errText(e))); } });
+  return box;
+}
+// 검색 노출 도우미: 주력 주제 비율·하루 발행·사람 손(내 경험·직접 찍은 사진)·다가올 시즌·쇼핑 커넥트
+function seoPanel(t, checked) {
+  const st = S.settings || {};
+  const focus = String(st.focus_topic || '').trim();
+  const box = panel('검색 노출 도우미');
+  const rows = h('ul', { class: 'seo' });
+  const li = (ok, text, extra) => rows.append(h('li', { class: ok ? 'ok' : 'warn' }, h('span', null, ok ? '✓' : '!'), h('span', null, text), extra || null));
+  if (focus) {
+    const fs = L.focusShare(S.posts, focus, 30, focusMatch);
+    li(fs.ratio == null || fs.ratio >= 0.7, fs.total ? `주력 주제(${focus}) 글: 최근 ${fs.total}개 중 ${fs.hit}개 (${Math.round(fs.ratio * 100)}%)` : `주력 주제: ${focus} — 아직 글이 없어`,
+      fs.ratio != null && fs.ratio < 0.7 ? h('small', null, ' · 70% 넘게 이 주제로 쌓아봐 (앱이 정한 목표)') : null);
+  } else li(false, '주력 주제가 아직 없어. 한 주제로 꾸준히 쓰면 그 주제 검색에서 더 잘 보여.', btn('정하기', 'sm ghost', () => go('settings/auto')));
+  const crowd = L.crowdedDays(S.posts, t);
+  li(!crowd.length, crowd.length ? `하루에 2편 이상 잡힌 날: ${crowd.map((d) => `${L.fmtDate(d.day)} ${d.n}편`).join(', ')} — 하루 1편으로 나눠줘` : '하루 1편 이하로 올리고 있어');
+  const noMe = checked.filter((x) => x.r.warnings.some((w) => w.code === 'no_own_experience')).length;
+  const noPhoto = checked.filter((x) => x.r.warnings.some((w) => w.code === 'no_own_photo')).length;
+  li(!noMe && !noPhoto, noMe || noPhoto ? `검수·발행 대기 글 중 내 경험이 없는 글 ${noMe}개, 직접 찍은 사진이 없는 글 ${noPhoto}개` : '검수·발행 대기 글에 내 경험·직접 찍은 사진이 다 들어가 있어',
+    noMe || noPhoto ? btn('보기', 'sm ghost', () => go('content/f/you')) : null);
+  const sa = L.seasonAhead(t);
+  const seasonHint = `${sa.months.join('·')}월 시즌: ${sa.themes.join(', ')}`;
+  rows.append(h('li', { class: 'tip' }, h('span', null, '📅'), h('span', null, `2~4주 뒤 검색이 늘 주제 — ${sa.themes.join(', ')}`),
+    btn('이 시즌으로 주제 추천', 'sm ghost', (ev) => requestTopics(ev.currentTarget, { mode: 'category', category: focus || String(st.auto_topics || '').split(',')[0].trim() || '생활', count: 6, hint: seasonHint + ' (시즌 2~4주 전에 미리 쓸 주제)' }))));
+  const sc = M.prog && M.prog.naver_shopping_connect;
+  if (sc && sc.my_status === '미가입') rows.append(h('li', { class: 'tip' }, h('span', null, '💡'), h('span', null, '네이버 쇼핑 커넥트(네이버가 블로그용으로 만든 공식 제휴)도 같이 써볼 만해. 가입하면 설정 > 수익 모델에서 상태와 공식 고지문을 넣어줘.'),
+    h('a', { class: 'btn sm ghost', href: 'https://navercorp.com/media/pressReleasesDetail?seq=33116', target: '_blank', rel: 'noopener noreferrer' }, '소개 ↗')));
+  box.append(rows, h('p', { class: 'hint' }, '검색 순위를 보장하는 규칙은 없어. 네이버가 밝힌 방향(자동으로 찍어낸 글·베낀 글을 걸러내고 믿을 만한 글을 올림)에 맞춰 앱이 정한 기준이야. 시즌 달력도 실제 검색량 숫자가 아니라 앱이 정해 둔 거야.'));
   return box;
 }
 function kpi(label, value, sub) {
@@ -888,7 +919,14 @@ function bodyPanel(p) {
       holes.map((hint, i) => h('label', { class: 'f' }, h('span', { class: 'hintline' }, hint || '경험 한두 줄'), inputs[i])),
       h('p', { class: 'hint' }, '진짜 경험만 적어줘. 비워둔 칸은 그대로 남아. 경험이 없으면 빈 칸을 지워.'),
       h('div', { class: 'go' },
-        btn('본문에 넣기', 'sm', (ev) => { const a = inputs.map((t) => t.value); if (!a.some((x) => x.trim())) { toast('한 칸 이상 적어줘'); return; } patchPost(p, { body: L.fillMe(p.body, a) }, ev.currentTarget, '본문에 넣었어'); }),
+        btn('본문에 넣기', 'sm', (ev) => {
+          const a = inputs.map((t) => t.value);
+          if (!a.some((x) => x.trim())) { toast('한 칸 이상 적어줘'); return; }
+          // 채운 경험은 '내 경험' 칸에도 남김 → 검사가 '직접 겪은 내용 있음'으로 봄
+          const added = a.map((x) => x.trim()).filter(Boolean).join('\n');
+          const exp = [String(p.experience || '').trim(), added].filter(Boolean).join('\n').slice(0, 3000);
+          patchPost(p, { body: L.fillMe(p.body, a), experience: exp }, ev.currentTarget, '본문에 넣었어');
+        }),
         btn('빈 칸 모두 지우기', 'sm ghost', (ev) => patchPost(p, { body: removeEmptyMe(p.body) }, ev.currentTarget, '빈 칸을 지웠어')))));
   }
   const img = countImg(p.body);
@@ -1534,6 +1572,7 @@ function secAuto() {
   let progs = (s.default_programs || []).slice();
   const auto = h('input', { type: 'checkbox', checked: s.auto_enabled !== false, onchange: markDirty });
   const topics = h('textarea', { value: s.auto_topics || '', style: 'min-height:64px', oninput: markDirty });
+  const focus = h('input', { type: 'text', value: s.focus_topic || '', maxlength: '60', list: 'focuslist', placeholder: '예: 계절템·겨울 가전', oninput: markDirty });
   const per = h('select', { value: String(s.per_day || 1), onchange: markDirty }, opt('1', '하루 1개'), opt('2', '하루 2개'), opt('3', '하루 3개'));
   const len = h('select', { value: String(s.len || '2500'), onchange: markDirty }, opt('1500', '보통 (1,500자)'), opt('2500', '길게 (2,500자)'), opt('3500', '아주 길게 (3,500자)'));
   const ch = h('select', { value: s.default_channel || 'naver_blog' }, S.channels.map((c) => opt(c.id, c.name)));
@@ -1544,13 +1583,15 @@ function secAuto() {
   return [
     h('label', { class: 'chk' }, auto, '발행표가 비면 자동 주제로 채우기'),
     field('자동 주제 카테고리 (쉼표로 구분)', topics),
-    h('div', { class: 'row' }, field('하루 발행 개수', per), field('기본 길이', len)),
+    field('주력 주제 (블로그의 큰 주제 하나)', focus, '정해 두면 자동 작가가 이 주제 안에서만 자동 글을 쓰고, 이 주제 밖의 글은 검사에서 알려줘. 한 주제로 꾸준히 쌓인 블로그가 그 주제 검색에서 더 잘 보여. 비우면 안 씀.'),
+    h('datalist', { id: 'focuslist' }, String(s.auto_topics || '').split(',').map((x) => x.trim()).filter(Boolean).map((c) => opt(c, c))),
+    h('div', { class: 'row' }, field('하루 발행 개수', per, '검색 노출에는 하루 1편, 사람이 손본 글을 권해. 네이버는 AI로 찍어낸 낮은 품질 글·베낀 글을 걸러낸다고 밝혔어 (2025년 2월 공지).'), field('기본 길이', len)),
     field('기본 채널', ch), h('p', { class: 'legend' }, '기본 수익 모델'), pp,
     btn('저장', 'sm', async (ev) => {
-      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), per_day: Number(per.value), len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
+      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), per_day: Number(per.value), len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
       if (j) { dirty = false; await load(); }
     }),
-    h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워.`),
+    h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워 (주력 주제를 정하면 그 안에서만).`),
   ];
 }
 function secJobs() {

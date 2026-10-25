@@ -1,7 +1,7 @@
 // 발행 전 검사(checks.js) 테스트 — 앱과 서버가 같은 파일을 씀
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPost, disclosureFor, compatOf, parseBody, countMe, removeEmptyMe, similarity, CONTENT_TYPES, VAGUE_DISCLOSURE, isFakeExperience } from '../checks.js';
+import { checkPost, disclosureFor, compatOf, parseBody, countMe, removeEmptyMe, similarity, CONTENT_TYPES, VAGUE_DISCLOSURE, isFakeExperience, focusMatch, keywordWords, linkTooEarly } from '../checks.js';
 
 const PROGRAMS = {
   coupang_partners: { id: 'coupang_partners', name: '쿠팡파트너스', kind: 'affiliate', needs_link: true, needs_disclosure: '필요', disclosure_template: '이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.', my_status: '사용 중' },
@@ -199,5 +199,70 @@ describe('본문 형식', () => {
   });
   test('글 유형 11가지', () => {
     assert.equal(Object.keys(CONTENT_TYPES).length, 11);
+  });
+});
+
+describe('검색 노출 도우미 (1.3.0) — 막지 않고 알려만 줌', () => {
+  const SEO = ['short_keyword', 'off_focus', 'too_many_links', 'link_too_early', 'no_own_experience'];
+  const seo = (r) => codes(r).w.filter((c) => SEO.includes(c));
+  const LONG_KW = '원룸 전기요 고르는 법';
+  test('키워드가 1~2단어면 경고, 3단어 이상이면 없음', () => {
+    assert.ok(seo(checkPost(base({ keyword: '전기요' }), ctx())).includes('short_keyword'));
+    assert.ok(seo(checkPost(base({ keyword: '원룸 전기요' }), ctx())).includes('short_keyword'));
+    assert.ok(!seo(checkPost(base({ keyword: LONG_KW }), ctx())).includes('short_keyword'));
+    assert.match(checkPost(base({ keyword: '전기요' }), ctx()).warnings.find((w) => w.code === 'short_keyword').msg, /1단어/);
+    assert.equal(keywordWords('  원룸   겨울 결로 제습기 '), 4);
+    assert.equal(keywordWords(''), 0);
+  });
+  test('주력 주제를 정했을 때만, 카테고리가 주제 밖이면 경고', () => {
+    const f = { focus: '계절템·겨울 가전' };
+    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, category: '겨울 가전' }), ctx(f))).includes('off_focus'));
+    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, category: '계절템·겨울 가전' }), ctx(f))).includes('off_focus'));
+    const off = checkPost(base({ keyword: LONG_KW, category: '디지털·전자기기' }), ctx(f));
+    assert.ok(seo(off).includes('off_focus'));
+    assert.match(off.warnings.find((w) => w.code === 'off_focus').msg, /계절템·겨울 가전.*디지털·전자기기/);
+    assert.match(checkPost(base({ keyword: LONG_KW, category: '' }), ctx(f)).warnings.find((w) => w.code === 'off_focus').msg, /카테고리 없음/);
+    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, category: '디지털·전자기기' }), ctx())).includes('off_focus'), '주력 주제가 없으면 검사 안 함');
+  });
+  test('focusMatch: 같은 말·포함·낱말 겹침·낱말 앞부분이 같으면 맞음', () => {
+    assert.equal(focusMatch('아무거나', ''), true, '주력 주제가 없으면 다 맞음');
+    assert.equal(focusMatch('', '겨울 가전'), false);
+    assert.equal(focusMatch('겨울 가전', '계절템·겨울 가전'), true);
+    assert.equal(focusMatch('계절템', '계절템·겨울 가전'), true);
+    assert.equal(focusMatch('겨울철 난방', '계절템·겨울 가전'), true, "'겨울철' ↔ '겨울'");
+    assert.equal(focusMatch('가전제품 리뷰', '겨울 가전'), true);
+    assert.equal(focusMatch('디지털·전자기기', '계절템·겨울 가전'), false);
+    assert.equal(focusMatch('요리', '계절템·겨울 가전'), false);
+    assert.equal(focusMatch('겨', '겨울 가전'), false, '한 글자 낱말은 안 봄');
+  });
+  test('링크가 3개 이상이면 경고 (링크 자리·넣은 제휴 링크 중 많은 쪽), 2개까지는 괜찮음', () => {
+    const two = checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 보기]\n[링크2: 하나 더]' }), ctx({ links: [LINK] }));
+    assert.ok(!seo(two).includes('too_many_links'));
+    const three = checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 보기]\n[링크2: 하나 더]\n[링크3: 또]' }), ctx({ links: [LINK] }));
+    assert.ok(seo(three).includes('too_many_links'));
+    const links = [LINK, { ...LINK, id: 'l2', sort: 1 }, { ...LINK, id: 'l3', sort: 2 }];
+    assert.ok(seo(checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 보기]' }), ctx({ links }))).includes('too_many_links'));
+  });
+  test('첫 소제목 앞이나 글 맨 앞에 링크가 있으면 경고, 중간·끝이면 없음', () => {
+    assert.ok(seo(checkPost(base({ keyword: LONG_KW, body: '[링크: 최저가 보기]\n' + BODY }), ctx({ links: [LINK] }))).includes('link_too_early'));
+    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 최저가 보기]' }), ctx({ links: [LINK] }))).includes('link_too_early'));
+    assert.equal(linkTooEarly('들어가는 말\n[링크: 보기]\n## 소제목\n문단'), true, '첫 소제목 앞');
+    assert.equal(linkTooEarly('## 소제목\n[링크: 보기]\n문단\n문단\n문단'), true, '맨 앞 두 줄 안');
+    assert.equal(linkTooEarly('## 소제목\n문단\n문단\n[링크: 보기]\n## 둘\n문단'), false, '첫 문단들 뒤');
+    assert.equal(linkTooEarly('## 소제목\n문단'), false, '링크 없음');
+  });
+  test('내 경험이 한 줄도 없으면 경고 — 경험 칸을 채우면 없음, 빈 [내 경험] 칸은 오류로만 (겹치지 않게)', () => {
+    assert.ok(seo(checkPost(base({ keyword: LONG_KW }), ctx())).includes('no_own_experience'));
+    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, experience: '6평 원룸에서 창틀 결로를 매일 닦음' }), ctx())).includes('no_own_experience'));
+    const hole = checkPost(base({ keyword: LONG_KW, body: BODY + '\n[내 경험: 우리 집 창틀 상태]' }), ctx());
+    assert.ok(codes(hole).e.includes('placeholder_experience'));
+    assert.ok(!seo(hole).includes('no_own_experience'));
+  });
+  test('SNS 글에는 검색 노출 검사를 안 함, 그리고 어떤 경우에도 오류(발행 막기)가 아님', () => {
+    const sns = checkPost(base({ keyword: '전기요', channel_id: 'threads', program_ids: [], content_type: 'sns_short', body: '[링크: 보기]\n짧은 글 '.repeat(3) }), ctx({ focus: '요리' }));
+    assert.deepEqual(seo(sns), []);
+    const bad = checkPost(base({ keyword: '전기요', category: '요리', body: '[링크: 보기]\n' + BODY + '\n[링크2: 둘]\n[링크3: 셋]' }), ctx({ links: [LINK], focus: '계절템·겨울 가전' }));
+    assert.deepEqual(seo(bad).sort(), [...SEO].sort());
+    assert.ok(!codes(bad).e.some((c) => SEO.includes(c)));
   });
 });

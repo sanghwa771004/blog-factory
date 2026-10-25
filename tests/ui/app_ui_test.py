@@ -314,6 +314,8 @@ class Mock:
             return 200, self.state()
         if path == 'stats':
             return 200, {'stats': {**self.stats(query.get('from', [None])[0], query.get('to', [None])[0]), 'image_costs': self.image_costs()}}
+        if path == 'settings' and method == 'POST' and 'focus_topic' in body:
+            self.settings['focus_topic'] = body['focus_topic']  # 주력 주제만 저장해 둠 (다른 설정은 다른 시험에 영향 주지 않게)
         r = self.handle_images(method, path, query, headers, body)
         if r is not None:
             return r
@@ -1276,6 +1278,39 @@ def main():
             page.locator('#sheet').get_by_role('button', name='닫기').click()
             mock.keys = {'openai': True, 'pexels': True}
         check('키가 없으면: AI 만들기는 잠기고 이유 안내, 사진 검색은 직접 올리기로 안내', t_img_no_keys)
+
+        # 검색 노출 도우미 (1.3.0): 홈 패널 → 주력 주제 정하기 → 비율·내 경험·시즌 주제 추천
+        def t_seo_helper():
+            goto_hash('home')
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 도우미'))
+            expect(seo).to_contain_text('주력 주제가 아직 없어')
+            expect(seo).to_contain_text('2~4주 뒤 검색이 늘 주제')
+            expect(seo).to_contain_text('내 경험이 없는 글')
+            expect(seo).to_contain_text('쇼핑 커넥트')
+            expect(seo).to_contain_text('순위를 보장하는 규칙은 없어')
+            seo.get_by_role('button', name='정하기').click()
+            sec = page.locator('#sec-auto')
+            expect(sec).to_be_visible()
+            focus = sec.locator('label', has_text='주력 주제').locator('input')
+            focus.fill('겨울 가전')
+            sec.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
+            assert body['focus_topic'] == '겨울 가전' and body['per_day'] == 1, body
+            goto_hash('home')
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 도우미'))
+            expect(seo).to_contain_text(re.compile(r'주력 주제\(겨울 가전\) 글: 최근 \d+개 중 \d+개'))
+            n0 = len([c for c in mock.calls if c['path'] == 'jobs' and c['method'] == 'POST'])
+            seo.get_by_role('button', name='이 시즌으로 주제 추천').click()
+            expect(page.locator('#toast')).to_contain_text('주제 추천을 요청했어')
+            jobs = [c for c in mock.calls if c['path'] == 'jobs' and c['method'] == 'POST']
+            assert len(jobs) == n0 + 1, jobs[-1:]
+            jb = jobs[-1]['body']
+            assert jb['kind'] == 'topics' and jb['mode'] == 'category' and jb['category'] == '겨울 가전' and '월 시즌' in jb['hint'] and len(jb['hint']) <= 300, jb
+            no_overflow('홈 검색 노출 도우미')
+            shot('20-home-seo')
+            mock.settings['focus_topic'] = ''
+        check('검색 노출 도우미: 주력 주제 정하기·비율, 내 경험 없는 글, 시즌 주제 추천 요청', t_seo_helper)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
