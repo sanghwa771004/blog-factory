@@ -175,12 +175,13 @@ export const CF_RULES = 'Unbranded everyday objects; no logos and no writing any
 // 2026-10-25 실서버 시험: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나옴 → 계절·장소(한국)·구도를 지시.
 // 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함. 글 모델이 '(소금빵)'처럼 한글을 섞으면 그 부분만 지우고 씀.
 // 사용자 의견 'AI 티가 너무 남' → 광고 사진처럼 반듯하게 연출하지 말고, 폰으로 그냥 찍은 생활 사진처럼 쓰게 함 (FLUX.2 klein과 함께 실서버에서 확인).
-// klein 시험에서 소금빵 접시가 바닥에 놓임 → 음식·작은 물건은 식탁·책상·조리대 위에
+// klein 시험에서 소금빵 접시가 바닥에 놓임 → 음식·작은 물건은 식탁·책상·조리대 위에.
+// '지하철을 기다리는 모습'이 아파트 창가로 바뀜 → 장면이 말한 장소(지하철·거리·카페 등)를 그대로, 집 안으로 옮기지 않게
 const CF_SYSTEM = [
   'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one image in a Korean blog post.',
   'Output ONE English prompt of 50 to 100 words that describes only what is visible.',
   '1) Read the post topic and section heading, infer the season, time of day and mood, and state them (for example: a cold winter morning).',
-  '2) The setting is South Korea: ordinary Korean apartments or one-room flats with white or beige wallpaper, light wood laminate floors and PVC sliding windows; if the outdoors is visible, show Korean apartment blocks or Korean streets, never European houses.',
+  '2) Use the place the scene names, set in South Korea. Homes: ordinary Korean apartments or one-room flats with white or beige wallpaper, light wood laminate floors and PVC sliding windows. Public places (subway platform, street, cafe, office, store): a typical Korean version of that exact place. Outdoors: Korean apartment blocks or Korean streets, never European houses. Never move an outdoor or public scene indoors.',
   '3) Keep the main subject from the line "Scene to show" clear and easy to recognise; a few ordinary lived-in details around it are fine. Put food and small objects on a table, desk or kitchen counter, never on the floor.',
   '4) For photo styles, write it as a casual, unedited smartphone snapshot taken by a regular person at home: available natural light or ordinary indoor lighting, true-to-life colors, realistic textures with small imperfections (dust, creases, wear, slight clutter), eye-level or slightly high angle, not perfectly centered, deep focus. Avoid studio lighting, dramatic bokeh, glossy surfaces, perfect symmetry and showroom or advertisement looks.',
   '5) For illustration styles, say clean flat illustration with simple shapes.',
