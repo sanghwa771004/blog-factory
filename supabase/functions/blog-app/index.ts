@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.3.0)
+// 블로그 글공장 서버 API (1.3.1)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -13,7 +13,7 @@ import {
 } from "./images.js";
 import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
 
-const VERSION = "1.3.0";
+const VERSION = "1.3.1";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -369,8 +369,11 @@ async function getState(c: Ctx) {
     fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
     fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
     // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (1000줄이 넘어도 끝까지. 이미지 스튜디오 표가 아직 없으면 빈 목록)
+    // source_type(직접 올린 사진의 출처)은 014→015 사이에 생김 — 아직 015 전인 DB면 빼고 다시 읽음
     fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null),
-      "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text)")
+      "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text, source_type)")
+      .catch(() => fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null),
+        "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text)"))
       .then((data) => ({ data, error: null as unknown }), (error) => ({ data: [] as J[], error: error as unknown })),
   ]);
   if (imageSlots.error) console.error("state image_slots:", String((imageSlots.error as Error)?.message ?? imageSlots.error));
@@ -987,6 +990,7 @@ async function patchSettings(c: Ctx) {
   if ("per_day" in b) s.per_day = optInt(b.per_day, "per_day", 1, 3);
   if ("auto_topics" in b) s.auto_topics = str(b.auto_topics, 300);
   if ("focus_topic" in b) s.focus_topic = str(b.focus_topic, 60).trim();
+  if ("focus_terms" in b) s.focus_terms = str(b.focus_terms, 300).trim();
   if ("auto_enabled" in b) s.auto_enabled = b.auto_enabled === true;
   if ("len" in b) s.len = oneOf(String(b.len), ["1500", "2500", "3500"] as const, "len");
   if ("score_weights" in b) {
@@ -1543,7 +1547,21 @@ async function uploadImage(c: Ctx) {
     post, slot, purpose, description: str(meta.description, 300), link: meta.link === true && !!slot, bg,
   }) as J;
   if (!r.ok) { if (r.error) rpcError(r.error as { message?: string }); fail(Number(r.status ?? 500), String(r.code), r.reason ? { reason: r.reason } : {}); }
+  // 직접 올린 사진의 출처: 사용자가 고른 것만 저장 (안 고르면 빈칸 = 출처 확인 필요. 올렸다고 직접 촬영으로 보지 않음)
+  const src = sourceTypeOf(meta.source_type);
+  const saved = r.image as J;
+  if (saved && saved.kind === "upload" && src && saved.source_type !== src) {
+    const u = await sb.from("post_images").update({ source_type: src }).eq("id", saved.id).select().maybeSingle();
+    if (u.error) console.error("upload source_type:", u.error.message); // 저장 실패해도 사진은 남김 ('출처 확인 필요'로 보임)
+    else if (u.data) r.image = u.data;
+  }
   return json({ image: (await withUrls([r.image as J]))[0], slot: r.slot ?? null, reused: !!r.reused });
+}
+const SOURCE_TYPES = ["own", "official", "external"] as const;
+// 빈칸('') = 출처 확인 필요. 그 밖의 값은 버림
+function sourceTypeOf(v: unknown): string {
+  const t = typeof v === "string" ? v.trim() : "";
+  return (SOURCE_TYPES as readonly string[]).includes(t) ? t : "";
 }
 
 // 보관함
@@ -1580,6 +1598,15 @@ async function patchImage(c: Ctx) {
   if ("review_note" in b) p.review_note = str(b.review_note, 300).trim();
   if ("description" in b) p.description = str(b.description, 500).trim();
   if ("alt_text" in b) p.alt_text = str(b.alt_text, 300).trim();
+  if ("source_type" in b) {
+    // 출처는 직접 올린 사진만 고름 (AI·Pexels·카드뉴스는 만든 방법으로 정해짐)
+    if (b.source_type !== "" && !sourceTypeOf(b.source_type)) fail(400, "bad_field", { field: "source_type" });
+    const { data: cur, error: e0 } = await sb.from("post_images").select("kind").eq("id", c.params[0]).is("deleted_at", null).maybeSingle();
+    if (e0) throw e0;
+    if (!cur) fail(404, "not_found");
+    if ((cur as J).kind !== "upload") fail(400, "bad_field", { field: "source_type" });
+    p.source_type = sourceTypeOf(b.source_type);
+  }
   if (!Object.keys(p).length) fail(400, "empty");
   const { data, error } = await sb.from("post_images").update(p).eq("id", c.params[0]).is("deleted_at", null).select().maybeSingle();
   if (error) throw error;

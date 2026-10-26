@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe } from './checks.js?v=1.3.0';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES } from './checks.js?v=1.3.1';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -579,23 +579,53 @@ export function seasonAhead(today = todayStr()) {
   const months = [...new Set([14, 28].map((n) => parseYmd(addDays(today, n)).getMonth() + 1))];
   return { months, themes: [...new Set(months.flatMap((m) => SEASON_CALENDAR[m] || []))] };
 }
-// 최근 글 중 주력 주제 비율 (지운 글·실패한 글은 빼고, 최근 n개)
-export function focusShare(posts, focus, n = 30, match = (c, f) => String(c || '').includes(String(f || ''))) {
-  const list = (posts || []).filter((p) => !p.deleted_at && p.stage !== 'failed')
-    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || ''))).slice(0, n);
-  const hit = list.filter((p) => match(p.category, focus)).length;
-  return { total: list.length, hit, ratio: list.length ? hit / list.length : null };
+// 주력 주제 비율 — 게시를 마친 글만 셈 (게시 완료·실적 수집 중·성과 분석 완료). 초안(검수 필요·발행 준비 등)·지운 글·실패 글은 빼
+// '최근' 순서: 게시일(published_on) → 없으면 예정 발행일(publish_date) → 그것도 없으면 만든 날(created_at)
+// 게시한 글이 하나도 없으면 ratio 는 null (= 데이터 없음. 0%가 아님)
+// fit(post, focus): checks.js focusFit 처럼 {verdict} 를 돌려주는 함수 (true/false 를 돌려줘도 됨). opts.terms: 주력 주제 낱말, opts.channels: 이 채널 글만
+export const LIVE_STAGES = ['published', 'collecting', 'analyzed'];
+export const postedOn = (p) => String((p && (p.published_on || p.publish_date || p.created_at)) || '').slice(0, 10);
+export function focusShare(posts, focus, n = 30, fit = null, opts = {}) {
+  const fitFn = typeof fit === 'function' ? fit : (p, f) => focusFit(p, f, opts.terms);
+  const list = (posts || []).filter((p) => p && !p.deleted_at && LIVE_STAGES.includes(p.stage) && (!opts.channels || opts.channels.includes(p.channel_id)))
+    .sort((a, b) => postedOn(b).localeCompare(postedOn(a)) || String(b.created_at || '').localeCompare(String(a.created_at || '')))
+    .slice(0, n);
+  let hit = 0, unclear = 0, off = 0;
+  for (const p of list) {
+    const r = fitFn(p, focus);
+    const v = typeof r === 'boolean' ? (r ? 'match' : 'off') : (r && r.verdict) || 'off';
+    if (v === 'match') hit++; else if (v === 'unclear') unclear++; else off++;
+  }
+  return { total: list.length, hit, unclear, off, ratio: list.length ? hit / list.length : null, goal: SEO_RULES.focusShareGoal };
 }
-// 하루에 2편 넘게 올렸거나 잡아 둔 날 (지난 7일 ~ 다음 7일)
-export function crowdedDays(posts, today = todayStr()) {
+// 내 하루 발행 설정(perDay)보다 많이 올렸거나 잡아 둔 날 (지난 7일 ~ 다음 7일, 발행 준비·예약·게시 글)
+export function crowdedDays(posts, today = todayStr(), perDay = 1) {
+  const limit = Math.max(1, Number(perDay) || 1);
   const from = addDays(today, -7), to = addDays(today, 7);
   const count = {};
   for (const p of posts || []) {
-    if (p.deleted_at || !['ready', 'scheduled', 'published', 'collecting', 'analyzed'].includes(p.stage)) continue;
+    if (p.deleted_at || !['ready', 'scheduled', ...LIVE_STAGES].includes(p.stage)) continue;
     const d = p.published_on || p.publish_date;
     if (d && d >= from && d <= to) count[d] = (count[d] || 0) + 1;
   }
-  return Object.entries(count).filter(([, n]) => n > 1).map(([day, n]) => ({ day, n })).sort((a, b) => a.day.localeCompare(b.day));
+  return Object.entries(count).filter(([, n]) => n > limit).map(([day, n]) => ({ day, n })).sort((a, b) => a.day.localeCompare(b.day));
+}
+
+// ───────── 자동 작가 발행표 계획 (자동 작가 프롬프트 3단계와 같은 규칙) ─────────
+// 목표 = 하루 발행 수 × 7, 잡힌 원고 = 내일~7일 뒤 발행일이 잡힌 원고(지운 것·실패·대기 빼고 — DB writer_context 'upcoming'과 같음)
+// 한 번 실행에 자동 글은 최대 4편, 요청 원고까지 합쳐 최대 6편. 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어옴
+export const AUTO_RULES = { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 };
+export function autoPlan({ posts, settings, today = todayStr(), pendingWrites = 0 } = {}) {
+  const st = settings || {};
+  const perDay = Math.min(3, Math.max(1, Number(st.per_day) || 1));
+  const goal = perDay * AUTO_RULES.days;
+  const from = addDays(today, 1), to = addDays(today, AUTO_RULES.days);
+  const scheduled = (posts || []).filter((p) => p && !p.deleted_at && !['failed', 'queued'].includes(p.stage) && p.publish_date && p.publish_date >= from && p.publish_date <= to).length;
+  const gap = Math.max(0, goal - scheduled);
+  const enabled = st.auto_enabled !== false && !!(String(st.focus_topic || '').trim() || String(st.auto_topics || '').trim());
+  const jobs = Math.min(Math.max(0, Number(pendingWrites) || 0), AUTO_RULES.maxJobsPerRun);
+  const autoNext = enabled ? Math.min(gap, AUTO_RULES.maxAutoPerRun, Math.max(0, AUTO_RULES.maxPerRun - jobs)) : 0;
+  return { perDay, recommended: SEO_RULES.perDayRecommended, differs: perDay !== SEO_RULES.perDayRecommended, goal, scheduled, gap, enabled, jobs, autoNext };
 }
 
 // ───────── 다음 할 일 추천 (규칙 기반, 근거 데이터 같이 표시) ─────────

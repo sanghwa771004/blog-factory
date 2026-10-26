@@ -1,7 +1,7 @@
 // 발행 전 검사(checks.js) 테스트 — 앱과 서버가 같은 파일을 씀
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { checkPost, disclosureFor, compatOf, parseBody, countMe, removeEmptyMe, similarity, CONTENT_TYPES, VAGUE_DISCLOSURE, isFakeExperience, focusMatch, keywordWords, linkTooEarly } from '../checks.js';
+import { checkPost, disclosureFor, compatOf, parseBody, countMe, removeEmptyMe, similarity, CONTENT_TYPES, VAGUE_DISCLOSURE, isFakeExperience, focusMatch, focusFit, focusTerms, keywordWords, linkTooEarly, SEO_RULES, canBeReady } from '../checks.js';
 
 const PROGRAMS = {
   coupang_partners: { id: 'coupang_partners', name: '쿠팡파트너스', kind: 'affiliate', needs_link: true, needs_disclosure: '필요', disclosure_template: '이 포스팅은 쿠팡 파트너스 활동의 일환으로, 이에 따른 일정액의 수수료를 제공받습니다.', my_status: '사용 중' },
@@ -202,29 +202,64 @@ describe('본문 형식', () => {
   });
 });
 
-describe('검색 노출 도우미 (1.3.0) — 막지 않고 알려만 줌', () => {
-  const SEO = ['short_keyword', 'off_focus', 'too_many_links', 'link_too_early', 'no_own_experience'];
-  const seo = (r) => codes(r).w.filter((c) => SEO.includes(c));
+describe('검색 노출 점검 (1.3.0 → 1.3.1) — 앱의 권장 기준이라 막지 않고 알려만 줌', () => {
+  const SEO_W = ['off_focus', 'focus_unclear', 'too_many_links', 'link_too_early', 'no_own_experience'];
+  const SEO_T = ['short_keyword', 'focus_match'];
+  const seo = (r) => [...codes(r).w.filter((c) => SEO_W.includes(c)), ...codes(r).t.filter((c) => SEO_T.includes(c))];
   const LONG_KW = '원룸 전기요 고르는 법';
-  test('키워드가 1~2단어면 경고, 3단어 이상이면 없음', () => {
+  const FOCUS = '계절템·겨울 가전';
+  test('키워드가 1~2단어면 참고로만 알려줌 (경쟁도는 조회 안 했다고 밝힘), 3단어 이상이면 없음', () => {
     assert.ok(seo(checkPost(base({ keyword: '전기요' }), ctx())).includes('short_keyword'));
     assert.ok(seo(checkPost(base({ keyword: '원룸 전기요' }), ctx())).includes('short_keyword'));
     assert.ok(!seo(checkPost(base({ keyword: LONG_KW }), ctx())).includes('short_keyword'));
-    assert.match(checkPost(base({ keyword: '전기요' }), ctx()).warnings.find((w) => w.code === 'short_keyword').msg, /1단어/);
+    const tip = checkPost(base({ keyword: '전기요' }), ctx()).tips.find((t) => t.code === 'short_keyword');
+    assert.match(tip.msg, /1단어/);
+    assert.match(tip.msg, /조회하지 않았어/, '짧다는 이유만으로 경쟁이 높다고 단정하지 않음');
+    assert.doesNotMatch(tip.msg, /묻히/);
+    assert.ok(!checkPost(base({ keyword: '전기요' }), ctx()).warnings.some((w) => w.code === 'short_keyword'), '경고가 아니라 참고');
     assert.equal(keywordWords('  원룸   겨울 결로 제습기 '), 4);
     assert.equal(keywordWords(''), 0);
+    assert.equal(SEO_RULES.minKeywordWords, 3);
   });
-  test('주력 주제를 정했을 때만, 카테고리가 주제 밖이면 경고', () => {
-    const f = { focus: '계절템·겨울 가전' };
-    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, category: '겨울 가전' }), ctx(f))).includes('off_focus'));
-    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, category: '계절템·겨울 가전' }), ctx(f))).includes('off_focus'));
-    const off = checkPost(base({ keyword: LONG_KW, category: '디지털·전자기기' }), ctx(f));
-    assert.ok(seo(off).includes('off_focus'));
-    assert.match(off.warnings.find((w) => w.code === 'off_focus').msg, /계절템·겨울 가전.*디지털·전자기기/);
-    assert.match(checkPost(base({ keyword: LONG_KW, category: '' }), ctx(f)).warnings.find((w) => w.code === 'off_focus').msg, /카테고리 없음/);
-    assert.ok(!seo(checkPost(base({ keyword: LONG_KW, category: '디지털·전자기기' }), ctx())).includes('off_focus'), '주력 주제가 없으면 검사 안 함');
+  test('회귀: 주제와 무관한 글이 카테고리만 주력 주제로 적혀 있으면 통과하지 않음', () => {
+    const job = base({ keyword: '20대 직업 고민 정리', titles: ['20대 직업 고민 정리하는 법'], category: FOCUS,
+      body: '## 직업 고민이 생길 때\n회사를 옮길지 고민될 때 먼저 적어볼 것들이에요. 하고 싶은 일과 잘하는 일을 나눠 적어요.\n## 정리하는 순서\n- 지금 일에서 좋은 점\n- 바꾸고 싶은 점\n하나씩 적다 보면 다음 할 일이 보여요. 너무 서두르지 말고 한 주 정도 메모해 보세요. 주변 사람 이야기도 들어 보면 좋아요.' });
+    const r = checkPost(job, ctx({ focus: FOCUS }));
+    assert.ok(seo(r).includes('off_focus'), '카테고리만 같으면 주력 주제 밖');
+    assert.ok(!seo(r).includes('focus_match'));
+    const w = r.warnings.find((x) => x.code === 'off_focus');
+    assert.match(w.msg, /근거:.*카테고리만 주력 주제와 같고/, '근거를 보여줌');
+    const f = focusFit(job, FOCUS);
+    assert.equal(f.verdict, 'off');
   });
-  test('focusMatch: 같은 말·포함·낱말 겹침·낱말 앞부분이 같으면 맞음', () => {
+  test('주력 주제 판정: 키워드·제목이 주된 근거, 소제목·본문만 있으면 판단 어려움, 근거를 같이 보여줌', () => {
+    const m = checkPost(base({ keyword: '겨울 원룸 전기요 고르는 법', category: '' }), ctx({ focus: FOCUS }));
+    assert.ok(seo(m).includes('focus_match') && !seo(m).includes('off_focus') && !seo(m).includes('focus_unclear'));
+    assert.match(m.tips.find((t) => t.code === 'focus_match').msg, /근거: 키워드에 '겨울'/);
+    const t = focusFit(base({ keyword: LONG_KW, titles: ['겨울에 쓰는 원룸 전기요 고르는 법'] }), FOCUS);
+    assert.equal(t.verdict, 'match');
+    assert.ok(t.evidence.some((e) => e.startsWith('제목에')));
+    // 키워드·제목엔 없고 본문에만 있음 → 판단 어려움 (무조건 통과시키지 않음)
+    const body = BODY + '\n겨울에는 전기요를 오래 켜 두니까 가전 안전 표시도 봐 주세요.';
+    const u = checkPost(base({ keyword: LONG_KW, category: FOCUS, body }), ctx({ focus: FOCUS }));
+    assert.ok(seo(u).includes('focus_unclear'));
+    assert.match(u.warnings.find((x) => x.code === 'focus_unclear').msg, /판단하기 어려워 — 근거: .*본문에 '겨울', '가전'.*키워드·제목에는 주제 낱말이 없음/);
+    assert.equal(focusFit(base({ keyword: LONG_KW, body }), FOCUS).label, '판단 어려움');
+    // 주력 주제 낱말(설정)을 더하면 키워드로 확인됨
+    assert.equal(focusFit(base({ keyword: LONG_KW }), FOCUS, '전기요, 온수매트').verdict, 'match');
+    assert.ok(seo(checkPost(base({ keyword: LONG_KW }), ctx({ focus: FOCUS, focusTerms: '전기요' }))).includes('focus_match'));
+    // 어디에도 없으면 주력 주제 밖
+    assert.ok(seo(checkPost(base({ keyword: '디지털 카메라 메모리 카드 고르는 법', titles: ['메모리 카드 고르는 법'], category: '디지털·전자기기' }), ctx({ focus: FOCUS }))).includes('off_focus'));
+    // 주력 주제를 안 정했으면 검사 안 함
+    assert.deepEqual(seo(checkPost(base({ keyword: LONG_KW, category: '디지털·전자기기' }), ctx())).filter((c) => c.includes('focus')), []);
+    assert.equal(focusFit(base({}), '').verdict, 'none');
+  });
+  test('주력 주제 낱말: 주제를 나눈 낱말 + 설정 낱말, 띄어쓰기가 달라도 찾음', () => {
+    assert.deepEqual(focusTerms(FOCUS, '전기요, 온수매트,  , 히'), ['계절템', '겨울', '가전', '전기요', '온수매트']);
+    assert.equal(focusFit({ keyword: '전기장판 고르기' }, '겨울', '전기 장판').verdict, 'match');
+    assert.equal(focusFit({ keyword: '추가 전기 요금' }, '가전').verdict, 'off', "두 글자 낱말은 띄어쓰기를 넘어서 찾지 않음 ('추가 전기' ≠ '가전')");
+  });
+  test('focusMatch(카테고리 이름끼리): 같은 말·포함·낱말 겹침·낱말 앞부분이 같으면 맞음 — 약한 근거로만 씀', () => {
     assert.equal(focusMatch('아무거나', ''), true, '주력 주제가 없으면 다 맞음');
     assert.equal(focusMatch('', '겨울 가전'), false);
     assert.equal(focusMatch('겨울 가전', '계절템·겨울 가전'), true);
@@ -240,6 +275,7 @@ describe('검색 노출 도우미 (1.3.0) — 막지 않고 알려만 줌', () =
     assert.ok(!seo(two).includes('too_many_links'));
     const three = checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 보기]\n[링크2: 하나 더]\n[링크3: 또]' }), ctx({ links: [LINK] }));
     assert.ok(seo(three).includes('too_many_links'));
+    assert.match(three.warnings.find((w) => w.code === 'too_many_links').msg, /앱 권장 2개까지/);
     const links = [LINK, { ...LINK, id: 'l2', sort: 1 }, { ...LINK, id: 'l3', sort: 2 }];
     assert.ok(seo(checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 보기]' }), ctx({ links }))).includes('too_many_links'));
   });
@@ -251,18 +287,25 @@ describe('검색 노출 도우미 (1.3.0) — 막지 않고 알려만 줌', () =
     assert.equal(linkTooEarly('## 소제목\n문단\n문단\n[링크: 보기]\n## 둘\n문단'), false, '첫 문단들 뒤');
     assert.equal(linkTooEarly('## 소제목\n문단'), false, '링크 없음');
   });
-  test('내 경험이 한 줄도 없으면 경고 — 경험 칸을 채우면 없음, 빈 [내 경험] 칸은 오류로만 (겹치지 않게)', () => {
-    assert.ok(seo(checkPost(base({ keyword: LONG_KW }), ctx())).includes('no_own_experience'));
+  test('내 경험이 없는 정보 글은 경고만 (발행 막지 않음) — 실제 후기 글은 경험 없으면 그대로 막음', () => {
+    const info = checkPost(base({ keyword: LONG_KW, body: BODY + '\n[링크: 최저가 보기]' }), ctx({ links: [LINK] }));
+    assert.ok(seo(info).includes('no_own_experience'));
+    assert.deepEqual(info.errors, [], '정보 글은 경험이 없어도 오류 0개');
+    assert.match(info.warnings.find((w) => w.code === 'no_own_experience').msg, /발행은 막지 않아/);
     assert.ok(!seo(checkPost(base({ keyword: LONG_KW, experience: '6평 원룸에서 창틀 결로를 매일 닦음' }), ctx())).includes('no_own_experience'));
+    const review = checkPost(base({ keyword: LONG_KW, content_type: 'experience_review' }), ctx());
+    assert.ok(codes(review).e.includes('needs_experience'), '실제 경험 후기는 경험이 없으면 오류');
     const hole = checkPost(base({ keyword: LONG_KW, body: BODY + '\n[내 경험: 우리 집 창틀 상태]' }), ctx());
-    assert.ok(codes(hole).e.includes('placeholder_experience'));
+    assert.ok(codes(hole).e.includes('placeholder_experience'), '빈 [내 경험] 표시는 글에 그대로 보여서 오류');
+    assert.match(hole.errors.find((e) => e.code === 'placeholder_experience').fix, /정보 글은 칸을 지우고 경험 없이 올려도 돼/);
     assert.ok(!seo(hole).includes('no_own_experience'));
+    assert.equal(canBeReady(checkPost(base({ keyword: LONG_KW, body: removeEmptyMe(BODY + '\n[내 경험: 우리 집 창틀 상태]') + '\n[링크: 보기]' }), ctx({ links: [LINK] }))), true, '빈 칸을 지우면 경험 없이도 발행 준비 가능');
   });
-  test('SNS 글에는 검색 노출 검사를 안 함, 그리고 어떤 경우에도 오류(발행 막기)가 아님', () => {
+  test('SNS 글에는 검색 노출 점검을 안 함, 그리고 어떤 경우에도 오류(발행 막기)가 아님', () => {
     const sns = checkPost(base({ keyword: '전기요', channel_id: 'threads', program_ids: [], content_type: 'sns_short', body: '[링크: 보기]\n짧은 글 '.repeat(3) }), ctx({ focus: '요리' }));
     assert.deepEqual(seo(sns), []);
-    const bad = checkPost(base({ keyword: '전기요', category: '요리', body: '[링크: 보기]\n' + BODY + '\n[링크2: 둘]\n[링크3: 셋]' }), ctx({ links: [LINK], focus: '계절템·겨울 가전' }));
-    assert.deepEqual(seo(bad).sort(), [...SEO].sort());
-    assert.ok(!codes(bad).e.some((c) => SEO.includes(c)));
+    const bad = checkPost(base({ keyword: '전기요', category: '요리', body: '[링크: 보기]\n' + BODY + '\n[링크2: 둘]\n[링크3: 셋]' }), ctx({ links: [LINK], focus: FOCUS }));
+    assert.deepEqual(seo(bad).sort(), ['link_too_early', 'no_own_experience', 'off_focus', 'short_keyword', 'too_many_links'].sort());
+    assert.ok(!codes(bad).e.some((c) => [...SEO_W, ...SEO_T].includes(c)));
   });
 });

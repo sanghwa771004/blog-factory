@@ -9,7 +9,7 @@ import {
   buildPrompt, PROMPT_RULES, promptRisk, blocksOf, slotRisk, descriptionMismatch, estimateUsd, usageUsd, OUTPUT_TOKENS, QUALITIES,
   sniffImage, checkImageFile, MAX_UPLOAD_BYTES, attributionFor, captionHint, altTextFor, fileNameFor, deckFromPost, EXTRA_SLOTS, isExtraKey, fmtUsd,
   stripMetadata, validSlotKey, slotPurpose, extraSlot, sameRatio, orientationFor, searchSuggestions, imageChecks, extOf, estimateTokens,
-  ctxOf, modelCaps, qualitiesFor, normQuality, sanitizeContext, STANDARD_SIZES, isOwnPhotoSlot, stripOwnMark,
+  ctxOf, modelCaps, qualitiesFor, normQuality, sanitizeContext, STANDARD_SIZES, isOwnPhotoSlot, stripOwnMark, originOf, originLabel, ORIGIN_LABEL, SOURCE_TYPES,
 } from '../images.js';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync, mkdtempSync } from 'node:fs';
@@ -614,7 +614,8 @@ describe('이미지 검사 (발행 전 검사에 더하는 확인할 것)', () =
     assert.equal(r.tips[0].msg, '사진 자리 3곳 중 2곳에 이미지가 연결돼 있어.');
   });
   test('문제없으면 진행 상황만', () => {
-    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: b.key, image: { kind: 'upload', review_status: '사용 가능', description: '원룸 거실 분위기' } }]);
+    // 1.3.1: 직접 올린 사진은 출처를 골라야 '문제없음' (안 고르면 image_source_unknown — 아래 회귀 테스트)
+    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: b.key, image: { kind: 'upload', source_type: 'own', review_status: '사용 가능', description: '원룸 거실 분위기' } }]);
     assert.deepEqual(r.warnings, []);
     assert.equal(r.tips.length, 1);
     assert.deepEqual(imageChecks({ body: '사진 없음' }, []), { warnings: [], tips: [] });
@@ -644,16 +645,48 @@ describe("'직접 찍기' 자리와 검색 노출 (1.3.0)", () => {
     assert.ok(pr.includes('Scene to show (Korean): 내 방 창틀에 맺힌 물방울'), pr);
     assert.ok(!pr.includes('직접 찍기'));
   });
-  test("검색 채널이면: 연결한 이미지 중 직접 올린 사진이 없으면 경고, AI 이미지는 'AI 활용' 표시 안내", () => {
+  test("검색 채널이면: 직접 촬영으로 확인한 사진이 없으면 경고, 네이버 블로그면 AI 이미지에 'AI 활용' 표시 안내", () => {
     const ai = { kind: 'ai', review_status: '사용 가능', description: '' };
-    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }], { search: true });
+    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }], { search: true, naver: true });
     assert.ok(r.warnings.some((w) => w.code === 'no_own_photo'));
     assert.match(r.tips.find((t) => t.code === 'ai_label').msg, /AI 이미지가 1곳/);
-    const ok = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }, { slot_key: own.key, image: { kind: 'upload', review_status: '사용 가능', description: '' } }], { search: true });
-    assert.ok(!ok.warnings.some((w) => w.code === 'no_own_photo'));
+    const ownOk = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }, { slot_key: own.key, image: { kind: 'upload', source_type: 'own', review_status: '사용 가능', description: '' } }], { search: true });
+    assert.ok(!ownOk.warnings.some((w) => w.code === 'no_own_photo'), "출처를 '직접 촬영'으로 고른 사진은 셈");
     const sns = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }]);
     assert.ok(!sns.warnings.some((w) => w.code === 'no_own_photo') && !sns.tips.some((t) => t.code === 'ai_label'), '검색 채널이 아니면 안 봄');
+    const tistory = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: plain.key, image: ai }], { search: true });
+    assert.ok(!tistory.tips.some((t) => t.code === 'ai_label'), "네이버 'AI 활용' 표시 안내는 네이버 블로그 글에만");
     assert.ok(!imageChecks({ body }, [], { search: true }).warnings.some((w) => w.code === 'no_own_photo'), '아직 아무것도 연결 안 했으면 경고 없음');
+  });
+  test('회귀: 직접 촬영으로 확인하지 않은 업로드 사진은 직접 촬영으로 세지 않음 (예전 사진도 소급 안 함)', () => {
+    const legacy = { kind: 'upload', review_status: '사용 가능', description: '' };                 // 1.3.0까지 올린 사진 (출처 칸 없음)
+    const unsure = { kind: 'upload', source_type: '', review_status: '사용 가능', description: '' };  // '잘 모르겠어'
+    const official = { kind: 'upload', source_type: 'official', review_status: '사용 가능', description: '' };
+    for (const img of [legacy, unsure, official]) {
+      const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: own.key, image: img }], { search: true });
+      assert.ok(r.warnings.some((w) => w.code === 'no_own_photo'), JSON.stringify(img));
+    }
+    assert.equal(originOf(legacy), 'unknown');
+    assert.equal(originOf({ ...legacy, source_type: 'bogus' }), 'unknown', '모르는 값은 출처 확인 필요');
+    const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: own.key, image: legacy }, { slot_key: plain.key, image: official }]);
+    const w = r.warnings.find((x) => x.code === 'image_source_unknown');
+    assert.match(w.msg, /출처를 고르지 않은 사진이 1곳 있어 \(사진 1\)/);
+  });
+  test('이미지 출처 5가지: 직접 촬영·AI 생성·외부 제공(Pexels 등)·공식 제공·출처 확인 필요 (+ 카드뉴스)', () => {
+    assert.deepEqual(Object.keys(ORIGIN_LABEL).sort(), ['ai', 'card', 'external', 'official', 'own', 'unknown']);
+    assert.deepEqual(Object.keys(SOURCE_TYPES), ['own', 'official', 'external'], '직접 올린 사진에서 고를 수 있는 출처');
+    const cases = [
+      [{ kind: 'ai' }, 'ai', 'AI 생성'],
+      [{ kind: 'stock', provider: 'pexels' }, 'external', '외부 제공 (Pexels)'],
+      [{ kind: 'upload', source_type: 'own' }, 'own', '직접 촬영'],
+      [{ kind: 'upload', source_type: 'official' }, 'official', '공식 제공 · 직접 올림'],
+      [{ kind: 'upload', source_type: 'external' }, 'external', '외부 제공 · 직접 올림'],
+      [{ kind: 'upload' }, 'unknown', '출처 확인 필요 · 직접 올림'],
+      [{ kind: 'card' }, 'card', '카드뉴스'],
+      [{ kind: 'ai', source_type: 'own' }, 'ai', 'AI 생성'],   // AI는 고른 값과 상관없이 AI
+      [null, 'unknown', '출처 확인 필요'],
+    ];
+    for (const [img, o, label] of cases) { assert.equal(originOf(img), o, JSON.stringify(img)); assert.equal(originLabel(img), label, JSON.stringify(img)); }
   });
   test("'직접 찍기' 자리에 AI 이미지를 넣으면 따로 알려줌 (실제 상품 자리 경고와 겹치지 않게)", () => {
     const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: own.key, image: { kind: 'ai', review_status: '사용 가능', description: '' } }]);

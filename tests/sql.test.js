@@ -417,3 +417,16 @@ describe('주력 주제 (014, 1.3.0)', () => {
     await assert.rejects(db.query(`update public.settings set focus_topic = null where id = 1`), /null/);
   });
 });
+
+describe('자동 작가 원고는 항상 사람 검수가 필요한 상태로 (1.3.1 확인)', () => {
+  test('자동(add_post source=auto)·요청 원고 모두 검수 필요로 저장되고, 하루 발행 설정(2편)을 바꾸지 않음', async () => {
+    const db = await freshDb();
+    await db.query(`update public.settings set per_day = 2 where id = 1`);
+    const a = await one(db, `select post_id from public.add_post($1::jsonb, 1)`, [JSON.stringify({ keyword: '겨울 원룸 전기요 고르는 법', body: longBody(), source: 'auto', category: '전기요' })]);
+    const b = await one(db, `select post_id from public.add_post($1::jsonb, 1)`, [JSON.stringify({ keyword: '겨울 온수매트 소음 줄이는 법', body: longBody(), source: 'auto', category: '온수매트' })]);
+    const rows = await all(db, `select stage, source, category, publish_date::text as d from public.posts where id in ($1, $2) order by d`, [a.post_id, b.post_id]);
+    assert.deepEqual(rows.map((r) => [r.stage, r.source, r.category]), [['review', 'auto', '전기요'], ['review', 'auto', '온수매트']], '카테고리는 글마다 따로, 상태는 검수 필요');
+    assert.equal(rows[0].d, rows[1].d, '하루 2편 설정이면 같은 날에 2편까지 잡힘');
+    assert.equal(await val(db, `select per_day from public.settings where id = 1`), 2, '설정은 그대로');
+  });
+});

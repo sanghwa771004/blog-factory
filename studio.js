@@ -1,8 +1,8 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.3.0';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.3.0';
+import * as IMG from './images.js?v=1.3.1';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.3.1';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -253,7 +253,20 @@ export function createStudio(ui) {
   const keysOf = (id) => (dataOf(id) || {}).keys || {};
 
   // ── 작은 조각 ──
-  const kindChip = (img) => h('span', { class: 'chip k-' + img.kind }, IMG.KIND_LABEL[img.kind] || img.kind);
+  // 출처 표시: 게시 원고·보관함·검수 화면이 모두 IMG.originLabel 을 씀 (직접 올린 사진은 고른 출처, 안 골랐으면 '출처 확인 필요')
+  const kindChip = (img) => h('span', { class: 'chip k-' + img.kind + ' o-' + IMG.originOf(img) }, IMG.originLabel(img));
+  // 직접 올린 사진의 출처 고르기 (파일을 올렸다고 직접 촬영으로 보지 않아서, 사용자가 확인해야 '직접 촬영'으로 셈)
+  const SOURCE_OPTS = [['', '잘 모르겠어 (출처 확인 필요)'], ['own', '내가 직접 찍은 사진'], ['official', '제조사·판매처가 준 공식 이미지'], ['external', '다른 곳에서 받은 사진 (무료 사진 사이트 등)']];
+  const sourceSelect = (value) => h('select', { value: value || '' }, SOURCE_OPTS.map(([v, l]) => opt(v, l))); // 이름은 감싸는 칸 제목('이 사진은 어디서 났어?')
+  function sourcePicker(img, after) {
+    const sel = sourceSelect(img.source_type);
+    sel.addEventListener('change', async () => {
+      const v = sel.value;
+      const j = await run(sel, () => api('/images/' + img.id, { method: 'POST', body: { source_type: v } }), '출처를 바꿨어');
+      if (j) { img.source_type = v; if (after) after(); } else sel.value = img.source_type || '';
+    });
+    return h('div', { class: 'stack' }, field('이 사진은 어디서 났어?', sel, "파일을 올렸다는 것만으로는 직접 찍은 사진으로 보지 않아. 직접 찍었으면 '내가 직접 찍은 사진'을 골라줘."));
+  }
   const reviewChip = (img) => h('span', { class: 'chip ' + (img.review_status === '사용 가능' ? 'v-ok' : img.review_status === '사용 안 함' ? 'v-no' : 'v-unk') }, img.review_status);
   function thumb(img, onclick) {
     const pic = img.url ? h('img', { src: img.url, alt: img.alt_text || img.description || '이미지', loading: 'lazy', decoding: 'async' }) : h('span', { class: 'hint' }, '미리보기를 불러오지 못했어');
@@ -262,7 +275,7 @@ export function createStudio(ui) {
   function pickThumb(img, onclick) {
     return h('button', { type: 'button', class: 'pick', onclick },
       img.url ? h('img', { src: img.url, alt: img.alt_text || img.description || '이미지', loading: 'lazy', decoding: 'async' }) : h('span', { class: 'ph' }, '이미지'),
-      h('small', null, [IMG.KIND_LABEL[img.kind], img.uses ? `${img.uses}곳에서 사용` : ''].filter(Boolean).join(' · ')));
+      h('small', null, [IMG.originLabel(img), img.uses ? `${img.uses}곳에서 사용` : ''].filter(Boolean).join(' · ')));
   }
   function imageLine(img, d) {
     const parts = [];
@@ -783,6 +796,8 @@ export function createStudio(ui) {
     const picker = h('label', { class: 'btn sm filebtn' }, pickLabel, input);
     const preview = h('div', { class: 'stack' });
     const rights = h('input', { type: 'checkbox' });
+    const srcSel = sourceSelect('');
+    const ownSlot = !!(s.n && IMG.isOwnPhotoSlot(s.text));
     const desc = h('input', { type: 'text', value: s.n ? IMG.altTextFor(s.text) : s.label || '', maxlength: '300' });
     let ready = null, prevUrl = null;
     const goBtn = btn(`올리고 ${slotName(s)}에 연결`, 'wide', () => send(), { disabled: true });
@@ -804,7 +819,7 @@ export function createStudio(ui) {
       if (!ready) return;
       if (!rights.checked) { toast(IMAGE_ERR.rights_required); return; }
       const fd = new FormData();
-      fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose, rights: true, description: desc.value.trim(), link: true }));
+      fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose, rights: true, description: desc.value.trim(), link: true, source_type: srcSel.value }));
       fd.append('file', ready.blob, ready.name);
       const j = await run(goBtn, () => api('/images/upload', { method: 'POST', body: fd }).catch((e) => {
         throw e && e.code === 'too_large' ? { code: 'bad_image', reason: 'too_big' } : e; // 이미지는 '나눠서 올려줘'가 아니라 크기 안내로
@@ -814,6 +829,7 @@ export function createStudio(ui) {
     openSheet(`${slotName(s)} — 파일 올리기`,
       h('p', { class: 'hint' }, 'JPEG·PNG·WebP만, 한 장 8MB까지 (큰 사진은 올리기 전에 자동으로 줄여). GIF·HEIC·SVG는 안 돼.'),
       h('div', { class: 'go' }, picker), preview,
+      field('이 사진은 어디서 났어?', srcSel, ownSlot ? "'직접 찍기' 자리야. 네가 찍은 사진이면 '내가 직접 찍은 사진'을 골라줘 — 그래야 직접 촬영 사진으로 셈." : "안 고르면 '출처 확인 필요'로 남아. 직접 찍은 사진으로는 세지 않아."),
       h('label', { class: 'chk' }, rights, '내가 찍었거나 쓸 권한이 있는 사진이야'),
       h('p', { class: 'notice' }, '다른 사람 사진·인터넷에서 받은 사진은 저작권자 허락이 있어야 써. 상품 공식 이미지는 판매처·제조사의 이용 조건을 먼저 확인해줘.'),
       field('사진 설명 (대체 텍스트)', desc),
@@ -978,7 +994,7 @@ export function createStudio(ui) {
       info.push(h('p', null, 'Photo by ', img.author_url ? h('a', { href: img.author_url, target: '_blank', rel: 'noopener noreferrer' }, img.author_name || '사진가') : (img.author_name || '사진가'),
         ' on ', img.source_url ? h('a', { href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels') : 'Pexels'));
       info.push(h('p', { class: 'hint' }, `라이선스: ${img.license}`), h('div', { class: 'go' }, h('span', { class: 'sns' }, img.attribution_text), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(img.attribution_text, ev.currentTarget) }, '출처 문구 복사')));
-    } else if (img.kind === 'upload') info.push(h('p', { class: 'hint' }, '직접 올린 사진 · 쓸 권한이 있다고 확인함'));
+    } else if (img.kind === 'upload') info.push(h('p', { class: 'hint' }, '직접 올린 사진 · 쓸 권한이 있다고 확인함'), sourcePicker(img, () => { refresh(p.id); }));
     else info.push(h('p', { class: 'hint' }, `카드뉴스에서 만든 이미지${img.license && img.license.includes('배경') ? ' · ' + img.license.replace(/^카드뉴스 \(앱에서 직접 만듦\)\s*·\s*/, '') : ''}`));
     info.push(h('p', { class: 'hint' }, `원본 ${img.width}×${img.height} · ${fmtBytes(img.bytes)} · ${L.fmtTime(img.created_at)}${img.used_posts > 1 ? ` · 다른 원고 ${img.used_posts - 1}곳에서도 사용 중` : ''}`));
     const altSaved = () => alt.value.trim() === String(img.alt_text || '').trim();
@@ -1253,7 +1269,7 @@ export function createStudio(ui) {
       h('button', { type: 'button', 'aria-pressed': String(k === libKind), onclick: () => { libKind = k; drawSeg(); loadLib(false); } }, l)));
     const card = (i) => h('button', { type: 'button', class: 'pick', onclick: () => imageSheet(i.id, () => loadLib(false)) },
       i.url ? h('img', { src: i.url, alt: i.alt_text || i.description || '이미지', loading: 'lazy', decoding: 'async' }) : h('span', { class: 'ph' }, '이미지'),
-      h('small', null, [IMG.KIND_LABEL[i.kind], i.review_status, i.uses ? `${i.uses}곳에서 사용` : '안 쓰는 중'].join(' · ')));
+      h('small', null, [IMG.originLabel(i), i.review_status, i.uses ? `${i.uses}곳에서 사용` : '안 쓰는 중'].join(' · ')));
     // 종류를 빨리 바꿔도 마지막으로 고른 것만 보여줌 (늦게 온 응답은 버림)
     const loadLib = async (append) => {
       const my = ++lseq;
@@ -1299,9 +1315,10 @@ export function createStudio(ui) {
     originalFile(img, IMG.fileNameFor({ keyword: (img.description || '이미지').slice(0, 20) }, 'original', '', outExt(img)), ctrl ? ctrl.signal : undefined)
       .then((f) => { orig = f; if (dl.isConnected) { dl.disabled = false; dl.textContent = '원본 내려받기'; } })
       .catch(() => { if (dl.isConnected) dl.textContent = '원본을 불러오지 못했어'; });
-    openSheet(IMG.KIND_LABEL[img.kind] || '이미지',
+    openSheet(IMG.originLabel(img) || '이미지',
       thumb(img, null), h('div', { class: 'chips' }, kindChip(img), reviewChip(img)),
       img.description ? h('p', null, img.description) : null,
+      img.kind === 'upload' ? sourcePicker(img, onChange) : null,
       h('p', { class: 'hint' }, [img.kind === 'ai' ? `${img.model}${c ? ` · 비용 ${usd(c.usd)} (${c.label})` : ''}` : '', img.kind === 'stock' ? img.attribution_text : '', `${img.width}×${img.height} · ${fmtBytes(img.bytes)} · ${L.fmtTime(img.created_at)}`].filter(Boolean).join(' · ')),
       img.kind === 'stock' && img.source_url ? h('div', { class: 'go' }, h('a', { class: 'copy', href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels 원본 보기 ↗')) : null,
       h('p', { class: 'legend' }, inUse ? `쓰는 곳 ${inUse}곳` : '쓰는 곳 없음'),
@@ -1434,7 +1451,7 @@ export function createStudio(ui) {
       if (!r || !r.image_id) return null;
       const im = imgs[r.image_id];
       if (!im) return { url: '', alt: '', label: '' };
-      return { url: im.url, alt: im.alt_text || s.text, label: IMG.KIND_LABEL[im.kind] + (im.review_status !== '사용 가능' ? ' · ' + im.review_status : '') };
+      return { url: im.url, alt: im.alt_text || s.text, label: IMG.originLabel(im) + (im.review_status !== '사용 가능' ? ' · ' + im.review_status : '') };
     });
   }
   // 복사: 내려받을 파일 이름과 캡션(AI 안내·사진 출처)만 — 이미지 주소는 넣지 않음

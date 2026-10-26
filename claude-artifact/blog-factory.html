@@ -950,7 +950,8 @@ function buildWritePrompt(o){
     `- 수익 모델: ${progLine}`,
     ct ? `- 글 유형: ${ct} (${CONTENT_TYPES[ct].label})` : `- 글 유형: 정해지지 않음 — 키워드의 검색 의도에 맞게 다음 중 하나를 골라 content_type 에 적어: ${allowed.join(", ")}`,
     sns ? null : `- 분량: 본문 약 ${o.len || "2500"}자`,
-    `- 카테고리: ${o.category || (o.focus ? `${o.focus} (블로그 주력 주제)` : "알맞게 정해서 category 에 적어")}`,
+    `- 카테고리: ${o.category || "글 내용에 맞는 세부 분류로 정해서 category 에 적어 (블로그 주력 주제 이름을 그대로 쓰지 마)"}`,
+    o.focus ? `- 블로그 주력 주제: ${o.focus}${o.focusTerms ? ` (주제 낱말: ${o.focusTerms})` : ""} — 키워드나 제목에 주력 주제 낱말이 자연스럽게 드러나게 써 (앱은 키워드·제목으로 주제 글인지 확인해)` : null,
     o.experience ? `- 작성자의 실제 경험 (이 내용만 1인칭 경험으로 써도 돼):\n${o.experience.slice(0, 3000)}` : "- 작성자의 실제 경험: 없음",
     o.ref ? `- 참고 글 (구성·말투·리듬만 참고하고 문장은 절대 베끼지 마):\n${o.ref.slice(0, 6000)}` : null,
     o.notes ? `- 요청 메모: ${o.notes.slice(0, 1000)}` : null,
@@ -1001,7 +1002,8 @@ function buildTopicPrompt(o){
     "[조건]",
     `- 오늘(한국 날짜): ${o.today}. 지금부터 2~4주 뒤에 찾는 사람이 늘어날 주제를 우선해 (그때 검색에 걸리려면 미리 써 둬야 해).`,
     `- 카테고리: ${o.category || (o.focus ? `${o.focus} (블로그 주력 주제 — 이 안에서만)` : "제한 없음")}`,
-    o.focus && o.category && o.category !== o.focus ? `- 블로그 주력 주제: ${o.focus} (한 주제로 꾸준히 쌓아야 그 주제 검색에서 잘 보여 — 되도록 이 주제와 이어지게)` : null,
+    o.focus && o.category && o.category !== o.focus ? `- 블로그 주력 주제: ${o.focus} (한 주제로 꾸준히 쌓는 쪽을 권해 — 되도록 이 주제와 이어지게)` : null,
+    o.focus ? `- 주력 주제 안의 주제면 keyword 나 title 에 주력 주제 낱말(${[o.focus, o.focusTerms].filter(Boolean).join(", ")})이 드러나게 하고, category 에는 세부 분류를 적어 (주력 주제 이름을 무조건 넣지 마).` : null,
     `- 추천 개수: ${o.count}개`,
     o.hint ? `- 요청 메모: ${o.hint}` : null,
     `- 주로 올릴 채널: ${o.channel.name}(${o.channel.id})`,
@@ -1014,7 +1016,7 @@ function buildTopicPrompt(o){
     o.mode === "performance" ? (perfLines ? `- 작성자가 입력한 최근 90일 실적 (실제 숫자):\n${perfLines}` : "- 작성자가 입력한 실적: 없음") : null,
     "",
     "[규칙]",
-    "- 키워드는 3~5어절의 구체적인 롱테일로 (1~2단어 짧은 키워드는 오래된 큰 블로그와 경쟁해서 묻혀). 서로 겹치지 않게.",
+    "- 키워드는 3~5어절의 구체적인 롱테일로 (앱 권장 기준 — 1~2단어 짧은 키워드는 쓰지 마). 서로 겹치지 않게.",
     "- scores 에는 7개 키를 모두 넣어: demand(검색 수요), intent(구매 의도), competition(경쟁 — 경쟁이 낮을수록 높은 점수), product_info(상품 정보를 공식 자료로 확보할 가능성), differentiation(차별화 가능성), monetization(수익화 가능성), effort(제작 부담 — 적게 들수록 높은 점수)",
     "- 각 점수는 {\"score\": 0~5 정수 또는 null, \"basis\": \"근거 한 줄\", \"source\": \"AI 추정\" 또는 \"성과 데이터\", \"confidence\": \"보통\" 또는 \"낮음\"}. 실측 데이터가 없으니 대부분 source 는 \"AI 추정\", confidence 는 \"낮음\"이야. 판단할 근거가 없으면 score 는 null, basis 는 \"확인 불가\".",
     o.mode === "performance"
@@ -1077,11 +1079,11 @@ function flash(btn, msg){
   btn._t = setTimeout(() => { btn.textContent = btn.dataset.label; }, 1600);
 }
 
-const APP_VER = "7";
-const APP_DATE = "2026.10.25";
+const APP_VER = "8";
+const APP_DATE = "2026.10.26";
 const APP_PROJECT = "oxewhsqmdkiasckvnyua";
 const SERVER = "Supabase";
-const WHATS_NEW = "검색 노출 규칙을 넣었어. 블로그 원고에 네가 채울 [내 경험] 자리 1곳과 '(직접 찍기)' 사진 자리 1곳이 생기고, 링크는 앞부분 말고 중간·끝 2곳까지만. 주제 추천은 주력 주제 안에서 2~4주 뒤 시즌을 미리 골라. 검색 노출 검사는 앱으로 보내면 원고 검사에 떠.";
+const WHATS_NEW = "앱 1.3.1에 맞췄어. 원고의 카테고리를 주력 주제 이름으로 덮어쓰지 않고 글에 맞는 세부 분류로 적고, 대신 키워드나 제목에 주력 주제 낱말이 드러나게 써. 앱은 카테고리만 같은 글을 주력 주제 글로 보지 않아.";
 const ERR = {
   not_granted: "Claude 사용을 허용해야 쓸 수 있어.",
   rate_limited: "너무 자주 돌렸거나 사용량이 다 찼어. 잠깐 쉬었다가 다시 해줘.",
@@ -1520,7 +1522,7 @@ function makeInput(f){
 function promptFor(input){
   const sns = input.channel.kind === "sns";
   const allowed = Object.keys(CONTENT_TYPES).filter(k => typeOkHere(k, { products: input.products, experience: !!input.experience, sns }));
-  return { prompt: buildWritePrompt({ ...input, allowed, today: kstNow().date, recent: cat.recent || [], focus: str(cat.settings.focus_topic, 60) }), allowed };
+  return { prompt: buildWritePrompt({ ...input, allowed, today: kstNow().date, recent: cat.recent || [], focus: str(cat.settings.focus_topic, 60), focusTerms: str(cat.settings.focus_terms, 300) }), allowed };
 }
 
 /* ---------- 저장소 (이 페이지 보관함: 폰·PC 같이 보임, 안 되면 이 기기) ---------- */
@@ -1761,7 +1763,7 @@ $("#tBtn").onclick = async () => {
   setTStatus("주제를 고르는 중… (보통 30초~1분)");
   try {
     const count = Number($("#tcount").value) || 6;
-    const prompt = buildTopicPrompt({ category, count, mode, hint: "", channel: base.channel, programs: base.programs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date, focus: str(cat.settings.focus_topic, 60) });
+    const prompt = buildTopicPrompt({ category, count, mode, hint: "", channel: base.channel, programs: base.programs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date, focus: str(cat.settings.focus_topic, 60), focusTerms: str(cat.settings.focus_terms, 300) });
     const raw = await sample.json(prompt, { cache: false, onText: ({ text }) => setTStatus(`고르는 중… ${text.length.toLocaleString()}자`) });
     const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: base.channel.id, category, hasPerf: mode === "performance" && cat.perf.length > 0 });
     const now = Date.now();
@@ -1981,7 +1983,7 @@ async function doTopicJob(j, signal){
   const progs = (S.default_programs || []).map(id => C.prog[id]).filter(Boolean);
   const category = str(pl.category, 60);
   const hint = [str(pl.hint, 300), pl.keyword ? "기준 글 키워드: " + str(pl.keyword, 100) : ""].filter(Boolean).join(" / ");
-  const prompt = buildTopicPrompt({ category, count, mode, hint, channel: ch, programs: progs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date, focus: str(S.focus_topic, 60) });
+  const prompt = buildTopicPrompt({ category, count, mode, hint, channel: ch, programs: progs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date, focus: str(S.focus_topic, 60), focusTerms: str(S.focus_terms, 300) });
   const raw = await sample.json(prompt, { signal, cache: false });
   const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: ch.id, category, hasPerf: mode === "performance" && cat.perf.length > 0 });
   try { await sql(`select public.add_topics('${j.id}'::uuid, ${dq(JSON.stringify(items))}::jsonb) as n;`); } catch (e) { throw saveErr(e); }
@@ -2289,7 +2291,7 @@ function onCatalog(){
 }
 
 /* ---------- 시작 ---------- */
-$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.3.0 기준`;
+$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.3.1 기준`;
 (() => {
   const seen = LS.get("bgf-ver", null);
   const returning = seen || LS.get("bgf-tab", null) || LS.get("bgf-settings", null);

@@ -101,12 +101,16 @@ test('프롬프트: 웹 없음·가격 금지·링크 자리 규칙이 들어가
   assert.ok(tp.includes('google_adsense × threads') && tp.includes('조회 120') && tp.includes('주문 없음') && !/undefined/.test(tp));
 });
 
-test('검색 노출 (1.3.0): 블로그 원고는 첫 부분 [내 경험] 1곳·(직접 찍기) 사진 1곳·링크 2곳까지, 주제는 2~4주 뒤 시즌·주력 주제 안에서', () => {
+test('검색 노출 (1.3.0·1.3.1): 블로그 원고는 첫 부분 [내 경험] 1곳·(직접 찍기) 사진 1곳·링크 2곳까지, 주제는 2~4주 뒤 시즌·주력 주제 안에서', () => {
   const wp = P.buildWritePrompt({ keyword: '원룸 창문 결로 막는 법', channel: ch.naver_blog, programs: [prog.coupang_partners], contentType: '', len: '2500', products: [], recent: [], today: '2026-10-25', allowed: ['problem_solving'], focus: '계절템·겨울 가전' });
   assert.ok(wp.includes('첫 소제목 부분에') && wp.includes('[내 경험:') && wp.includes('꼭 1곳'), '경험 자리');
   assert.ok(wp.includes('[이미지: (직접 찍기)'), '직접 찍을 사진 자리');
   assert.ok(wp.includes('첫 소제목 앞에는 넣지 마') && wp.includes('2곳까지'), '링크 위치');
-  assert.ok(wp.includes('- 카테고리: 계절템·겨울 가전 (블로그 주력 주제)') && wp.includes('틀에 박힌 말'));
+  assert.ok(wp.includes('틀에 박힌 말'));
+  // 1.3.1: 카테고리를 주력 주제 이름으로 채우지 않고, 키워드·제목에 주제 낱말이 드러나게
+  assert.ok(!wp.includes('- 카테고리: 계절템·겨울 가전') && wp.includes('세부 분류') && wp.includes('- 블로그 주력 주제: 계절템·겨울 가전') && wp.includes('키워드나 제목에 주력 주제 낱말'), '카테고리와 주력 주제를 구분');
+  const wt = P.buildWritePrompt({ keyword: 'x y z', channel: ch.naver_blog, programs: [], contentType: 'how_to', products: [], recent: [], today: '2026-10-26', allowed: ['how_to'], focus: '겨울 가전', focusTerms: '전기요, 온수매트', category: '온수매트' });
+  assert.ok(wt.includes('- 카테고리: 온수매트') && wt.includes('주제 낱말: 전기요, 온수매트'));
   const withExp = P.buildWritePrompt({ keyword: 'x y z', channel: ch.naver_blog, programs: [], contentType: 'how_to', experience: '6평 원룸, 북향 창', products: [], recent: [], today: '2026-10-25', allowed: ['how_to'] });
   assert.ok(!withExp.includes('꼭 1곳') && withExp.includes('6평 원룸, 북향 창') && !withExp.includes('[링크: 버튼 문구]'));
   const sns = P.buildWritePrompt({ keyword: 'x', channel: ch.threads, programs: [], contentType: 'sns_short', products: [], recent: [], today: '2026-10-25', allowed: ['sns_short'] });
@@ -114,6 +118,7 @@ test('검색 노출 (1.3.0): 블로그 원고는 첫 부분 [내 경험] 1곳·(
   const base = { count: 6, mode: 'category', channel: ch.naver_blog, programs: [], channels: cat.channels, allPrograms: cat.programs, compat: cat.compat, recent: [], perf: [], today: '2026-10-25' };
   const t1 = P.buildTopicPrompt({ ...base, category: '', focus: '계절템·겨울 가전' });
   assert.ok(t1.includes('2~4주 뒤') && t1.includes('- 카테고리: 계절템·겨울 가전 (블로그 주력 주제 — 이 안에서만)') && t1.includes('1~2단어 짧은 키워드'));
+  assert.ok(t1.includes('keyword 나 title 에 주력 주제 낱말') && t1.includes('category 에는 세부 분류'), '주제 추천도 카테고리와 주력 주제를 구분');
   const t2 = P.buildTopicPrompt({ ...base, category: '디지털', focus: '계절템·겨울 가전' });
   assert.ok(t2.includes('- 카테고리: 디지털') && t2.includes('블로그 주력 주제: 계절템·겨울 가전'));
   const t3 = P.buildTopicPrompt({ ...base, category: '겨울 가전' });

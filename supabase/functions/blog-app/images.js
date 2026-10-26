@@ -776,6 +776,26 @@ export function stripMetadata(bytes) {
 
 // ───────── 출처·대체 텍스트·파일 이름 ─────────
 export const KIND_LABEL = { ai: 'AI 생성', stock: '실제 사진(Pexels)', upload: '직접 올림', card: '카드뉴스' };
+// ───────── 이미지 출처 (1.3.1) ─────────
+// 파일을 올렸다고 직접 찍은 사진으로 보지 않음. 직접 올린 사진은 사용자가 출처를 골라야 하고(source_type), 안 고르면 '출처 확인 필요'
+// AI·Pexels·카드뉴스는 만든 방법(kind)으로 출처가 정해짐. 예전에 올린 사진(source_type 빈칸)은 '출처 확인 필요'로 둠 (직접 촬영으로 소급하지 않음)
+export const SOURCE_TYPES = { own: '직접 촬영', official: '공식 제공', external: '외부 제공' };  // 직접 올린 사진에서 고를 수 있는 출처
+export const ORIGIN_LABEL = { own: '직접 촬영', ai: 'AI 생성', external: '외부 제공', official: '공식 제공', card: '카드뉴스', unknown: '출처 확인 필요' };
+export function originOf(img) {
+  if (!img) return 'unknown';
+  if (img.kind === 'ai') return 'ai';
+  if (img.kind === 'card') return 'card';
+  if (img.kind === 'stock') return 'external';
+  if (img.kind === 'upload') return SOURCE_TYPES[img.source_type] ? img.source_type : 'unknown';
+  return 'unknown';
+}
+// 화면에 보여줄 출처 이름 (게시 원고 미리보기·보관함·검수 화면이 같은 이름을 씀)
+export function originLabel(img) {
+  const o = originOf(img);
+  if (o === 'external' && img && img.kind === 'stock') return '외부 제공 (Pexels)';
+  if (img && img.kind === 'upload' && o !== 'own') return ORIGIN_LABEL[o] + ' · 직접 올림';
+  return ORIGIN_LABEL[o];
+}
 export function attributionFor(img) {
   if (!img) return '';
   if (img.provider === 'pexels') return `사진: ${img.author_name || '사진가'} (Pexels)`;
@@ -817,14 +837,14 @@ export function searchSuggestions(post, slot) {
 }
 
 // ───────── 이미지 검사 (발행 전 검사에 '확인할 것'으로 더함 — 막지는 않음) ─────────
-// post: {body, content_type}, rows: 이 원고의 자리 연결 [{slot_key, image: {kind, provider, review_status, description}}]
-// opts.search: 검색으로 들어오는 채널(블로그·사이트)이면 직접 찍은 사진·AI 표시도 알려줌
+// post: {body, content_type}, rows: 이 원고의 자리 연결 [{slot_key, image: {kind, provider, review_status, description, source_type}}]
+// opts.search: 검색으로 들어오는 채널(블로그·사이트)이면 직접 촬영 사진도 알려줌, opts.naver: 네이버 블로그면 'AI 활용' 표시도 안내
 export function imageChecks(post, rows, opts = {}) {
   const W = [], T = [];
   const slots = parseSlots(post && post.body);
   const byKey = new Map((rows || []).filter((r) => r && r.image).map((r) => [r.slot_key, r.image]));
   const list = (ns) => ns.map((n) => '사진 ' + n).join(', ');
-  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [];
+  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [], unknownSrc = [];
   for (const s of slots) {
     const img = byKey.get(s.key);
     if (!img) continue;
@@ -832,6 +852,7 @@ export function imageChecks(post, rows, opts = {}) {
     if (img.review_status === '사용 안 함') rejected.push(s.n);
     if (img.kind === 'ai') { ai.push(s.n); if (isOwnPhotoSlot(s.text)) aiOwn.push(s.n); else if (slotRisk(s.text).real) aiReal.push(s.n); }
     if (img.description && descriptionMismatch(s.text, img.description)) mismatch.push(s.n);
+    if (originOf(img) === 'unknown') unknownSrc.push(s.n);
   }
   if (unrev.length) W.push({ code: 'image_unreviewed', msg: `아직 검수하지 않은 이미지가 ${unrev.length}곳 있어 (${list(unrev)}).`, fix: "이미지 미리보기에서 확인하고 '사용 가능'으로 바꿔줘." });
   if (rejected.length) W.push({ code: 'image_rejected', msg: `'사용 안 함'으로 표시한 이미지가 연결돼 있어 (${list(rejected)}).`, fix: '다른 이미지로 바꾸거나 연결을 빼줘.' });
@@ -841,12 +862,14 @@ export function imageChecks(post, rows, opts = {}) {
     W.push({ code: 'ai_in_product_post', msg: `상품을 다루는 글에 AI 이미지가 ${ai.length}곳 있어 (${list(ai)}).`, fix: "실제 상품 사진처럼 보이지 않게 'AI로 만든 예시 이미지' 캡션을 지우지 마. 상품 모습은 실제 사진으로." });
   }
   if (mismatch.length) W.push({ code: 'image_mismatch', msg: `사진 자리 설명과 이미지 설명이 많이 달라 (${list(mismatch)}).`, fix: '맞는 이미지인지 확인해줘.' });
+  if (unknownSrc.length) W.push({ code: 'image_source_unknown', msg: `출처를 고르지 않은 사진이 ${unknownSrc.length}곳 있어 (${list(unknownSrc)}).`, fix: "이미지 미리보기에서 '직접 촬영·공식 제공·외부 제공' 중에 골라줘." });
   if (opts.search) {
     const linkedImgs = slots.map((s) => byKey.get(s.key)).filter(Boolean);
-    const own = linkedImgs.filter((i) => i.kind === 'upload').length;
-    if (linkedImgs.length && !own) W.push({ code: 'no_own_photo', msg: '직접 찍은 사진이 하나도 없어. AI 이미지·남의 사진만 있으면 다른 글과 같아 보이기 쉬워.', fix: "사진 자리 하나는 휴대폰으로 직접 찍어서 '파일 올리기'로 넣어줘 (내 방·내 물건·매장에서 본 것)." });
-    if (ai.length) T.push({ code: 'ai_label', msg: `AI 이미지가 ${ai.length}곳 있어. 네이버 글쓰기에서 'AI 활용' 표시를 켜두면 안전해 (지금은 자율).` });
+    // 직접 촬영으로 확인한 사진만 셈 (파일을 올렸다는 것만으로는 안 셈)
+    const own = linkedImgs.filter((i) => originOf(i) === 'own').length;
+    if (linkedImgs.length && !own) W.push({ code: 'no_own_photo', msg: '직접 촬영으로 확인한 사진이 하나도 없어 (막지는 않아). AI 이미지·남의 사진만 있으면 다른 글과 같아 보이기 쉬워.', fix: "사진 자리 하나는 휴대폰으로 직접 찍어서 '파일 올리기'로 넣고 출처를 '직접 촬영'으로 골라줘." });
   }
+  if (opts.naver && ai.length) T.push({ code: 'ai_label', msg: `AI 이미지가 ${ai.length}곳 있어. 네이버 글쓰기에서 'AI 활용' 표시를 켜두면 안전해 (2026년 7월 기준 블로그는 자율).` });
   if (slots.length) {
     const linked = slots.filter((s) => byKey.has(s.key)).length;
     T.push({ code: 'image_progress', msg: `사진 자리 ${slots.length}곳 중 ${linked}곳에 이미지가 연결돼 있어.`, fix: linked < slots.length ? "원고 아래 '이미지'에서 만들거나 찾거나 올려서 채워줘." : '' });

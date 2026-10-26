@@ -419,3 +419,30 @@ describe('012를 다시 돌리거나 예전 초안 위에 돌려도 같은 결�
     await assert.rejects(db.query(`insert into public.post_images (kind, provider) values ('ai', 'midjourney')`), /provider_check/);
   });
 });
+
+describe('015 이미지 출처·주력 주제 낱말 (1.3.1) — 열만 더하고 예전 데이터는 그대로', () => {
+  const SQL015 = readFileSync(join(MIGRATIONS_DIR, '015_accuracy_1_3_1.sql'), 'utf8');
+  test('예전에 올린 사진은 출처 확인 필요(빈칸)로 남고 직접 촬영으로 바뀌지 않음, 다시 돌려도 같음', async () => {
+    const db = await freshDb({ upTo: '014' });
+    const up = await save(db, { description: '예전에 올린 사진', rights_confirmed: true, sha256: 'a'.repeat(64) });
+    const ai = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/x.jpg', sha256: 'b'.repeat(64) });
+    const before = await all(db, `select id, kind, description, rights_confirmed, review_status, created_at from public.post_images order by created_at, id`);
+    await db.exec(SQL015);
+    await db.exec(SQL015); // 두 번 돌려도 오류 없음
+    assert.deepEqual(await all(db, `select id, kind, description, rights_confirmed, review_status, created_at from public.post_images order by created_at, id`), before, '기존 행은 그대로');
+    assert.deepEqual((await all(db, `select source_type from public.post_images order by created_at, id`)).map((r) => r.source_type), ['', ''], '예전 사진은 모두 출처 확인 필요');
+    assert.equal(await val(db, `select count(*)::int from pg_constraint where conname = 'post_images_source_type_check'`), 1);
+    await db.query(`update public.post_images set source_type = 'own' where id = $1`, [up.image.id]);
+    await assert.rejects(db.query(`update public.post_images set source_type = 'mine' where id = $1`, [up.image.id]), /source_type_check/);
+    assert.equal(ai.image.kind, 'ai');
+  });
+  test('설정에 주력 주제 낱말(300자까지) — 자동 작가가 받는 설정에도 들어감, 기존 설정은 그대로', async () => {
+    const db = await freshDb({ upTo: '014' });
+    await db.query(`update public.settings set focus_topic = '계절템·겨울 가전', per_day = 2 where id = 1`);
+    await db.exec(SQL015);
+    assert.deepEqual(await one(db, `select focus_topic, focus_terms, per_day from public.settings where id = 1`), { focus_topic: '계절템·겨울 가전', focus_terms: '', per_day: 2 });
+    await db.query(`update public.settings set focus_terms = '전기요, 온수매트' where id = 1`);
+    assert.equal((await val(db, `select public.writer_context()`)).settings.focus_terms, '전기요, 온수매트');
+    await assert.rejects(db.query(`update public.settings set focus_terms = repeat('가', 301) where id = 1`), /settings_focus_terms_len/);
+  });
+});

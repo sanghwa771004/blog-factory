@@ -295,22 +295,50 @@ describe('검색 노출 도우미 (1.3.0)', () => {
     assert.deepEqual(L.seasonAhead('2026-12-20').months, [1], '해가 바뀌어도');
     for (let m = 1; m <= 12; m++) assert.ok(L.SEASON_CALENDAR[m].length >= 3, m + '월');
   });
-  test('주력 주제 비율: 최근 n개 중 (지운 글·실패한 글 빼고)', () => {
+  test('주력 주제 비율: 게시를 마친 글만 (초안·지운 글·실패한 글 빼고), 키워드·제목으로 판정', () => {
+    const F = '계절템·겨울 가전';
     const posts = [
-      { category: '겨울 가전', created_at: '2026-10-20', stage: 'review' },
-      { category: '겨울 가전', created_at: '2026-10-19', stage: 'published' },
-      { category: '디지털', created_at: '2026-10-18', stage: 'ready' },
-      { category: '디지털', created_at: '2026-10-17', stage: 'failed' },
-      { category: '디지털', created_at: '2026-10-16', stage: 'review', deleted_at: '2026-10-17' },
-      { category: '디지털', created_at: '2026-01-01', stage: 'published' },
+      { keyword: '겨울 전기요 고르는 법', created_at: '2026-10-20', stage: 'review' },                       // 초안 — 안 셈
+      { keyword: '겨울 온수매트 소음', created_at: '2026-10-19', stage: 'ready', publish_date: '2026-10-21' },  // 발행 준비 — 안 셈
+      { keyword: '겨울 가습기 세척', created_at: '2026-10-18', stage: 'published', published_on: '2026-10-19' },
+      { keyword: '노트북 배터리', created_at: '2026-10-17', stage: 'collecting', published_on: '2026-10-18' },
+      { keyword: '겨울 히터 전기세', created_at: '2026-10-16', stage: 'failed' },
+      { keyword: '겨울 결로', created_at: '2026-10-15', stage: 'published', deleted_at: '2026-10-17' },
+      { keyword: '스마트폰 케이스', category: F, created_at: '2026-01-01', stage: 'analyzed', published_on: '2026-01-02' }, // 카테고리만 같음 — 주제 글로 안 셈
     ];
-    assert.deepEqual(L.focusShare(posts, '겨울 가전'), { total: 4, hit: 2, ratio: 0.5 });
-    assert.deepEqual(L.focusShare(posts, '겨울 가전', 3), { total: 3, hit: 2, ratio: 2 / 3 }, '최근 3개만');
-    assert.deepEqual(L.focusShare([], '겨울 가전'), { total: 0, hit: 0, ratio: null });
-    const m = L.focusShare(posts, '계절템·겨울 가전', 30, (c, f) => f.includes(c));
-    assert.equal(m.hit, 2, '맞는지 보는 방법을 넘길 수 있음');
+    const r = L.focusShare(posts, F);
+    assert.deepEqual([r.total, r.hit, r.unclear, r.off], [3, 1, 0, 2], '게시한 3개 중 1개 (초안 2개·실패·지운 글은 안 셈)');
+    assert.equal(r.ratio, 1 / 3);
+    assert.equal(r.goal, 0.7);
+    assert.deepEqual(L.focusShare(posts, F, 1), { total: 1, hit: 1, unclear: 0, off: 0, ratio: 1, goal: 0.7 }, '최근 1개만 (게시일 순)');
+    const m = L.focusShare(posts, F, 30, (p) => /배터리/.test(p.keyword));
+    assert.equal(m.hit, 1, '판정 방법을 넘길 수 있음 (true/false 도 됨)');
+    assert.equal(L.focusShare(posts, F, 30, null, { terms: '스마트폰' }).hit, 2, '주력 주제 낱말을 더하면 키워드로 확인');
+    assert.equal(L.focusShare(posts, F, 30, null, { channels: ['tistory'] }).total, 0, '채널을 나눠서 셀 수 있음 (채널 없는 글은 안 셈)');
   });
-  test('하루 2편 이상 잡힌 날 (지난 7일~다음 7일, 발행 준비·예약·게시만)', () => {
+  test('회귀: 미발행 원고만 있으면 비율에 안 들어가고 데이터 없음(null) — 0%가 아님', () => {
+    const drafts = [
+      { keyword: '겨울 전기요', stage: 'review', created_at: '2026-10-20' },
+      { keyword: '겨울 히터', stage: 'ready', publish_date: '2026-10-21', created_at: '2026-10-19' },
+      { keyword: '겨울 가습기', stage: 'scheduled', publish_date: '2026-10-22', created_at: '2026-10-18' },
+      { keyword: '겨울 결로', stage: 'queued', created_at: '2026-10-17' },
+    ];
+    const r = L.focusShare(drafts, '겨울 가전');
+    assert.equal(r.total, 0);
+    assert.equal(r.ratio, null, '게시한 글이 없으면 데이터 없음');
+    assert.deepEqual(L.focusShare([], '겨울 가전').ratio, null);
+  });
+  test('최근 순서: 게시일 → 없으면 예정 발행일 → 그것도 없으면 만든 날', () => {
+    assert.equal(L.postedOn({ published_on: '2026-10-20', publish_date: '2026-10-01', created_at: '2026-09-01T00:00:00Z' }), '2026-10-20');
+    assert.equal(L.postedOn({ publish_date: '2026-10-01', created_at: '2026-09-01T00:00:00Z' }), '2026-10-01');
+    assert.equal(L.postedOn({ created_at: '2026-09-01T00:00:00Z' }), '2026-09-01');
+    const posts = [
+      { keyword: '겨울 a', stage: 'published', created_at: '2026-10-25T00:00:00Z' },                       // 날짜는 만든 날뿐
+      { keyword: 'b', stage: 'published', published_on: '2026-10-24', created_at: '2026-09-01T00:00:00Z' },
+    ];
+    assert.equal(L.focusShare(posts, '겨울', 1).hit, 1, '만든 날(10/25)이 게시일(10/24)보다 최근');
+  });
+  test('내 하루 발행 설정보다 많이 잡힌 날 (지난 7일~다음 7일, 발행 준비·예약·게시만)', () => {
     const t = '2026-10-25';
     const posts = [
       { stage: 'ready', publish_date: '2026-10-27' },
@@ -323,7 +351,27 @@ describe('검색 노출 도우미 (1.3.0)', () => {
       { stage: 'scheduled', publish_date: '2026-11-10' },
       { stage: 'ready', publish_date: '2026-10-26' },
     ];
-    assert.deepEqual(L.crowdedDays(posts, t), [{ day: '2026-10-22', n: 2 }, { day: '2026-10-27', n: 2 }]);
+    assert.deepEqual(L.crowdedDays(posts, t), [{ day: '2026-10-22', n: 2 }, { day: '2026-10-27', n: 2 }], '기본(하루 1편)');
+    assert.deepEqual(L.crowdedDays(posts, t, 2), [], '하루 2편을 고른 사람에게 2편인 날은 몰린 날이 아님');
+    assert.deepEqual(L.crowdedDays([...posts, { stage: 'ready', publish_date: '2026-10-27' }], t, 2), [{ day: '2026-10-27', n: 3 }]);
     assert.deepEqual(L.crowdedDays([], t), []);
+  });
+  test('자동 작가 계획: 하루 발행 설정 그대로 목표를 잡고, 잡힌 원고와 새로 쓸 예정을 나눠서 셈', () => {
+    const t = '2026-10-26';
+    const posts = [
+      { stage: 'review', publish_date: '2026-10-27' }, { stage: 'ready', publish_date: '2026-10-28' },
+      { stage: 'queued', publish_date: '2026-10-29' },        // 아직 안 쓴 요청 — 자동 작가 기준(upcoming)과 같이 안 셈
+      { stage: 'failed', publish_date: '2026-10-30' }, { stage: 'review', publish_date: '2026-10-31', deleted_at: '2026-10-26' },
+      { stage: 'review', publish_date: '2026-10-26' },        // 오늘 — 내일부터 셈
+      { stage: 'review', publish_date: '2026-11-02' }, { stage: 'review', publish_date: '2026-11-03' }, // 7일 뒤까지만
+    ];
+    const one = L.autoPlan({ posts, settings: { per_day: 1, auto_topics: '겨울 가전' }, today: t });
+    assert.deepEqual([one.perDay, one.goal, one.scheduled, one.gap, one.autoNext, one.differs], [1, 7, 3, 4, 4, false]);
+    const two = L.autoPlan({ posts, settings: { per_day: 2, focus_topic: '겨울 가전' }, today: t, pendingWrites: 3 });
+    assert.deepEqual([two.perDay, two.goal, two.gap, two.autoNext, two.differs, two.recommended], [2, 14, 11, 3, true, 1], '고른 값(2편) 그대로 · 요청 3편 먼저라 자동은 최대 3편');
+    assert.equal(L.autoPlan({ posts, settings: { per_day: 3, auto_topics: 'x', auto_enabled: false }, today: t }).autoNext, 0, '자동 채우기 꺼짐');
+    assert.equal(L.autoPlan({ posts, settings: { per_day: 1 }, today: t }).enabled, false, '주제가 없으면 자동 글 없음');
+    assert.equal(L.autoPlan({ posts: [], settings: {}, today: t }).perDay, 1, '기본은 하루 1편');
+    assert.deepEqual(L.AUTO_RULES, { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 });
   });
 });

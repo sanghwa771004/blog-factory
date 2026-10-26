@@ -1,12 +1,12 @@
-// 글공장 앱 1.3.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.3.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
-  STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE, focusMatch,
-} from './checks.js?v=1.3.0';
-import * as L from './lib.js?v=1.3.0';
-import * as IMG from './images.js?v=1.3.0';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.3.0';
+  STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
+} from './checks.js?v=1.3.1';
+import * as L from './lib.js?v=1.3.1';
+import * as IMG from './images.js?v=1.3.1';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.3.1';
 
-const APP_VER = '1.3.0';
+const APP_VER = '1.3.1';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -224,12 +224,13 @@ const progName = (id) => (M.prog[id] && M.prog[id].name) || id;
 const chName = (id) => (M.ch[id] && M.ch[id].name) || id || '채널 없음';
 function checksFor(p, withOthers) {
   const r = checkPost(p, {
-    programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(), focus: (S.settings || {}).focus_topic || '',
+    programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(),
+    focus: (S.settings || {}).focus_topic || '', focusTerms: (S.settings || {}).focus_terms || '',
     others: withOthers ? S.posts.filter((o) => o.id !== p.id && o.body).slice(0, 80).map((o) => ({ id: o.id, title: titleOf(o), body: o.body })) : [],
   });
   // 이미지 검사(검수 전·실제 사진이 필요한 자리의 AI 이미지 등)는 '확인할 것'으로만 더함 — 발행을 막지 않음
   const chKind = (M.ch[p.channel_id] || {}).kind;
-  const ic = IMG.imageChecks(p, (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images })), { search: chKind === 'blog' || chKind === 'site' });
+  const ic = IMG.imageChecks(p, (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images })), { search: chKind === 'blog' || chKind === 'site', naver: p.channel_id === 'naver_blog' });
   r.warnings.push(...ic.warnings);
   if (ic.tips.length) r.tips = r.tips.filter((t) => t.code !== 'image_placeholders').concat(ic.tips);
   return r;
@@ -422,8 +423,11 @@ function viewHome() {
   // 자동 작가
   const pend = pendingJobs();
   const lr = S.runs[0];
+  const plan = L.autoPlan({ posts: S.posts, settings: S.settings || {}, today: t, pendingWrites: pend.filter((j) => j.kind === 'write').length });
   const writer = panel('자동 작가',
     h('p', { class: 'hint' }, `다음 실행 ${nextRunText()} · 기다리는 작업 ${pend.length}개 (원고 ${pend.filter((j) => j.kind === 'write').length} · 주제 ${pend.filter((j) => j.kind === 'topics').length} · 변환 ${pend.filter((j) => j.kind === 'reformat').length})`),
+    h('p', { class: 'hint' }, `앞으로 7일(내일부터) 발행일이 잡힌 원고 ${plan.scheduled}편 / 목표 ${plan.goal}편 (하루 ${plan.perDay}편 × 7일)`),
+    h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편). 쓴 원고는 '검수 필요'로 들어와.` : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.'),
     lr ? h('p', { class: lr.status === '성공' ? 'hint' : 'notice' }, `마지막 실행: ${L.fmtTime(lr.ran_at)} · ${lr.status} · ${lr.note || `${lr.written}개 저장`}${lr.error ? ' · ' + lr.error : ''}`) : h('p', { class: 'hint' }, '아직 실행 기록이 없어.'),
     h('p', { class: 'hint' }, '하루 세 번 네 Claude 구독으로 실행돼. 지금 바로 쓰고 싶으면 Claude 안 글공장에서 써도 돼.'),
     h('div', { class: 'go' }, h('a', { class: 'btn sm ghost', href: ARTIFACT_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Claude 안 글공장 열기 ↗'), btn('작업 기록', 'sm ghost', () => go('settings/jobs'))));
@@ -455,31 +459,50 @@ function viewHome() {
   return box;
 }
 // 검색 노출 도우미: 주력 주제 비율·하루 발행·사람 손(내 경험·직접 찍은 사진)·다가올 시즌·쇼핑 커넥트
+// 검색 노출 점검 — 앱의 권장 기준 · 내 기록 · 실측 데이터 없음을 줄마다 구분해서 보여줌 (검색 순위 보장 아님)
+const SEO_TAG = { app: '앱 권장 기준', mine: '내 기록', none: '실측 데이터 없음' };
 function seoPanel(t, checked) {
   const st = S.settings || {};
   const focus = String(st.focus_topic || '').trim();
-  const box = panel('검색 노출 도우미');
+  const terms = String(st.focus_terms || '');
+  const box = panel('검색 노출 점검');
+  box.append(h('p', { class: 'hint' }, '검색 순위를 보장하지 않아. 네이버가 순위 공식을 공개하지 않아서, 네이버가 밝힌 방향에 맞춰 앱이 정한 권장 기준으로 네 글을 점검해.'));
   const rows = h('ul', { class: 'seo' });
-  const li = (ok, text, extra) => rows.append(h('li', { class: ok ? 'ok' : 'warn' }, h('span', null, ok ? '✓' : '!'), h('span', null, text), extra || null));
-  if (focus) {
-    const fs = L.focusShare(S.posts, focus, 30, focusMatch);
-    li(fs.ratio == null || fs.ratio >= 0.7, fs.total ? `주력 주제(${focus}) 글: 최근 ${fs.total}개 중 ${fs.hit}개 (${Math.round(fs.ratio * 100)}%)` : `주력 주제: ${focus} — 아직 글이 없어`,
-      fs.ratio != null && fs.ratio < 0.7 ? h('small', null, ' · 70% 넘게 이 주제로 쌓아봐 (앱이 정한 목표)') : null);
-  } else li(false, '주력 주제가 아직 없어. 한 주제로 꾸준히 쓰면 그 주제 검색에서 더 잘 보여.', btn('정하기', 'sm ghost', () => go('settings/auto')));
-  const crowd = L.crowdedDays(S.posts, t);
-  li(!crowd.length, crowd.length ? `하루에 2편 이상 잡힌 날: ${crowd.map((d) => `${L.fmtDate(d.day)} ${d.n}편`).join(', ')} — 하루 1편으로 나눠줘` : '하루 1편 이하로 올리고 있어');
-  const noMe = checked.filter((x) => x.r.warnings.some((w) => w.code === 'no_own_experience')).length;
-  const noPhoto = checked.filter((x) => x.r.warnings.some((w) => w.code === 'no_own_photo')).length;
-  li(!noMe && !noPhoto, noMe || noPhoto ? `검수·발행 대기 글 중 내 경험이 없는 글 ${noMe}개, 직접 찍은 사진이 없는 글 ${noPhoto}개` : '검수·발행 대기 글에 내 경험·직접 찍은 사진이 다 들어가 있어',
-    noMe || noPhoto ? btn('보기', 'sm ghost', () => go('content/f/you')) : null);
+  const li = (state, text, tags, extra) => rows.append(h('li', { class: state },
+    h('span', null, state === 'ok' ? '✓' : state === 'warn' ? '!' : '·'), h('span', null, text),
+    h('span', { class: 'seo-tags' }, (tags || []).map((k) => h('small', { class: 'seo-tag t-' + k }, SEO_TAG[k]))), extra || null));
+  // 주력 주제 비율: 게시를 마친 글만 (초안은 안 셈). 네이버 블로그와 다른 블로그·사이트는 따로
+  if (!focus) li('warn', '주력 주제가 아직 없어. 한 주제로 꾸준히 쓰면 그 주제 검색에서 더 잘 보일 수 있어.', ['app'], btn('정하기', 'sm ghost', () => go('settings/auto')));
+  else {
+    const groups = [['네이버 블로그', ['naver_blog']], ['다른 블로그·사이트', S.channels.filter((c) => (c.kind === 'blog' || c.kind === 'site') && c.id !== 'naver_blog').map((c) => c.id)]];
+    let shown = 0;
+    for (const [name, chs] of groups) {
+      const fs = L.focusShare(S.posts, focus, 30, null, { terms, channels: chs });
+      if (!fs.total && chs[0] !== 'naver_blog') continue;
+      shown++;
+      if (!fs.total) li('none', `${name}: 주력 주제(${focus}) 비율 — 데이터 없음 (게시한 글이 아직 없어. 초안은 안 셈)`, ['mine']);
+      else li(fs.ratio >= fs.goal ? 'ok' : 'warn', `${name} 최근 게시한 글 ${fs.total}개 중 주력 주제(${focus}) 글 ${fs.hit}개 (${Math.round(fs.ratio * 100)}%)${fs.unclear ? ` · 판단 어려움 ${fs.unclear}개` : ''} — 목표 ${Math.round(fs.goal * 100)}% 이상`, ['mine', 'app']);
+    }
+    if (!shown) li('none', '주력 주제 비율 — 데이터 없음', ['mine']);
+  }
+  // 하루 발행 수: 네가 고른 설정을 그대로 두고, 권장 기준과 다르면 알려만 줌
+  const plan = L.autoPlan({ posts: S.posts, settings: st, today: t });
+  li(plan.differs ? 'tip' : 'ok', plan.differs ? `하루 발행 설정 ${plan.perDay}편 (네가 고른 값 그대로 둬) — 앱 권장은 하루 ${plan.recommended}편이야` : `하루 발행 설정 ${plan.perDay}편 (앱 권장 기준과 같아)`, ['app'], plan.differs ? btn('설정 보기', 'sm ghost', () => go('settings/auto')) : null);
+  const crowd = L.crowdedDays(S.posts, t, plan.perDay);
+  li(crowd.length ? 'warn' : 'ok', crowd.length ? `설정한 하루 ${plan.perDay}편보다 많이 잡힌 날: ${crowd.map((d) => `${L.fmtDate(d.day)} ${d.n}편`).join(', ')}` : `설정한 하루 ${plan.perDay}편을 넘는 날 없음 (지난 7일~다음 7일)`, ['mine']);
+  const count = (code) => checked.filter((x) => x.r.warnings.some((w) => w.code === code)).length;
+  const noMe = count('no_own_experience'), noPhoto = count('no_own_photo'), unkSrc = count('image_source_unknown');
+  const todo = [noMe && `내 경험이 없는 글 ${noMe}개`, noPhoto && `직접 촬영으로 확인한 사진이 없는 글 ${noPhoto}개`, unkSrc && `출처를 안 고른 사진이 있는 글 ${unkSrc}개`].filter(Boolean);
+  li(todo.length ? 'warn' : 'ok', todo.length ? `검수·발행 대기 글 중 ${todo.join(', ')}` : '검수·발행 대기 글에 내 경험·직접 촬영 사진·사진 출처가 다 들어가 있어', ['mine'],
+    todo.length ? btn('보기', 'sm ghost', () => go('content/f/you')) : null);
   const sa = L.seasonAhead(t);
   const seasonHint = `${sa.months.join('·')}월 시즌: ${sa.themes.join(', ')}`;
-  rows.append(h('li', { class: 'tip' }, h('span', null, '📅'), h('span', null, `2~4주 뒤 검색이 늘 주제 — ${sa.themes.join(', ')}`),
-    btn('이 시즌으로 주제 추천', 'sm ghost', (ev) => requestTopics(ev.currentTarget, { mode: 'category', category: focus || String(st.auto_topics || '').split(',')[0].trim() || '생활', count: 6, hint: seasonHint + ' (시즌 2~4주 전에 미리 쓸 주제)' }))));
+  li('tip', `2~4주 뒤 많이 찾을 만한 주제 (앱에 적어 둔 달력) — ${sa.themes.join(', ')}`, ['none'],
+    btn('이 시즌으로 주제 추천', 'sm ghost', (ev) => requestTopics(ev.currentTarget, { mode: 'category', category: focus || String(st.auto_topics || '').split(',')[0].trim() || '생활', count: 6, hint: seasonHint + ' (시즌 2~4주 전에 미리 쓸 주제)' })));
   const sc = M.prog && M.prog.naver_shopping_connect;
-  if (sc && sc.my_status === '미가입') rows.append(h('li', { class: 'tip' }, h('span', null, '💡'), h('span', null, '네이버 쇼핑 커넥트(네이버가 블로그용으로 만든 공식 제휴)도 같이 써볼 만해. 가입하면 설정 > 수익 모델에서 상태와 공식 고지문을 넣어줘.'),
-    h('a', { class: 'btn sm ghost', href: 'https://navercorp.com/media/pressReleasesDetail?seq=33116', target: '_blank', rel: 'noopener noreferrer' }, '소개 ↗')));
-  box.append(rows, h('p', { class: 'hint' }, '검색 순위를 보장하는 규칙은 없어. 네이버가 밝힌 방향(자동으로 찍어낸 글·베낀 글을 걸러내고 믿을 만한 글을 올림)에 맞춰 앱이 정한 기준이야. 시즌 달력도 실제 검색량 숫자가 아니라 앱이 정해 둔 거야.'));
+  if (sc && sc.my_status === '미가입') li('tip', '네이버 쇼핑 커넥트(네이버 블로그용 공식 제휴)도 같이 써볼 만해. 가입하면 설정 > 수익 모델에서 상태와 공식 고지문을 넣어줘.', [],
+    h('a', { class: 'btn sm ghost', href: 'https://navercorp.com/media/pressReleasesDetail?seq=33116', target: '_blank', rel: 'noopener noreferrer' }, '소개 ↗'));
+  box.append(rows, h('p', { class: 'hint' }, "'앱 권장 기준'은 앱이 정한 숫자, '내 기록'은 네가 앱에 남긴 글·게시 기록, '실측 데이터 없음'은 검색량·경쟁도를 조회하지 않은 참고 정보야."));
   return box;
 }
 function kpi(label, value, sub) {
@@ -1314,9 +1337,9 @@ function topicCard(t, s) {
     h('span', { class: 'bar' }, h('i', { style: `width:${pt.score == null ? 0 : pt.score * 20}%` })),
     h('small', { class: 'muted', style: 'grid-column:1/-1' }, [pt.basis, pt.source, pt.confidence && '신뢰도 ' + pt.confidence].filter(Boolean).join(' · ') || '근거 없음'))));
   return h('section', { class: 'panel' },
-    h('div', { class: 'split' }, h('b', null, t.title), h('span', { class: 'score' }, s.total == null ? '–' : s.total, h('small', null, ' /100'))),
+    h('div', { class: 'split' }, h('b', null, t.title), h('span', { class: 'score' }, s.total == null ? '–' : s.total, h('small', null, s.measured ? ' /100' : ' /100 · AI 추정'))),
     h('p', { class: 'hint' }, [t.keyword && '키워드 ' + t.keyword, t.category].filter(Boolean).join(' · ')),
-    h('p', { class: 'hint' }, `신뢰도: ${s.confidence}`),
+    h('p', { class: 'hint' }, `신뢰도: ${s.confidence}${s.measured ? '' : ' · 검색량·경쟁도는 조회하지 않은 추정이야'}`),
     rec ? h('p', { class: 'hint' }, '추천: ' + rec) : null,
     t.basis ? h('p', { class: 'small' }, t.basis) : null,
     (() => {
@@ -1573,7 +1596,11 @@ function secAuto() {
   const auto = h('input', { type: 'checkbox', checked: s.auto_enabled !== false, onchange: markDirty });
   const topics = h('textarea', { value: s.auto_topics || '', style: 'min-height:64px', oninput: markDirty });
   const focus = h('input', { type: 'text', value: s.focus_topic || '', maxlength: '60', list: 'focuslist', placeholder: '예: 계절템·겨울 가전', oninput: markDirty });
-  const per = h('select', { value: String(s.per_day || 1), onchange: markDirty }, opt('1', '하루 1개'), opt('2', '하루 2개'), opt('3', '하루 3개'));
+  const fterms = h('input', { type: 'text', value: s.focus_terms || '', maxlength: '300', placeholder: '예: 전기요, 온수매트, 히터, 가습기, 결로', oninput: markDirty });
+  const perHint = h('span', { class: 'hint' });
+  const drawPer = () => { const n = Number(per.value) || 1; perHint.textContent = n === 1 ? '앱 권장 기준(하루 1편)이야. 사람이 손본 글을 꾸준히 올리는 쪽을 권해.' : `하루 ${n}편으로 골랐어 — 앱 권장(하루 1편)보다 많지만 네가 고른 값이라 그대로 둬. 자동 작가는 7일치 ${n * 7}편을 목표로 채워.`; };
+  const per = h('select', { value: String(s.per_day || 1), onchange: () => { markDirty(); drawPer(); } }, opt('1', '하루 1개'), opt('2', '하루 2개'), opt('3', '하루 3개'));
+  drawPer();
   const len = h('select', { value: String(s.len || '2500'), onchange: markDirty }, opt('1500', '보통 (1,500자)'), opt('2500', '길게 (2,500자)'), opt('3500', '아주 길게 (3,500자)'));
   const ch = h('select', { value: s.default_channel || 'naver_blog' }, S.channels.map((c) => opt(c.id, c.name)));
   const pp = h('div');
@@ -1583,15 +1610,16 @@ function secAuto() {
   return [
     h('label', { class: 'chk' }, auto, '발행표가 비면 자동 주제로 채우기'),
     field('자동 주제 카테고리 (쉼표로 구분)', topics),
-    field('주력 주제 (블로그의 큰 주제 하나)', focus, '정해 두면 자동 작가가 이 주제 안에서만 자동 글을 쓰고, 이 주제 밖의 글은 검사에서 알려줘. 한 주제로 꾸준히 쌓인 블로그가 그 주제 검색에서 더 잘 보여. 비우면 안 씀.'),
+    field('주력 주제 (블로그의 큰 주제 하나)', focus, '정해 두면 자동 작가가 이 주제 안에서만 자동 글을 쓰고, 검사에서 글마다 주제와 맞는지 근거를 보여줘. 비우면 안 씀.'),
+    field('주력 주제 낱말 (선택, 쉼표로)', fterms, "글의 키워드나 제목에 이 낱말이나 주력 주제의 낱말이 있으면 주제 글로 봐. 카테고리만 같으면 주제 글로 보지 않아. 본문에만 있으면 '판단 어려움'으로 알려줘."),
     h('datalist', { id: 'focuslist' }, String(s.auto_topics || '').split(',').map((x) => x.trim()).filter(Boolean).map((c) => opt(c, c))),
-    h('div', { class: 'row' }, field('하루 발행 개수', per, '검색 노출에는 하루 1편, 사람이 손본 글을 권해. 네이버는 AI로 찍어낸 낮은 품질 글·베낀 글을 걸러낸다고 밝혔어 (2025년 2월 공지).'), field('기본 길이', len)),
+    h('div', { class: 'row' }, field('하루 발행 개수', per), field('기본 길이', len)), perHint,
     field('기본 채널', ch), h('p', { class: 'legend' }, '기본 수익 모델'), pp,
     btn('저장', 'sm', async (ev) => {
-      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), per_day: Number(per.value), len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
+      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), focus_terms: fterms.value.trim(), per_day: Number(per.value), len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
       if (j) { dirty = false; await load(); }
     }),
-    h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워 (주력 주제를 정하면 그 안에서만).`),
+    h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워 (주력 주제를 정하면 그 안에서만). 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어와.`),
   ];
 }
 function secJobs() {

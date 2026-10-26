@@ -215,7 +215,7 @@ class Mock:
              'prompt': '', 'user_prompt': '', 'style': '', 'purpose': 'blog_body', 'ratio': '', 'description': '', 'alt_text': '', 'storage_path': f'{kind}/2026/10/{self.seq}.jpg',
              'mime': 'image/png' if kind == 'card' else 'image/jpeg', 'bytes': 15000, 'width': w, 'height': h, 'sha256': '', 'source_url': '', 'source_id': '',
              'author_name': '', 'author_url': '', 'license': '', 'attribution_text': '', 'rights_confirmed': kind != 'ai', 'review_status': '검수 전', 'review_note': '',
-             'generation_id': None, 'downloaded_at': None, 'created_at': NOW, 'updated_at': NOW, 'deleted_at': None, 'origin_post_id': post_id,
+             'generation_id': None, 'downloaded_at': None, 'created_at': NOW, 'updated_at': NOW, 'deleted_at': None, 'origin_post_id': post_id, 'source_type': '',
              'origin_slot_key': slot_key or '', 'origin_slot_index': None, 'url': url, **extra}
         self.images.insert(0, i)
         return i
@@ -315,7 +315,10 @@ class Mock:
         if path == 'stats':
             return 200, {'stats': {**self.stats(query.get('from', [None])[0], query.get('to', [None])[0]), 'image_costs': self.image_costs()}}
         if path == 'settings' and method == 'POST' and 'focus_topic' in body:
-            self.settings['focus_topic'] = body['focus_topic']  # 주력 주제만 저장해 둠 (다른 설정은 다른 시험에 영향 주지 않게)
+            # 자동 글쓰기 칸만 저장해 둠 (이미지 설정 같은 다른 설정은 다른 시험에 영향 주지 않게 — 시험 끝에 되돌림)
+            for k in ('focus_topic', 'focus_terms', 'per_day'):
+                if k in body:
+                    self.settings[k] = body[k]
         r = self.handle_images(method, path, query, headers, body)
         if r is not None:
             return r
@@ -471,6 +474,8 @@ class Mock:
                 return 400, {'error': 'rights_required'}
             i = self.add_image('card' if meta.get('kind') == 'card' else 'upload', meta.get('post_id'), meta.get('slot_key'), '4x5' if meta.get('kind') == 'card' else '4x3',
                                description=meta.get('description', ''), bytes=body.get('size', 1))
+            if i['kind'] == 'upload' and meta.get('source_type') in ('own', 'official', 'external'):
+                i['source_type'] = meta['source_type']  # 서버처럼: 고른 출처만 저장 (안 고르면 빈칸 = 출처 확인 필요)
             slot = self.link(meta['post_id'], meta['slot_key'], i['id'], meta.get('purpose')) if meta.get('link') else None
             return 200, {'image': self.with_uses(i), 'slot': slot, 'reused': False}
         if path == 'images' and method == 'GET':
@@ -495,6 +500,10 @@ class Mock:
                          'posts': {'titles': next(p for p in self.posts if p['id'] == r['post_id'])['titles'], 'keyword': '', 'deleted_at': None}} for r in self.slots if r['image_id'] == i['id']]
                 return 200, {'image': self.with_uses(i), 'used_in': used, 'decks': [], 'generation': next((g for g in self.gens if g['id'] == i['generation_id']), None)}
             if method == 'POST':
+                if 'source_type' in body:
+                    if i['kind'] != 'upload' or body['source_type'] not in ('', 'own', 'official', 'external'):
+                        return 400, {'error': 'bad_field', 'field': 'source_type'}
+                    i['source_type'] = body['source_type']
                 for k in ('review_status', 'alt_text', 'description', 'review_note'):
                     if k in body:
                         i[k] = body[k]
@@ -910,9 +919,22 @@ def main():
             up = [c for c in mock.calls if c['path'] == 'images/upload'][-1]['body']
             assert up['mime'] == 'image/jpeg' and up['meta']['rights'] is True and up['meta']['link'] is True, up
             assert up['file_head'].startswith('ffd8ff'), '진짜 JPEG을 보냄'
+            assert up['meta']['source_type'] == '', '출처를 안 고르면 빈칸 (직접 촬영으로 보내지 않음)'
             card = page.locator('section.studio .slot').nth(1)
             expect(card.locator('.chip.k-upload')).to_be_visible()
-        check('직접 올리기: 가짜 이미지 거절, 숨은 정보 없이 다시 저장, 권한 확인 필수, 자리 연결', t_img_upload)
+            expect(card.locator('.chip.o-unknown')).to_contain_text('출처 확인 필요')
+            # 미리보기에서 출처를 '직접 촬영'으로 확인해야 직접 촬영 사진으로 셈
+            card.get_by_role('button', name='미리보기·내려받기').click()
+            sheet = page.locator('#sheet')
+            src = sheet.get_by_label('이 사진은 어디서 났어?')
+            expect(src).to_have_value('')
+            src.select_option('own')
+            expect(page.locator('#toast')).to_contain_text('출처를 바꿨어')
+            last = [c for c in mock.calls if re.fullmatch(r'images/[0-9a-f-]{36}', c['path']) and c['method'] == 'POST'][-1]['body']
+            assert last == {'source_type': 'own'}, last
+            sheet.get_by_role('button', name='닫기').click()
+            expect(page.locator('section.studio .slot').nth(1).locator('.chip.o-own')).to_contain_text('직접 촬영')
+        check('직접 올리기: 가짜 이미지 거절, 숨은 정보 없이 다시 저장, 권한 확인 필수, 자리 연결, 출처는 직접 확인해야 직접 촬영', t_img_upload)
 
         def t_img_preview_download():
             open_p8()
@@ -1279,27 +1301,46 @@ def main():
             mock.keys = {'openai': True, 'pexels': True}
         check('키가 없으면: AI 만들기는 잠기고 이유 안내, 사진 검색은 직접 올리기로 안내', t_img_no_keys)
 
-        # 검색 노출 도우미 (1.3.0): 홈 패널 → 주력 주제 정하기 → 비율·내 경험·시즌 주제 추천
+        # 검색 노출 점검 (1.3.0 → 1.3.1): 앱 권장 기준·내 기록·실측 데이터 없음 구분, 주력 주제는 게시한 글만·키워드·제목 근거, 하루 발행량은 고른 값 그대로
         def t_seo_helper():
             goto_hash('home')
-            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 도우미'))
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 점검'))
+            expect(seo).to_contain_text('검색 순위를 보장하지 않아')
             expect(seo).to_contain_text('주력 주제가 아직 없어')
-            expect(seo).to_contain_text('2~4주 뒤 검색이 늘 주제')
+            for tag in ('앱 권장 기준', '내 기록', '실측 데이터 없음'):
+                expect(seo.locator('.seo-tag', has_text=tag).first).to_be_visible()
             expect(seo).to_contain_text('내 경험이 없는 글')
             expect(seo).to_contain_text('쇼핑 커넥트')
-            expect(seo).to_contain_text('순위를 보장하는 규칙은 없어')
+            expect(seo).to_contain_text('하루 발행 설정 1편 (앱 권장 기준과 같아)')
+            writer = page.locator('section.panel', has=page.locator('h2', has_text='자동 작가'))
+            expect(writer).to_contain_text(re.compile(r'앞으로 7일\(내일부터\) 발행일이 잡힌 원고 \d+편 / 목표 7편'))
             seo.get_by_role('button', name='정하기').click()
             sec = page.locator('#sec-auto')
             expect(sec).to_be_visible()
-            focus = sec.locator('label', has_text='주력 주제').locator('input')
-            focus.fill('겨울 가전')
+            sec.locator('label', has_text='주력 주제 (블로그').locator('input').fill('겨울 가전')
+            per = sec.locator('label', has_text='하루 발행 개수').locator('select')
+            per.select_option('2')
+            expect(sec).to_contain_text('네가 고른 값이라 그대로 둬')
             sec.get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
-            assert body['focus_topic'] == '겨울 가전' and body['per_day'] == 1, body
+            assert body['focus_topic'] == '겨울 가전' and body['per_day'] == 2 and body['focus_terms'] == '', body
             goto_hash('home')
-            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 도우미'))
-            expect(seo).to_contain_text(re.compile(r'주력 주제\(겨울 가전\) 글: 최근 \d+개 중 \d+개'))
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 점검'))
+            # 게시한 글은 '전기요 두 가지 비교' 1개뿐 — 키워드·제목에 주제 낱말이 없어서 0개 (카테고리 '겨울 가전'만으로는 안 셈), 초안은 안 셈
+            expect(seo).to_contain_text('네이버 블로그 최근 게시한 글 1개 중 주력 주제(겨울 가전) 글 0개 (0%)')
+            expect(seo).to_contain_text('하루 발행 설정 2편 (네가 고른 값 그대로 둬) — 앱 권장은 하루 1편이야')
+            expect(page.locator('section.panel', has=page.locator('h2', has_text='자동 작가'))).to_contain_text('목표 14편 (하루 2편 × 7일)')
+            # 주력 주제 낱말을 더하면 키워드로 확인됨
+            goto_hash('settings/auto')
+            sec = page.locator('#sec-auto')
+            sec.locator('label', has_text='주력 주제 낱말').locator('input').fill('전기요, 온수매트')
+            sec.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            assert [c for c in mock.calls if c['path'] == 'settings'][-1]['body']['focus_terms'] == '전기요, 온수매트'
+            goto_hash('home')
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 점검'))
+            expect(seo).to_contain_text('네이버 블로그 최근 게시한 글 1개 중 주력 주제(겨울 가전) 글 1개 (100%)')
             n0 = len([c for c in mock.calls if c['path'] == 'jobs' and c['method'] == 'POST'])
             seo.get_by_role('button', name='이 시즌으로 주제 추천').click()
             expect(page.locator('#toast')).to_contain_text('주제 추천을 요청했어')
@@ -1307,10 +1348,14 @@ def main():
             assert len(jobs) == n0 + 1, jobs[-1:]
             jb = jobs[-1]['body']
             assert jb['kind'] == 'topics' and jb['mode'] == 'category' and jb['category'] == '겨울 가전' and '월 시즌' in jb['hint'] and len(jb['hint']) <= 300, jb
-            no_overflow('홈 검색 노출 도우미')
+            # 원고 검사: 주력 주제 판정과 근거가 보임 (키워드 '원룸 전기요 고르는 법' → 낱말 '전기요'로 확인)
+            goto_hash('content/post/' + mock.ids['P1'])
+            expect(page.locator('#view')).to_contain_text("주력 주제(겨울 가전)와 맞아 — 근거: 키워드에 '전기요'")
+            goto_hash('home')
+            no_overflow('홈 검색 노출 점검')
             shot('20-home-seo')
-            mock.settings['focus_topic'] = ''
-        check('검색 노출 도우미: 주력 주제 정하기·비율, 내 경험 없는 글, 시즌 주제 추천 요청', t_seo_helper)
+            mock.settings.update({'focus_topic': '', 'focus_terms': '', 'per_day': 1})
+        check('검색 노출 점검: 권장 기준·내 기록·실측 없음 구분, 게시한 글 기준 주력 주제 비율·근거, 하루 발행량은 고른 값 그대로, 시즌 주제 추천', t_seo_helper)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():

@@ -162,10 +162,14 @@ export function similarity(a, b) {
   return inter / (A.size + B.size - inter);
 }
 
-// ───────── 검색 노출 도우미 ─────────
-// 주력 주제와 맞는지: 같은 말이거나 서로 포함하거나, 2글자 이상 낱말이 하나라도 겹치면 맞는 걸로 ('계절템·겨울 가전' ↔ '겨울 가전')
-// 낱말은 앞부분이 같아도 맞는 걸로 ('겨울철' ↔ '겨울', '가전제품' ↔ '가전')
+// ───────── 검색 노출 점검 (앱의 권장 기준 — 검색 순위 공식이 아님) ─────────
+// 아래 숫자는 네이버가 밝힌 기준이 아니라 앱이 정한 권장 기준이야. 검색량·경쟁도는 조회하지 않아.
+// 자동 작가 프롬프트(docs/auto-writer-prompt.md)도 같은 값을 써 — tests/sync.test.js 가 서로 맞는지 확인
+export const SEO_RULES = { minKeywordWords: 3, maxLinks: 2, earlyLinkShare: 0.15, focusShareGoal: 0.7, perDayRecommended: 1 };
+
+// 낱말 나누기: 공백·가운뎃점·쉼표·빗금·괄호로 나누고 2글자 이상만
 const topicWords = (s) => String(s || '').toLowerCase().split(/[\s·,/|&+()]+/).map((w) => w.trim()).filter((w) => w.length >= 2);
+// 카테고리 이름이 주력 주제와 이어지는지 (같은 말·포함·낱말 앞부분이 같음). 카테고리는 약한 근거라서 이것만으로 주제 일치를 정하지 않아 (focusFit)
 export function focusMatch(category, focus) {
   const f = String(focus || '').trim();
   if (!f) return true;
@@ -175,6 +179,51 @@ export function focusMatch(category, focus) {
   const fw = topicWords(f);
   return topicWords(c).some((w) => fw.some((x) => w === x || w.startsWith(x) || x.startsWith(w)));
 }
+// 주력 주제 낱말: 주력 주제를 나눈 낱말 + 설정의 '주력 주제 낱말'(쉼표로 구분)
+export function focusTerms(focus, extra) {
+  const more = String(extra || '').toLowerCase().split(/[,，、\n]+/).map((w) => w.replace(/\s+/g, ' ').trim()).filter((w) => w.length >= 2);
+  const out = [];
+  for (const w of [...topicWords(focus), ...more]) if (!out.includes(w)) out.push(w);
+  return out.slice(0, 40);
+}
+const normT = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+// 글에 들어 있는 주제 낱말 (띄어쓰기가 달라도 3글자 이상 낱말은 찾음: '전기 장판' ↔ '전기장판')
+function termsIn(text, terms) {
+  const t = normT(text), ns = t.replace(/ /g, '');
+  return terms.filter((w) => { const wn = w.replace(/ /g, ''); return t.includes(w) || (wn.length >= 3 && ns.includes(wn)); });
+}
+const countIn = (text, w) => { const t = normT(text); let n = 0; for (let i = t.indexOf(w); i !== -1; i = t.indexOf(w, i + w.length)) n++; return n; };
+// 주력 주제와 맞는지 — 외부 AI 없이 낱말로만 봄. 근거를 같이 돌려줌
+//   주된 근거: 키워드·제목 / 약한 근거: 카테고리 / 보조 근거: 소제목·본문
+//   match = 키워드나 제목에 주제 낱말이 있음
+//   unclear(판단 어려움) = 키워드·제목에는 없고 소제목·본문에만 있음
+//   off = 키워드·제목·소제목·본문 어디에도 없음 — 카테고리만 주력 주제로 적은 글도 여기 (카테고리만으로는 통과시키지 않음)
+//   none = 주력 주제를 안 정함
+export const FOCUS_VERDICT = { match: '주력 주제와 맞음', unclear: '판단 어려움', off: '주력 주제 밖', none: '주력 주제 없음' };
+export function focusFit(post, focus, extra = '') {
+  const terms = focusTerms(focus, extra);
+  if (!String(focus || '').trim() || !terms.length) return { verdict: 'none', label: FOCUS_VERDICT.none, evidence: [], terms };
+  const p = post || {};
+  const title = (Array.isArray(p.titles) ? p.titles : []).find((t) => typeof t === 'string' && t.trim()) || '';
+  const lines = String(p.body || '').split('\n');
+  const isHead = (l) => /^\s*#{1,4}\s/.test(l);
+  const heads = lines.filter(isHead).join(' ');
+  const rest = lines.filter((l) => !isHead(l) && !/^\s*\[(이미지|링크|내 경험)/.test(l)).join(' ');
+  const kw = termsIn(p.keyword, terms), ti = termsIn(title, terms), ca = termsIn(p.category, terms), he = termsIn(heads, terms), bo = termsIn(rest, terms);
+  const q = (ws) => ws.slice(0, 3).map((w) => `'${w}'`).join(', ');
+  const evidence = [];
+  if (kw.length) evidence.push(`키워드에 ${q(kw)}`);
+  if (ti.length) evidence.push(`제목에 ${q(ti)}`);
+  if (ca.length) evidence.push(`카테고리에 ${q(ca)}`);
+  if (he.length) evidence.push(`소제목에 ${q(he)}`);
+  if (bo.length) evidence.push(`본문에 ${q(bo)} ${bo.reduce((n, w) => n + countIn(rest, w), 0)}번`);
+  let verdict = 'off';
+  if (kw.length || ti.length) verdict = 'match';
+  else if (he.length || bo.length) { verdict = 'unclear'; evidence.push('키워드·제목에는 주제 낱말이 없음'); }
+  else if (ca.length) evidence.push('카테고리만 주력 주제와 같고 키워드·제목·본문에는 주제 낱말이 없음 (카테고리만으로는 주제 글로 보지 않아)');
+  else evidence.push('키워드·제목·카테고리·본문 어디에도 주제 낱말이 없음');
+  return { verdict, label: FOCUS_VERDICT[verdict], evidence, terms };
+}
 export const keywordWords = (kw) => String(kw || '').trim().split(/\s+/).filter(Boolean).length;
 // 첫 링크 자리가 글 앞부분(첫 소제목 앞, 또는 앞 15%)에 있는지
 export function linkTooEarly(body) {
@@ -182,12 +231,12 @@ export function linkTooEarly(body) {
   const li = lines.findIndex((l) => /^\[링크/.test(l));
   if (li < 0) return false;
   const hi = lines.findIndex((l) => /^#{1,4}\s/.test(l));
-  return (hi > 0 && li < hi) || li < Math.max(2, Math.floor(lines.length * 0.15));
+  return (hi > 0 && li < hi) || li < Math.max(2, Math.floor(lines.length * SEO_RULES.earlyLinkShare));
 }
 
 // ───────── 원고 검사 ─────────
 // ctx: { programs: {id: program}, channels: {id: channel}, compat: [], links: [], products: [], others: [{id, title, body}], today: 'YYYY-MM-DD',
-//        focus: 설정의 주력 주제 (없으면 주제 검사 안 함) }
+//        focus: 설정의 주력 주제 (없으면 주제 검사 안 함), focusTerms: 설정의 주력 주제 낱말 (쉼표로) }
 // 결과: { errors, warnings, tips } — errors 가 하나라도 있으면 '발행 준비 완료' 불가
 export function checkPost(post, ctx = {}) {
   const errors = [], warnings = [], tips = [];
@@ -228,7 +277,7 @@ export function checkPost(post, ctx = {}) {
 
   // 3) 미완성 자리
   const me = countMe(body);
-  if (me) E('placeholder_experience', `빈 [내 경험] 칸이 ${me}곳 남아 있어. 그대로 올리면 글에 그대로 보여.`, "'내 경험 채우기'로 채우거나 '빈 칸 지우기'를 눌러줘.");
+  if (me) E('placeholder_experience', `빈 [내 경험] 칸이 ${me}곳 남아 있어. 그대로 올리면 이 표시가 글에 보여.`, "'내 경험 채우기'로 채우거나 '빈 칸 지우기'를 눌러줘. 정보 글은 칸을 지우고 경험 없이 올려도 돼.");
   const unfinished = sents.filter((s) => /(TODO|XXX|○○|OOO|\?\?\?)/.test(s.text)).map((s) => clip(s.text));
   if (unfinished.length) E('unfinished', '덜 쓴 표시(○○, TODO 등)가 남아 있어.', '본문에서 고쳐줘.', unfinished.slice(0, 3));
   const tableUnknown = (body.match(/확인 필요/g) || []).length;
@@ -332,18 +381,24 @@ export function checkPost(post, ctx = {}) {
     }
   }
 
-  // 12) 검색 노출 — 막지 않고 알려만 줌 (검색으로 들어오는 블로그·사이트 글만)
+  // 12) 검색 노출 점검 — 앱의 권장 기준이라 막지 않고 알려만 줌 (검색으로 들어오는 블로그·사이트 글만)
+  //     검색량·경쟁도는 조회하지 않아서 '경쟁이 높다'고 단정하지 않음
   const searchCh = channel && (channel.kind === 'blog' || channel.kind === 'site') && !isShort;
   if (searchCh) {
     const kwN = keywordWords(post.keyword);
-    if (kwN > 0 && kwN < 3) W('short_keyword', `키워드가 ${kwN}단어로 짧아. 짧은 키워드는 오래된 큰 블로그들과 경쟁해서 묻히기 쉬워.`, '3~5단어로 좁혀줘. 예: "제습기" → "원룸 겨울 결로 제습기 용량"');
-    if (ctx.focus && !focusMatch(post.category, ctx.focus)) {
-      W('off_focus', `주력 주제(${clip(String(ctx.focus), 30)}) 밖의 글이야${post.category ? ` (카테고리: ${clip(String(post.category), 20)})` : ' (카테고리 없음)'}. 한 주제로 꾸준히 쌓인 블로그가 그 주제 검색에서 더 잘 보여.`, '주력 주제 안의 글을 먼저 쓰거나, 카테고리를 주력 주제에 맞춰줘.');
+    if (kwN > 0 && kwN < SEO_RULES.minKeywordWords) T('short_keyword', `키워드가 ${kwN}단어야. 짧은 키워드는 같은 낱말로 쓴 글이 많을 수 있어 (검색량·경쟁도는 조회하지 않았어 · 앱 권장 ${SEO_RULES.minKeywordWords}단어 이상).`, '찾는 사람이 분명해지게 좁혀줘. 예: "제습기" → "원룸 겨울 결로 제습기 용량"');
+    if (ctx.focus) {
+      const f = focusFit(post, ctx.focus, ctx.focusTerms);
+      const name = clip(String(ctx.focus), 30);
+      const ev = f.evidence.join(' · ');
+      if (f.verdict === 'match') T('focus_match', `주력 주제(${name})와 맞아 — 근거: ${ev}`);
+      else if (f.verdict === 'unclear') W('focus_unclear', `주력 주제(${name})와 맞는지 판단하기 어려워 — 근거: ${ev}.`, `주제 안의 글이면 키워드나 제목에 주제 낱말(${f.terms.slice(0, 4).join(', ')})을 넣거나, 설정 > 자동 글쓰기의 '주력 주제 낱말'에 이 글의 낱말을 더해줘.`);
+      else if (f.verdict === 'off') W('off_focus', `주력 주제(${name}) 밖의 글로 보여 — 근거: ${ev}.`, '주력 주제 안의 글을 먼저 쓰거나, 주제 안의 글이면 설정에서 주력 주제 낱말을 더해줘.');
     }
     const nLinks = Math.max(cta, links.length);
-    if (nLinks > 2) W('too_many_links', `링크가 ${nLinks}개야. 링크가 많으면 광고 글로 보이기 쉬워.`, '본문 중간 1곳, 끝 1곳으로 줄여줘.');
-    if (cta && linkTooEarly(body)) W('link_too_early', '글 첫 부분에 링크가 있어. 정보를 먼저 보여주고 링크는 중간·끝에 두는 게 좋아.', '첫 소제목 앞에서는 링크 자리를 빼줘.');
-    if (!hasExperience && !me) W('no_own_experience', '직접 겪은 내용이 한 줄도 없어. 상품을 안 써봤어도 내 상황(내 방·내 물건·재 본 숫자·매장에서 본 것)을 한 줄 넣으면 다른 글과 달라져.', "원고 정보의 '내 경험' 칸에 적거나, 본문에 [내 경험] 자리를 넣고 '내 경험 채우기'로 채워줘.");
+    if (nLinks > SEO_RULES.maxLinks) W('too_many_links', `링크가 ${nLinks}개야. 링크가 많으면 광고 글로 보이기 쉬워 (앱 권장 ${SEO_RULES.maxLinks}개까지).`, '본문 중간 1곳, 끝 1곳으로 줄여줘.');
+    if (cta && linkTooEarly(body)) W('link_too_early', '글 첫 부분에 링크가 있어 (앱 권장: 정보 먼저, 링크는 중간·끝).', '첫 소제목 앞에서는 링크 자리를 빼줘.');
+    if (!hasExperience && !me) W('no_own_experience', '직접 겪은 내용이 한 줄도 없어 (발행은 막지 않아). 안 써봤어도 내 상황 한 줄(내 방·내 물건·재 본 숫자·매장에서 본 것)이 있으면 다른 글과 달라져.', "원고 정보의 '내 경험' 칸에 적거나, 본문에 [내 경험] 자리를 넣고 '내 경험 채우기'로 채워줘.");
   }
 
   return { errors, warnings, tips };
