@@ -476,7 +476,12 @@ function viewHome() {
   return box;
 }
 const AUTO_MAX = L.AUTO_RULES.maxAutoPerRun;
-const homeRecs = (t, byPost) => L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: S.search_terms, postChannels: S.post_channels, today: t });
+// 실적(stats)을 불러오기 전에는 실적이 필요 없는 추천만 (실적이 있는 글을 '실적 없음'으로 잠깐 잘못 보여주지 않게)
+const NO_STATS_KINDS = ['title_from_search', 'new_from_search', 'recheck'];
+const homeRecs = (t, byPost) => {
+  const recs = L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: S.search_terms, postChannels: S.post_channels, today: t });
+  return byPost ? recs : recs.filter((r) => NO_STATS_KINDS.includes(r.kind));
+};
 // 검색 노출 도우미: 주력 주제 비율·하루 발행·사람 손(내 경험·직접 찍은 사진)·다가올 시즌·쇼핑 커넥트
 // 검색 노출 점검 — 앱의 권장 기준 · 내 기록 · 실측 데이터 없음을 줄마다 구분해서 보여줌 (검색 순위 보장 아님)
 const SEO_TAG = { app: '앱 권장 기준', mine: '내 기록', none: '실측 데이터 없음' };
@@ -633,7 +638,8 @@ function loopPanel(recs, waiting, needMetrics) {
 }
 // 최근 7일 정리: 원고·게시·다른 채널·검색어는 앱 기록, 조회·클릭·수익은 입력한 실적 (그 전 7일과 비교)
 function weeklyPanel(w, recs) {
-  const box = panel(`최근 7일 정리 (${L.fmtDate(w.range.from)}~${L.fmtDate(w.range.to)})`);
+  const md = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}`;
+  const box = panel(`최근 7일 정리 (${md(w.range.from)}~${md(w.range.to)})`);
   const fmt = (r, v) => (v == null ? null : r.money ? L.won(v) : L.fmtNum(v));
   const cmp = (r) => (r.prev == null ? (r.now == null ? null : '그 전 7일 데이터 없음') : `그 전 7일 ${fmt(r, r.prev)}`);
   box.append(h('div', { class: 'kpis' }, w.rows.map((r) => kpi(r.label, fmt(r, r.now), [cmp(r), r.sub].filter(Boolean).join(' · ') || null))));

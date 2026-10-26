@@ -355,7 +355,7 @@ async function getState(c: Ctx) {
     sb.from("posts").select("id, titles, keyword, deleted_at").not("deleted_at", "is", null).gte("deleted_at", since30).order("deleted_at", { ascending: false }).limit(50),
     sb.from("requests").select("*").order("created_at", { ascending: false }).limit(100),
     sb.from("settings").select("*").eq("id", 1).maybeSingle(),
-    sb.from("runs").select("*").order("ran_at", { ascending: false }).limit(10),
+    sb.from("runs").select("*").order("ran_at", { ascending: false }).limit(40), // 하루 3번 × 약 2주 — 홈 '최근 7일 정리'의 실행 횟수가 잘리지 않게
     sb.from("channels").select("*").order("sort"),
     sb.from("programs").select("*").order("sort"),
     sb.from("program_channels").select("*"),

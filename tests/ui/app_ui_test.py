@@ -1630,6 +1630,7 @@ def main():
             mock.post_channels.clear(); mock.search_terms.clear()
             mock.metrics = [m for m in mock.metrics if m.get('channel_id') != 'threads']
             page.get_by_role('button', name='새로고침').click()
+            expect(page.get_by_role('button', name='새로고침')).to_be_enabled()  # 다음 시험이 새로고침을 누를 수 있게 끝날 때까지 기다림
         check('운영 시스템(1.4.0): 흐름판 막힌 곳 → 다른 채널 기록 → 유입 검색어 → 개선안 → 채널별 실적 → 원고 한도·날짜 다시 잡기 → 최근 7일 정리 → 한도 설정', t_ops_140)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
