@@ -313,7 +313,9 @@ describe('검색 노출 도우미 (1.3.0)', () => {
     assert.deepEqual(L.focusShare(posts, F, 1), { total: 1, hit: 1, unclear: 0, off: 0, ratio: 1, goal: 0.7 }, '최근 1개만 (게시일 순)');
     const m = L.focusShare(posts, F, 30, (p) => /배터리/.test(p.keyword));
     assert.equal(m.hit, 1, '판정 방법을 넘길 수 있음 (true/false 도 됨)');
-    assert.equal(L.focusShare(posts, F, 30, null, { terms: '스마트폰' }).hit, 2, '주력 주제 낱말을 더하면 키워드로 확인');
+    assert.equal(L.focusShare(posts, F, 30, null, { terms: '스마트폰, 가습기' }).hit, 2, '주력 주제 낱말을 더하면 키워드로 확인');
+    const onlyPhone = L.focusShare(posts, F, 30, null, { terms: '스마트폰' });
+    assert.deepEqual([onlyPhone.hit, onlyPhone.unclear], [1, 1], "낱말을 정하면 '겨울'만 있는 글은 판단 어려움");
     assert.equal(L.focusShare(posts, F, 30, null, { channels: ['tistory'] }).total, 0, '채널을 나눠서 셀 수 있음 (채널 없는 글은 안 셈)');
   });
   test('회귀: 미발행 원고만 있으면 비율에 안 들어가고 데이터 없음(null) — 0%가 아님', () => {

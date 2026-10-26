@@ -254,6 +254,16 @@ describe('검색 노출 점검 (1.3.0 → 1.3.1) — 앱의 권장 기준이라 
     assert.deepEqual(seo(checkPost(base({ keyword: LONG_KW, category: '디지털·전자기기' }), ctx())).filter((c) => c.includes('focus')), []);
     assert.equal(focusFit(base({}), '').verdict, 'none');
   });
+  test("주력 주제 낱말을 적으면 그 낱말로만 '맞음' — 주력 주제 이름의 넓은 낱말('겨울')은 보조 근거로만", () => {
+    const T = '히터, 전기요, 온수매트, 가습기';
+    const laptop = { keyword: '겨울 노트북 추운 곳에 뒀다 켜기', titles: ['겨울 노트북 바로 켜도 될까'], category: '디지털·전자기기', body: '## 결로\n차가운 노트북을 바로 켜면 안 좋아요.' };
+    assert.equal(focusFit(laptop, FOCUS).verdict, 'match', '낱말을 안 정하면 주력 주제 이름의 낱말로 판정 (넓을 수 있음)');
+    const f = focusFit(laptop, FOCUS, T);
+    assert.equal(f.verdict, 'unclear', '낱말을 정하면 \'겨울\'만으로는 맞다고 안 함');
+    assert.ok(f.evidence.some((e) => e.includes("주력 주제 이름의 낱말 '겨울' (보조 근거)")), f.evidence.join(' / '));
+    assert.equal(focusFit({ keyword: '원룸 전기히터 전기세', titles: ['원룸 전기히터 전기세 적게 나오는 종류'] }, FOCUS, T).verdict, 'match', "'히터'로 확인");
+    assert.equal(focusFit({ keyword: '소금빵 고르는 법', titles: ['소금빵'], body: '버터가 중요해요.' }, FOCUS, T).verdict, 'off');
+  });
   test('주력 주제 낱말: 주제를 나눈 낱말 + 설정 낱말, 띄어쓰기가 달라도 찾음', () => {
     assert.deepEqual(focusTerms(FOCUS, '전기요, 온수매트,  , 히'), ['계절템', '겨울', '가전', '전기요', '온수매트']);
     assert.equal(focusFit({ keyword: '전기장판 고르기' }, '겨울', '전기 장판').verdict, 'match');

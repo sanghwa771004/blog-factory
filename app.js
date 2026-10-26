@@ -1611,7 +1611,7 @@ function secAuto() {
     h('label', { class: 'chk' }, auto, '발행표가 비면 자동 주제로 채우기'),
     field('자동 주제 카테고리 (쉼표로 구분)', topics),
     field('주력 주제 (블로그의 큰 주제 하나)', focus, '정해 두면 자동 작가가 이 주제 안에서만 자동 글을 쓰고, 검사에서 글마다 주제와 맞는지 근거를 보여줘. 비우면 안 씀.'),
-    field('주력 주제 낱말 (선택, 쉼표로)', fterms, "글의 키워드나 제목에 이 낱말이나 주력 주제의 낱말이 있으면 주제 글로 봐. 카테고리만 같으면 주제 글로 보지 않아. 본문에만 있으면 '판단 어려움'으로 알려줘."),
+    field('주력 주제 낱말 (선택, 쉼표로)', fterms, "적어 두면 글의 키워드나 제목에 이 낱말이 있어야 주제 글로 봐 ('겨울'처럼 주력 주제 이름의 넓은 낱말은 보조 근거로만). 안 적으면 주력 주제 이름의 낱말로 봐. 카테고리만 같으면 주제 글로 보지 않고, 본문에만 있으면 '판단 어려움'으로 알려줘."),
     h('datalist', { id: 'focuslist' }, String(s.auto_topics || '').split(',').map((x) => x.trim()).filter(Boolean).map((c) => opt(c, c))),
     h('div', { class: 'row' }, field('하루 발행 개수', per), field('기본 길이', len)), perHint,
     field('기본 채널', ch), h('p', { class: 'legend' }, '기본 수익 모델'), pp,
