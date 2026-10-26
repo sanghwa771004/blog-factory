@@ -89,6 +89,8 @@ class Mock:
         self.force_401 = False
         self.pre015 = False  # True면 서버가 DB 015(주력 주제 낱말·사진 출처 열) 전인 것처럼 답함
         self.post_channels, self.search_terms = [], []  # 1.4.0 다른 채널 기록·유입 검색어
+        self.unavailable = []      # 서버가 못 읽은 표처럼 (DB 016 전·오류) → 화면은 데이터 없음
+        self.fail_stats_from = set()  # 이 시작일의 통계 요청은 서버 오류로 답함 (홈이 '불러오는 중'에 멈추지 않는지)
         self.seq = 100
         P1, P2, P3, P4, P5, P6, P7 = (uid(i) for i in range(1, 8))
         self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, P6=P6, P7=P7, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
@@ -175,14 +177,19 @@ class Mock:
                       'error': '', 'ran_at': NOW}]
 
     # ── 계산 ──
-    def stats(self, d_from, d_to):
+    def stats(self, d_from, d_to, within=False):
+        # within: 서버 stats_window 처럼 기간 안에 다 들어가는 실적만, partial = 걸쳐 있어서 뺀 줄 수
         F = ['views', 'impressions', 'clicks', 'orders', 'cancels', 'revenue_est', 'revenue_confirmed', 'revenue_paid', 'cost']
         posts = {p['id']: p for p in self.posts}
         rows = []
+        partial = 0
         for m in self.metrics:
             if d_from and m['period_end'] < d_from:
                 continue
             if d_to and m['period_start'] > d_to:
+                continue
+            if within and ((d_from and m['period_start'] < d_from) or (d_to and m['period_end'] > d_to)):
+                partial += 1
                 continue
             p = posts.get(m['post_id']) or {}
             progs = p.get('program_ids') or []
@@ -205,7 +212,7 @@ class Mock:
             return [{**agg([r for r in rows if r[key] == k]), 'key': k} for k in keys]
 
         return {'from': d_from, 'to': d_to, 'totals': agg(rows) if rows else {'rows': 0}, 'by_post': by('post_id'),
-                'by_channel': by('ch'), 'by_program': by('pr'), 'by_category': by('cat')}
+                'by_channel': by('ch'), 'by_program': by('pr'), 'by_category': by('cat'), **({'within': True, 'partial': partial} if within else {})}
 
     # ── 이미지 스튜디오 ──
     def img(self, iid):
@@ -296,8 +303,11 @@ class Mock:
                 'settings': self.settings, 'runs': self.runs, 'channels': self.channels, 'programs': self.programs, 'compat': self.compat,
                 'topics': self.topics, 'products': self.products, 'post_products': self.post_products, 'links': self.links,
                 'imports': self.imports, 'image_slots': self.image_slots_state(),
-                'post_channels': self.post_channels, 'search_terms': self.search_terms,
-                'metric_post_ids': sorted({m['post_id'] for m in self.metrics if m.get('post_id')})}
+                'post_channels': [] if 'post_channels' in self.unavailable else self.post_channels,
+                'search_terms': [] if 'search_terms' in self.unavailable else self.search_terms,
+                'metric_post_ids': [] if 'metric_post_ids' in self.unavailable else sorted({m['post_id'] for m in self.metrics if m.get('post_id')}),
+                'unavailable': list(self.unavailable),
+                'runs_auto_7d': sum(1 for r in self.runs if r.get('kind') == 'auto' and str(r.get('ran_at', ''))[:10] >= D(-6))}
 
     def verdict(self, prog, ch):
         row = next((c for c in self.compat if c['program_id'] == prog and c['channel_id'] == ch), None)
@@ -317,7 +327,12 @@ class Mock:
         if path == 'state':
             return 200, self.state()
         if path == 'stats':
-            return 200, {'stats': {**self.stats(query.get('from', [None])[0], query.get('to', [None])[0]), 'image_costs': self.image_costs()}}
+            f, t = query.get('from', [None])[0], query.get('to', [None])[0]
+            if f in self.fail_stats_from:
+                return 500, {'error': 'server'}
+            if query.get('within') == ['1']:
+                return 200, {'stats': self.stats(f, t, within=True)}
+            return 200, {'stats': {**self.stats(f, t), 'image_costs': self.image_costs()}}
         if path == 'settings' and method == 'POST' and 'focus_topic' in body:
             # 자동 글쓰기 칸만 저장해 둠 (이미지 설정 같은 다른 설정은 다른 시험에 영향 주지 않게 — 시험 끝에 되돌림)
             for k in ('focus_topic', 'focus_terms', 'per_day', 'backlog_limit'):
@@ -381,7 +396,8 @@ class Mock:
         if path == 'posts/reschedule-overdue' and method == 'POST':
             per = int(self.settings.get('per_day') or 1)
             moved = []
-            for p in sorted([p for p in self.posts if not p['deleted_at'] and p['stage'] in ('review', 'verify', 'ready', 'scheduled') and p.get('publish_date') and p['publish_date'] < D(0)], key=lambda x: x['publish_date']):
+            # 서버처럼 '예약' 원고는 안 옮김 (예약한 날이 지났으면 이미 올라갔을 수 있음)
+            for p in sorted([p for p in self.posts if not p['deleted_at'] and p['stage'] in ('review', 'verify', 'ready') and p.get('publish_date') and p['publish_date'] < D(0)], key=lambda x: x['publish_date']):
                 n = 1
                 while sum(1 for q in self.posts if not q['deleted_at'] and q['stage'] not in ('failed', 'queued') and q.get('publish_date') == D(n)) >= per:
                     n += 1
@@ -419,6 +435,13 @@ class Mock:
             terms = body.get('terms') or []
             if not terms:
                 return 400, {'error': 'empty'}
+            # 서버(save_search_terms)처럼: 같은 글에 기간이 겹치는 다른 기록이 있으면 거절, replace_overlap 이면 그 기록을 지우고 저장
+            s0, e0 = body['period_start'], body['period_end']
+            over = [x for x in self.search_terms if x['post_id'] == p['id'] and x['period_start'] <= e0 and x['period_end'] >= s0 and not (x['period_start'] == s0 and x['period_end'] == e0)]
+            if over and body.get('replace_overlap') is not True:
+                periods = sorted({(x['period_start'], x['period_end']) for x in over})
+                return 409, {'error': 'period_overlap', 'periods': [{'period_start': a, 'period_end': b} for a, b in periods]}
+            self.search_terms = [x for x in self.search_terms if x not in over]
             saved = []
             for t in terms:
                 term = ' '.join(str(t.get('term', '')).split())
@@ -442,6 +465,8 @@ class Mock:
                 return 404, {'error': 'not_found'}
             if p['stage'] not in ('published', 'collecting', 'analyzed'):
                 return 409, {'error': 'not_published'}
+            if len(p.get('body') or '') < 200:
+                return 400, {'error': 'no_body'}
             if any(j for j in self.jobs if j['kind'] == 'refresh' and j['post_id'] == p['id'] and j['status'] == 'pending'):
                 return 409, {'error': 'job_exists'}
             job = {'id': self.new_id(), 'kind': 'refresh', 'keyword': p['keyword'], 'status': 'pending', 'post_id': p['id'], 'attempts': 0, 'started_at': None,
@@ -1632,6 +1657,128 @@ def main():
             page.get_by_role('button', name='새로고침').click()
             expect(page.get_by_role('button', name='새로고침')).to_be_enabled()  # 다음 시험이 새로고침을 누를 수 있게 끝날 때까지 기다림
         check('운영 시스템(1.4.0): 흐름판 막힌 곳 → 다른 채널 기록 → 유입 검색어 → 개선안 → 채널별 실적 → 원고 한도·날짜 다시 잡기 → 최근 7일 정리 → 한도 설정', t_ops_140)
+
+        # 1.4.0 검토에서 고친 것: 기간이 겹치는 검색어·본문 없는 기록의 개선안·못 읽은 표(데이터 없음)·주간 비교(기간 안 실적만)·통계 실패·예약 원고·요청 원고만큼 자동 글 줄이기
+        def t_review_140():
+            P3 = mock.ids['P3']
+            kd = lambda d: f'{int(d[5:7])}월 {int(d[8:10])}일'
+            # (1) 한도까지 남은 자리 = 기다리는 요청 원고 수 → 요청 원고를 채우면 한도가 차서 자동 글은 0편 (예전엔 '최대 N편'이라고 했음)
+            bl = sum(1 for p in mock.posts if not p['deleted_at'] and p['stage'] in ('review', 'verify', 'ready', 'scheduled'))
+            temp_job = None
+            if not any(j for j in mock.jobs if j['kind'] == 'write' and j['status'] == 'pending'):
+                temp_job = {**deepcopy(mock.jobs[0]), 'id': uid(804), 'status': 'pending', 'post_id': None}
+                mock.jobs.append(temp_job)
+            wj = sum(1 for j in mock.jobs if j['kind'] == 'write' and j['status'] == 'pending')
+            mock.settings['backlog_limit'] = bl + wj
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash('home')
+            writer = page.locator('section.panel', has=page.locator('h2', has_text='자동 작가'))
+            expect(writer).to_contain_text(f'검수·게시 안 한 원고 {bl}개 / 쌓아둘 한도 {bl + wj}개')
+            expect(writer).to_contain_text('기다리는 요청 원고를 채우면 한도가 차서')
+            expect(writer).not_to_contain_text('새로 쓸 예정')
+            mock.settings['backlog_limit'] = 0
+            if temp_job:
+                mock.jobs.remove(temp_job)
+            # (2) 기간이 겹치는 유입 검색어: 거절 → 겹치는 기간을 보여줌 → 확인 두 번 → 겹치던 기간을 지우고 저장
+            mock.search_terms[:] = [{'id': uid(801), 'post_id': P3, 'term': '전기요 전자파', 'views': 12, 'period_start': D(-7), 'period_end': D(-1),
+                                     'channel_id': 'naver_blog', 'source_label': '네이버 블로그 통계', 'created_at': NOW}]
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash(f'content/post/{P3}')
+            view = page.locator('#view')
+            terms = view.locator('details', has=page.locator('summary', has_text='검색 유입 키워드'))
+            terms.get_by_label('유입 검색어 붙여넣기').fill('전기요 전자파 15')
+            terms.get_by_role('button', name='검색어 저장').click()
+            expect(terms).to_contain_text('기간이 겹치는 검색어 기록이 있어')
+            expect(terms).to_contain_text(kd(D(-7)))
+            expect(terms).to_contain_text('같은 유입이 두 번 세져')
+            assert [(x['term'], x['views']) for x in mock.search_terms] == [('전기요 전자파', 12)], '거절되면 아무것도 안 바뀜'
+            terms.get_by_role('button', name='겹치는 기간 지우고 저장').click()
+            terms.get_by_role('button', name=re.compile('한 번 더')).click()
+            expect(page.locator('#toast')).to_contain_text('검색어 1개를 저장했어 (겹치던 기간은 지웠어)')
+            sent = [c['body'] for c in mock.calls if c['path'] == f'posts/{P3}/search-terms']
+            assert 'replace_overlap' not in sent[-2] and sent[-1]['replace_overlap'] is True, sent[-2:]
+            assert [(x['term'], x['views'], x['period_start']) for x in mock.search_terms] == [('전기요 전자파', 15, D(-6))], mock.search_terms
+            # 비율만 있는 줄: 비율 앞 숫자는 검색어의 일부로 읽음 (숫자를 만들지 않음)
+            terms = page.locator('#view details', has=page.locator('summary', has_text='검색 유입 키워드'))
+            terms.get_by_label('유입 검색어 붙여넣기').fill('아이폰 16 12.5%')
+            expect(terms).to_contain_text('읽은 검색어 1개: 아이폰 16(숫자 없음)')
+            terms.get_by_label('유입 검색어 붙여넣기').fill('')
+            mock.search_terms.clear()
+            # (3) 본문 없이 게시 기록만 넣은 글: 개선안 요청 버튼이 막히고 이유를 보여줌 (서버는 no_body 로 거절하니까)
+            P9 = uid(9)
+            mock.posts.append({**deepcopy(next(p for p in mock.posts if p['id'] == P3)), 'id': P9, 'keyword': '직접 기록한 전기요 글', 'titles': ['직접 기록한 전기요 글'],
+                               'body': '', 'published_on': D(-9), 'publish_date': D(-9), 'refresh': {}})
+            mock.search_terms.append({'id': uid(802), 'post_id': P9, 'term': '전기요 전자파 걱정', 'views': 5, 'period_start': D(-6), 'period_end': D(0),
+                                      'channel_id': 'naver_blog', 'source_label': '', 'created_at': NOW})
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash(f'content/post/{P9}')
+            view = page.locator('#view')
+            terms = view.locator('details', has=page.locator('summary', has_text='검색 유입 키워드'))
+            expect(terms).to_contain_text("제목·키워드에 없는 검색어: '전기요 전자파 걱정'(5회)")
+            expect(terms).to_contain_text('본문 없이 게시 기록만 넣은 글이라 자동 작가가 개선안을 쓸 수 없어')
+            expect(terms.get_by_role('button', name='이 검색어로 개선안 요청')).to_have_count(0)
+            expect(view.locator('details', has=page.locator('summary', has_text='개선안'))).to_have_count(0)  # 본문이 없으면 개선안 칸 자체가 없음 (예전부터)
+            # 홈 개선 루프의 '제목에 없는 검색어' 추천도 이 글에는 '개선안 요청' 대신 '원고 보기'만
+            goto_hash('home')
+            rec = page.locator('section.panel', has=page.locator('h2', has_text='개선 루프')).locator('.rec', has_text='직접 기록한 전기요 글').filter(has_text='실제로 들어온 검색어가 제목에 없어')
+            expect(rec).to_have_count(1)
+            expect(rec.get_by_role('button', name='원고 보기')).to_be_visible()
+            expect(rec.get_by_role('button', name='개선안 요청')).to_have_count(0)
+            mock.posts = [p for p in mock.posts if p['id'] != P9]
+            mock.search_terms.clear()
+            # (4) 서버가 다른 채널 기록·실적 글 목록을 못 읽었으면 0이 아니라 데이터 없음, 그걸로 '안 퍼지고 있어'라고 하지 않음
+            mock.unavailable = ['post_channels', 'metric_post_ids']
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash('home')
+            ops = page.locator('section.panel.ops')
+            expect(ops.locator('li', has_text='다른 채널')).to_contain_text('데이터 없음')
+            expect(ops.locator('li', has_text='실적')).to_contain_text('데이터 없음')
+            expect(ops).not_to_contain_text('다른 채널로 안 퍼지고 있어')
+            expect(ops).not_to_contain_text('실적이 안 들어오고 있어')
+            goto_hash(f'content/post/{P3}')
+            expect(page.locator('#view details', has=page.locator('summary', has_text='다른 채널에 올리기'))).to_contain_text('다른 채널 기록을 지금 못 읽었어')
+            mock.unavailable = []
+            # (5) 최근 7일 정리: 7일 안에 다 들어가는 실적만 셈 — 한 달치(3,000회)는 두 주에 똑같이 잡히지 않고, 뺐다고 알려줌
+            month = {**deepcopy(mock.metrics[2]), 'id': uid(803), 'period_start': D(-29), 'period_end': D(0), 'views': 3000, 'source_label': '한 달치 통계'}
+            mock.metrics.append(month)
+            n = len(mock.calls)
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash('home')
+            week = page.locator('section.panel', has=page.locator('h2', has_text='최근 7일 정리'))
+            expect(week.locator('.kpi', has_text='조회수')).to_contain_text('1,200')
+            expect(week.locator('.kpi', has_text='조회수')).not_to_contain_text('4,200')
+            expect(week).to_contain_text('기간이 더 긴 실적(예: 한 달치) 최근 7일에 걸친 1줄, 그 전 7일에 걸친 1줄은 빼서')
+            wk = [c for c in mock.calls[n:] if c['path'] == 'stats' and c['query'].get('from', [''])[0] in (D(-6), D(-13))]
+            assert {c['query']['from'][0] for c in wk} == {D(-6), D(-13)} and all(c['query'].get('within') == ['1'] for c in wk), [c['query'] for c in wk]
+            traffic = page.locator('section.panel', has=page.locator('h2', has_text='최근 30일 조회·클릭'))
+            expect(traffic).to_contain_text('4,200', timeout=5000)  # 30일 통계는 지금처럼 기간에 걸친 실적을 다 셈
+            mock.metrics = [m for m in mock.metrics if m['id'] != uid(803)]
+            # (6) 통계 하나가 실패해도 나머지는 보여주고, 실패한 칸은 '불러오는 중'에 멈추지 않음
+            mock.fail_stats_from = {D(-29)}
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash('home')
+            traffic = page.locator('section.panel', has=page.locator('h2', has_text='최근 30일 조회·클릭'))
+            expect(traffic).to_contain_text('실적을 못 불러왔어')
+            if TODAY.replace(day=1).isoformat() != D(-29):  # 이번 달 1일이 30일 전과 같은 날이면 그 요청도 실패하니 건너뜀
+                money = page.locator('section.panel', has=page.locator('h2', has_text='이번 달 수익'))
+                expect(money).to_contain_text('발생 수익')
+            expect(page.locator('section.panel', has=page.locator('h2', has_text='최근 7일 정리'))).not_to_contain_text('불러오는 중')
+            mock.fail_stats_from = set()
+            # (7) 예약한 날이 지난 원고: 날짜를 옮기지 않고 '게시 완료 기록'을 권함 (이미 올라갔을 수 있어서)
+            p2 = next(p for p in mock.posts if p['id'] == mock.ids['P2'])
+            keep = (p2['stage'], p2['publish_date'])
+            p2['stage'], p2['publish_date'] = 'scheduled', D(-1)
+            page.get_by_role('button', name='새로고침').click()
+            goto_hash('home')
+            ops = page.locator('section.panel.ops')
+            expect(ops).to_contain_text('예약한 날이 지난 원고 1개')
+            expect(ops).to_contain_text("'게시 완료 기록'")
+            expect(ops.get_by_role('button', name='날짜 다시 잡기')).to_have_count(0)
+            p2['stage'], p2['publish_date'] = keep
+            no_overflow('홈 (검토 수정)')
+            page.get_by_role('button', name='새로고침').click()
+            expect(page.get_by_role('button', name='새로고침')).to_be_enabled()
+        check('1.4.0 검토 수정: 요청 원고만큼 자동 글 줄이기 · 겹치는 검색어 기간 · 본문 없는 기록의 개선안 · 못 읽은 표는 데이터 없음 · 주간은 기간 안 실적만 · 통계 실패 · 예약 원고', t_review_140)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():

@@ -36,10 +36,14 @@ describe('016 적용: 더하기만 하고 예전 데이터는 그대로', () => 
         assert.equal(await val(db, `select has_table_privilege($1, $2, 'select')`, [role, `public.${t}`]), false, `${role} ${t}`);
       }
     }
-    for (const fn of ['public.backlog_state()', 'public.reschedule_overdue()', 'public.set_refresh(uuid, uuid, jsonb)', 'public.add_post(jsonb, int)', 'public.writer_context()']) {
+    const fns = ['public.backlog_state()', 'public.reschedule_overdue()', 'public.set_refresh(uuid, uuid, jsonb)', 'public.add_post(jsonb, int)', 'public.writer_context()',
+      'public.save_search_terms(uuid, date, date, jsonb, boolean, text, text)', 'public.metric_post_ids()', 'public.stats_window(date, date, boolean)'];
+    for (const fn of fns) {
       for (const role of ['anon', 'authenticated']) assert.equal(await val(db, `select has_function_privilege($1, $2, 'execute')`, [role, fn]), false, `${role} ${fn}`);
     }
-    assert.equal(await val(db, `select has_function_privilege('service_role', 'public.reschedule_overdue()', 'execute')`), true, '서버는 날짜 다시 잡기를 부를 수 있음');
+    for (const fn of ['public.reschedule_overdue()', 'public.save_search_terms(uuid, date, date, jsonb, boolean, text, text)', 'public.metric_post_ids()', 'public.stats_window(date, date, boolean)']) {
+      assert.equal(await val(db, `select has_function_privilege('service_role', $1, 'execute')`, [fn]), true, `서버는 ${fn} 를 부를 수 있음`);
+    }
   });
 });
 
@@ -58,7 +62,8 @@ describe('쌓인 원고 한도 (backlog_state · add_post)', () => {
     await draft(db, 'g', { stage: 'queued', body: '' });
     const x = await draft(db, 'h', { stage: 'review', date: addDays(t, -5) });
     await db.query(`update public.posts set deleted_at = now() where id = $1`, [x]);
-    assert.deepEqual(await val(db, `select public.backlog_state()`), { backlog: 4, limit: 7, overdue: 2 });
+    assert.deepEqual(await val(db, `select public.backlog_state()`), { backlog: 4, limit: 7, overdue: 1, overdue_scheduled: 1 },
+      '예정일 지난 원고: 다시 잡을 수 있는 것(검수 필요)과 예약한 날이 지난 것(예약)을 따로');
     await db.query(`update public.settings set per_day = 3 where id = 1`);
     assert.equal((await val(db, `select public.backlog_state()`)).limit, 21);
     await db.query(`update public.settings set backlog_limit = 4 where id = 1`);
@@ -81,7 +86,7 @@ describe('쌓인 원고 한도 (backlog_state · add_post)', () => {
 });
 
 describe('예정일 지난 원고 날짜 다시 잡기 (reschedule_overdue)', () => {
-  test('지난 날짜 순서대로 내일부터 빈 날에 (하루 발행 수 안 넘게), 게시한 글·앞으로 잡힌 글·휴지통은 그대로, 단계도 그대로', async () => {
+  test('지난 날짜 순서대로 내일부터 빈 날에 (하루 발행 수 안 넘게), 예약·게시한 글·앞으로 잡힌 글·휴지통은 그대로, 단계도 그대로', async () => {
     const db = await freshDb();
     const t = kstToday();
     await db.query(`update public.settings set per_day = 1 where id = 1`);
@@ -96,16 +101,16 @@ describe('예정일 지난 원고 날짜 다시 잡기 (reschedule_overdue)', ()
     assert.deepEqual(moved.map((m) => [m.id, m.from, m.to]), [
       [old3, addDays(t, -3), addDays(t, 2)],
       [old2, addDays(t, -2), addDays(t, 3)],
-      [old1, addDays(t, -1), addDays(t, 4)],
-    ], '내일(1일 뒤)은 이미 잡혀 있어서 2일 뒤부터');
+    ], '내일(1일 뒤)은 이미 잡혀 있어서 2일 뒤부터. 예약 원고(하루 지남)는 이미 올라갔을 수 있어서 안 옮김');
     const rows = Object.fromEntries((await all(db, `select id, stage, publish_date::text as d from public.posts`)).map((r) => [r.id, r]));
-    assert.equal(rows[old1].stage, 'scheduled', '단계는 그대로');
-    assert.equal(rows[old3].stage, 'verify');
+    assert.deepEqual([rows[old1].stage, rows[old1].d], ['scheduled', addDays(t, -1)], '예약 원고는 날짜·단계 그대로');
+    assert.equal(rows[old3].stage, 'verify', '단계는 그대로');
     assert.equal(rows[fut].d, addDays(t, 1));
     assert.equal(rows[pub].d, addDays(t, -4), '게시한 글은 안 건드림');
     assert.equal(rows[del].d, addDays(t, -2), '휴지통은 안 건드림');
     assert.deepEqual(await val(db, `select public.reschedule_overdue()`), [], '다시 부르면 옮길 게 없음');
-    assert.equal((await val(db, `select public.backlog_state()`)).overdue, 0);
+    const bs = await val(db, `select public.backlog_state()`);
+    assert.deepEqual([bs.overdue, bs.overdue_scheduled], [0, 1], "예약한 날이 지난 원고는 따로 세서 화면이 '게시 완료 기록'을 권함");
   });
 });
 
@@ -134,14 +139,25 @@ describe('개선안 (refresh 작업 · set_refresh)', () => {
     assert.equal(p.body, before.body);
     assert.deepEqual(p.titles, before.titles);
     assert.equal(await val(db, `select status from public.requests where id = $1`, [job]), 'done');
-    // 다른 작업 번호를 넘겨도 그 작업은 안 끝냄 (refresh 가 아니라서)
-    await db.query(`select public.set_refresh($1, $2, $3::jsonb)`, [post, other, JSON.stringify({ intro: 'x' })]);
+    // 다른 작업 번호(refresh 가 아님)·이미 끝난 작업이면 저장도 안 하고 오류 — 저장만 되고 작업이 남아 다음 실행에 또 쓰는 일이 없게
+    await assert.rejects(db.query(`select public.set_refresh($1, $2, $3::jsonb)`, [post, other, JSON.stringify({ intro: 'x' })]), /refresh job is not pending for this post/);
     assert.equal(await val(db, `select status from public.requests where id = $1`, [other]), 'pending');
+    await assert.rejects(db.query(`select public.set_refresh($1, $2, $3::jsonb)`, [post, job, JSON.stringify({ intro: '두 번째' })]), /not pending/, '끝난 작업으로 또 저장 안 됨');
+    assert.equal((await val(db, `select refresh from public.posts where id = $1`, [post])).intro, '도입부 개선안', '오류가 나면 개선안도 그대로 (한 번에 되돌림)');
+  });
+
+  test('다른 글의 개선안 작업 번호로는 저장 안 됨', async () => {
+    const other = await draft(db, '다른 게시 글', { stage: 'published' });
+    const j2 = await val(db, `insert into public.requests (keyword, kind, post_id, payload) values ('다른 게시 글', 'refresh', $1, '{}') returning id`, [other]);
+    await assert.rejects(db.query(`select public.set_refresh($1, $2, $3::jsonb)`, [post, j2, JSON.stringify({ intro: '엉뚱한 글' })]), /not pending for this post/);
+    assert.equal(await val(db, `select status from public.requests where id = $1`, [j2]), 'pending');
+    assert.notEqual((await val(db, `select refresh from public.posts where id = $1`, [post])).intro, '엉뚱한 글');
   });
 
   test('이상한 값·없는 글은 거절', async () => {
     await assert.rejects(db.query(`select public.set_refresh($1, null, '[1]'::jsonb)`, [post]), /must be an object/);
-    await assert.rejects(db.query(`select public.set_refresh($1, null, '{}'::jsonb)`, ['00000000-0000-4000-8000-000000000000']), /post not found/);
+    await assert.rejects(db.query(`select public.set_refresh($1, null, '{}'::jsonb)`, [post]), /refresh job is required/);
+    await assert.rejects(db.query(`select public.set_refresh($1, $2, '{}'::jsonb)`, ['00000000-0000-4000-8000-000000000000', job]), /post not found/);
     await assert.rejects(db.query(`select public.set_refresh($1, null, $2::jsonb)`, [post, JSON.stringify({ intro: 'x'.repeat(30001) })]), /too long/);
   });
 });
@@ -188,7 +204,7 @@ describe('자동 작가 상황판 (writer_context 1.4.0)', () => {
     await db.query(`insert into public.post_channels (post_id, channel_id, posted_on) values ($1, 'threads', $2)`, [a, t]);
     await db.query(`insert into public.requests (keyword, kind, post_id, payload) values ('원룸 전기요 고르는 법', 'refresh', $1, '{"focus":"title"}')`, [a]);
     const ctx = await val(db, `select public.writer_context()`);
-    assert.deepEqual(ctx.backlog, { backlog: 1, limit: 7, overdue: 0 });
+    assert.deepEqual(ctx.backlog, { backlog: 1, limit: 7, overdue: 0, overdue_scheduled: 0 });
     assert.deepEqual(ctx.search_terms_top.map((x) => [x.term, x.views, x.posts]), [['원룸 전기요', 28, 2], ['온수매트 소음', 9, 1]], '90일 넘은 검색어는 빼고 많은 순');
     assert.equal(ctx.search_terms_top[0].post_keyword, '원룸 전기요 고르는 법');
     const job = ctx.jobs.find((j) => j.kind === 'refresh');
@@ -204,5 +220,126 @@ describe('자동 작가 상황판 (writer_context 1.4.0)', () => {
     const w = ctx2.jobs.find((j) => j.kind === 'write');
     assert.equal(w.post.body, null);
     assert.equal(w.post.metrics, undefined);
+  });
+});
+
+describe('유입 검색어 저장 (save_search_terms) — 기간이 겹치면 두 번 세지 않게', () => {
+  let db, post;
+  const save = (p, start, end, items, replace = false) => val(db, `select public.save_search_terms($1, $2, $3, $4::jsonb, $5, 'naver_blog', '네이버 블로그 통계')`, [p, start, end, JSON.stringify(items), replace]);
+  before(async () => { db = await freshDb(); post = await draft(db, '원룸 전기요 고르는 법', { stage: 'published' }); });
+
+  test('같은 기간은 검색어별로 숫자만 새로 (나눠 붙여넣은 앞의 검색어는 남음)', async () => {
+    const t = kstToday(), s = addDays(t, -13), e = addDays(t, -7);
+    const r1 = await save(post, s, e, [{ term: '원룸 전기요', views: 20 }, { term: '전기요 전자파', views: 9 }]);
+    assert.deepEqual(r1.map((x) => [x.term, x.views]), [['원룸 전기요', 20], ['전기요 전자파', 9]]);
+    await save(post, s, e, [{ term: '원룸 전기요', views: 22 }, { term: '전기요 세탁', views: null }]);
+    const rows = await all(db, `select term, views from public.search_terms where post_id = $1 order by term`, [post]);
+    assert.deepEqual(rows.map((x) => [x.term, x.views]), [['원룸 전기요', 22], ['전기요 세탁', null], ['전기요 전자파', 9]]);
+    assert.equal(await val(db, `select source_label from public.search_terms where term = '원룸 전기요'`), '네이버 블로그 통계');
+  });
+
+  test('기간이 겹치는 다른 기록이 있으면 거절 (겹치는 기간을 알려줌), 겹치지 않는 기간은 그대로 저장', async () => {
+    const t = kstToday();
+    // 앞 테스트: 13일 전 ~ 7일 전. 하루씩 밀린 7일(12일 전 ~ 6일 전)은 겹침 → 거절, 아무것도 안 바뀜
+    const before = await val(db, `select count(*)::int from public.search_terms where post_id = $1`, [post]);
+    await assert.rejects(save(post, addDays(t, -12), addDays(t, -6), [{ term: '원룸 전기요', views: 21 }]),
+      (e) => /period overlap: \[\{"period_end": "[\d-]+", "period_start": "[\d-]+"\}\]/.test(e.message) && e.message.includes(addDays(t, -13)));
+    assert.equal(await val(db, `select count(*)::int from public.search_terms where post_id = $1`, [post]), before, '거절되면 하나도 안 들어감');
+    // 겹치지 않는 다음 7일(6일 전 ~ 오늘)은 저장됨 → 합계는 두 기간을 더한 값
+    await save(post, addDays(t, -6), t, [{ term: '원룸 전기요', views: 5 }]);
+    assert.equal(await val(db, `select sum(views)::int from public.search_terms where post_id = $1 and term = '원룸 전기요'`, [post]), 27);
+  });
+
+  test('확인을 받고 replace_overlap 이면 겹치는 기간의 기록을 지우고 저장 (다른 글·안 겹치는 기간은 그대로)', async () => {
+    const t = kstToday();
+    const other = await draft(db, '다른 글', { stage: 'published' });
+    await save(other, addDays(t, -12), addDays(t, -6), [{ term: '다른 글 검색어', views: 3 }]);
+    // 12일 전 ~ 오늘(13일치)로 다시 넣기: 13일 전~7일 전·6일 전~오늘 둘 다 겹침 → 지우고 새로
+    await assert.rejects(save(post, addDays(t, -12), t, [{ term: '원룸 전기요', views: 30 }]), /period overlap/);
+    const r = await save(post, addDays(t, -12), t, [{ term: '원룸 전기요', views: 30 }], true);
+    assert.deepEqual(r.map((x) => [x.term, x.views]), [['원룸 전기요', 30]]);
+    const rows = await all(db, `select term, views, period_start::text as s, period_end::text as e from public.search_terms where post_id = $1`, [post]);
+    assert.deepEqual(rows.map((x) => [x.term, x.views, x.s, x.e]), [['원룸 전기요', 30, addDays(t, -12), t]], '겹치던 두 기간은 지워짐 → 같은 유입이 두 번 안 세짐');
+    assert.equal(await val(db, `select count(*)::int from public.search_terms where post_id = $1`, [other]), 1, '다른 글 기록은 그대로');
+  });
+
+  test('없는 글·지운 글·빈 목록·거꾸로 된 기간은 거절', async () => {
+    const t = kstToday();
+    await assert.rejects(save('00000000-0000-4000-8000-000000000000', t, t, [{ term: 'x', views: 1 }]), /post not found/);
+    const gone = await draft(db, '지운 글', { stage: 'published' });
+    await db.query(`update public.posts set deleted_at = now() where id = $1`, [gone]);
+    await assert.rejects(save(gone, t, t, [{ term: 'x', views: 1 }]), /post not found/);
+    await assert.rejects(save(post, t, t, []), /terms is required/);
+    await assert.rejects(save(post, t, addDays(t, -1), [{ term: 'x', views: 1 }]), /period_end is required/);
+  });
+});
+
+describe('실적이 있는 글 (metric_post_ids) · 기간 통계 (stats_window)', () => {
+  let db, a, b, t;
+  const m = (post, s, e, views, clicks) => db.query(`insert into public.metrics (post_id, period_start, period_end, views, clicks, revenue_est, source) values ($1, $2, $3, $4, $5, $6, 'manual')`, [post, s, e, views, clicks, clicks == null ? null : clicks * 100]);
+  before(async () => {
+    db = await freshDb();
+    t = kstToday();
+    a = await draft(db, '원룸 전기요 고르는 법', { stage: 'published' });
+    b = await draft(db, '온수매트 소음', { stage: 'published' });
+    await draft(db, '실적 없는 글', { stage: 'published' });
+    await m(a, addDays(t, -6), addDays(t, -6), 100, 3);     // 최근 7일 안
+    await m(a, addDays(t, -2), t, 50, 1);                    // 최근 7일 안
+    await m(b, addDays(t, -10), addDays(t, -8), 40, null);   // 그 전 7일 안
+    await m(b, addDays(t, -29), t, 3000, 20);                // 한 달치 — 두 주에 다 걸침
+    await m(null, addDays(t, -3), addDays(t, -3), 7, 0);     // 글 없는 실적
+  });
+
+  test('metric_post_ids: 실적이 한 줄이라도 있는 글 id 만 (글 없는 실적은 빼고, 겹치지 않게)', async () => {
+    const ids = await val(db, `select public.metric_post_ids()`);
+    assert.deepEqual([...ids].sort(), [a, b].sort());
+  });
+
+  test('within = false 는 006 stats 와 똑같음 (기간에 걸친 실적을 다 셈)', async () => {
+    for (const [f, e] of [[addDays(t, -6), t], [addDays(t, -13), addDays(t, -7)], [null, null], [addDays(t, -29), t]]) {
+      const old = await val(db, `select public.stats($1, $2)`, [f, e]);
+      const neu = await val(db, `select public.stats_window($1, $2, false)`, [f, e]);
+      const { within, partial, ...rest } = neu;
+      assert.deepEqual([within, partial], [false, null]);
+      assert.deepEqual(rest, old, `${f}~${e}`);
+    }
+  });
+
+  test('within = true 는 기간 안에 다 들어가는 실적만 — 한 달치 실적이 최근 7일·그 전 7일에 똑같이 잡히지 않음', async () => {
+    const now = await val(db, `select public.stats_window($1, $2, true)`, [addDays(t, -6), t]);
+    const prev = await val(db, `select public.stats_window($1, $2, true)`, [addDays(t, -13), addDays(t, -7)]);
+    assert.deepEqual([now.totals.views.sum, now.totals.clicks.sum, now.totals.rows], [157, 4, 3], '100 + 50 + 글 없는 7 (한 달치 3000은 뺌)');
+    assert.equal(now.partial, 1, '걸쳐 있어서 뺀 줄 = 한 달치 1줄');
+    assert.deepEqual([prev.totals.views.sum, prev.totals.clicks.sum, prev.partial], [40, null, 1], "그 전 7일: 40 (클릭은 기록이 없어서 0이 아니라 null), 한 달치는 여기서도 뺌");
+    const overlap = await val(db, `select public.stats($1, $2)`, [addDays(t, -13), addDays(t, -7)]);
+    assert.equal(overlap.totals.views.sum, 3040, '예전 방식(stats)은 한 달치를 그 전 7일에도 다 넣어서 3040');
+    assert.deepEqual(now.by_post.map((x) => x.key).filter(Boolean), [a], '글별도 같은 기준');
+  });
+});
+
+describe('주간 정리 예약 작업 쿼리 (docs/weekly-review-prompt.md)', () => {
+  test('문서의 쿼리를 그대로 돌림: 읽기만, 지운 글 기록은 빼고, 실적은 7일 안에 다 들어가는 것만 (뺀 줄 수 같이)', async () => {
+    const doc = readFileSync(join(MIGRATIONS_DIR, '..', '..', 'docs', 'weekly-review-prompt.md'), 'utf8');
+    const prompt = doc.split('\n---\n')[1];
+    const sql = prompt.split('## 읽을 것 (쿼리 하나)\n')[1].split('\n## ')[0].trim();
+    assert.match(sql, /^select jsonb_build_object\(/);
+    assert.doesNotMatch(sql, /\b(insert|update|delete|drop|truncate|alter)\b/i, '읽기만');
+    const db = await freshDb();
+    const t = kstToday();
+    const a = await draft(db, '게시 글', { stage: 'published' });
+    await db.query(`update public.posts set published_on = $2 where id = $1`, [a, addDays(t, -2)]);
+    const gone = await draft(db, '지운 글', { stage: 'published' });
+    await db.query(`insert into public.post_channels (post_id, channel_id, posted_on) values ($1, 'threads', $2), ($3, 'threads', $2)`, [a, addDays(t, -1), gone]);
+    await db.query(`select public.save_search_terms($1, $2, $3, '[{"term":"원룸 전기요","views":3}]'::jsonb)`, [gone, addDays(t, -6), t]);
+    await db.query(`update public.posts set deleted_at = now() where id = $1`, [gone]);
+    const m = (s, e, v) => db.query(`insert into public.metrics (post_id, period_start, period_end, views, source) values ($1, $2, $3, $4, 'manual')`, [a, s, e, v]);
+    await m(addDays(t, -3), addDays(t, -3), 40);
+    await m(addDays(t, -29), t, 3000);
+    const w = await val(db, sql.replace(/;\s*$/, ''));
+    assert.equal(w.today, t);
+    assert.deepEqual([w.published, w.spread, w.terms], [1, 1, 0], '지운 글의 다른 채널·검색어 기록은 안 셈');
+    assert.deepEqual([w.metrics.rows, w.metrics.views, w.metrics.clicks, w.metrics_partial], [1, 40, null, 1], '한 달치 3000은 빼고 1줄 뺐다고 알려줌, 클릭은 기록이 없어서 null(데이터 없음)');
+    assert.deepEqual(Object.keys(w.ctx).sort(), ['backlog', 'limit', 'overdue', 'overdue_scheduled']);
+    assert.equal(w.programs_in_use, 0);
   });
 });

@@ -365,14 +365,26 @@ async function getState(c: Ctx) {
   for (const r of [posts, trash, jobs, settings, runs, channels, programs, compat, topics, imports]) if (r.error) throw r.error;
   // 1000줄이 넘어도 빠지지 않게 끝까지 (링크·상품이 잘리면 '링크 없음' 같은 잘못된 오류가 뜸)
   const since400 = new Date(Date.now() - 400 * 86400e3).toISOString().slice(0, 10);
-  // 1.4.0: 다른 채널 기록·유입 검색어 (016 전 DB면 빈 목록 — 화면은 '데이터 없음'으로)
-  const softAll = (p: Promise<J[]>, what: string) => p.catch((e) => { console.error(`state ${what}:`, String((e as Error)?.message ?? e)); return [] as J[]; });
-  const [postChannels, searchTerms, metricPosts] = await Promise.all([
-    softAll(fetchAll("post_channels", [["posted_on", false], ["id", true]]), "post_channels"),
-    softAll(fetchAll("search_terms", [["period_end", false], ["id", true]], (q) => q.gte("period_end", since400),
-      "id, post_id, term, views, period_start, period_end, channel_id, source_label, created_at"), "search_terms"),
-    // 흐름판의 '실적' 단계: 실적이 한 줄이라도 있는 글
-    softAll(fetchAll("metrics", [["id", true]], (q) => q.not("post_id", "is", null), "post_id"), "metric_posts"),
+  // 1.4.0: 다른 채널 기록·유입 검색어·실적이 있는 글 — 못 읽으면(016 전 DB거나 오류) 빈 목록을 보내고 unavailable 에 적음
+  // → 화면은 0이 아니라 '데이터 없음'으로 보여줌 (빈 목록과 못 읽은 것을 구분)
+  const unavailable: string[] = [];
+  const soft = <T>(p: PromiseLike<T>, key: string, empty: T): Promise<T> => Promise.resolve(p).catch((e) => {
+    console.error(`state ${key}:`, String((e as Error)?.message ?? e));
+    unavailable.push(key);
+    return empty;
+  });
+  const rpcData = (p: PromiseLike<{ data: unknown; error: unknown }>) => Promise.resolve(p).then(({ data, error }) => { if (error) throw error; return data; });
+  // 홈 '최근 7일 정리'의 자동 작가 실행 수: 한국 날짜로 6일 전 0시부터 (실행 기록 목록이 잘려도 정확하게)
+  const week0 = new Date(Date.parse(`${kstToday()}T00:00:00+09:00`) - 6 * 86400e3).toISOString();
+  const [postChannels, searchTerms, metricPosts, runsAuto7d] = await Promise.all([
+    soft(fetchAll("post_channels", [["posted_on", false], ["id", true]]), "post_channels", [] as J[]),
+    soft(fetchAll("search_terms", [["period_end", false], ["id", true]], (q) => q.gte("period_end", since400),
+      "id, post_id, term, views, period_start, period_end, channel_id, source_label, created_at"), "search_terms", [] as J[]),
+    // 흐름판의 '실적' 단계: 실적이 한 줄이라도 있는 글 (DB가 글 id 만 모아서 줌)
+    soft(rpcData(sb.rpc("metric_post_ids")).then((d) => (Array.isArray(d) ? d.map(String) : [])), "metric_post_ids", [] as string[]),
+    Promise.resolve(sb.from("runs").select("id", { count: "exact", head: true }).eq("kind", "auto").gte("ran_at", week0))
+      .then((r) => { if (r.error) throw r.error; return typeof r.count === "number" ? r.count : null; })
+      .catch((e) => { console.error("state runs_auto_7d:", String((e as Error)?.message ?? e)); return null; }),
   ]);
   const [products, pp, links, imageSlots] = await Promise.all([
     fetchAll("products", [["updated_at", false], ["id", true]]),
@@ -392,7 +404,7 @@ async function getState(c: Ctx) {
     posts: posts.data, trash: trash.data, jobs: jobs.data, settings: settings.data, runs: runs.data,
     channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products,
     post_products: pp, links, imports: imports.data, image_slots: imageSlots.error ? [] : imageSlots.data,
-    post_channels: postChannels, search_terms: searchTerms, metric_post_ids: [...new Set(metricPosts.map((m) => String(m.post_id)))],
+    post_channels: postChannels, search_terms: searchTerms, metric_post_ids: metricPosts, unavailable, runs_auto_7d: runsAuto7d,
     requests: jobs.data, lastRun: runs.data?.[0] ?? null, // 예전 화면 호환
   });
 }
@@ -401,6 +413,12 @@ async function getStats(c: Ctx) {
   const from = c.url.searchParams.get("from");
   const to = c.url.searchParams.get("to");
   const range = { d_from: from ? reqDate(from, "from") : null, d_to: to ? reqDate(to, "to") : null };
+  // within=1: 기간 안에 다 들어가는 실적만 (홈 '최근 7일 정리' — 한 달치 실적이 두 주에 똑같이 잡히지 않게, 016)
+  if (c.url.searchParams.get("within") === "1") {
+    const { data, error } = await sb.rpc("stats_window", { ...range, within: true });
+    if (error) { needs016(error, "stats_window"); throw error; }
+    return json({ stats: data });
+  }
   // 이미지 생성 비용은 실적의 '비용'과 따로 셈 (같은 돈이 두 번 더해지지 않게 따로 보냄)
   const [st, ic] = await Promise.all([sb.rpc("stats", range), sb.rpc("image_costs", range)]);
   if (st.error) throw st.error;
@@ -1821,6 +1839,8 @@ async function deletePostChannel(c: Ctx) {
   return json({ ok: true });
 }
 // 유입 검색어: 블로그 통계에서 옮겨 적은 숫자 (앱이 직접 모으지 않음). 같은 글·검색어·기간이면 숫자만 새로
+// 저장은 DB 함수 save_search_terms 하나로 (한 번에). 그 글에 기간이 겹치는 다른 기록이 있으면 409 period_overlap —
+// 화면이 확인을 받고 replace_overlap: true 로 다시 보내면 겹치는 기간을 지우고 저장
 async function saveSearchTerms(c: Ctx) {
   const b = await readJson(c.req, 200_000);
   const post = await getPost(c.params[0]);
@@ -1841,12 +1861,23 @@ async function saveSearchTerms(c: Ctx) {
     const k = term.toLowerCase();
     const was = seen.get(k);
     if (was) { if (views != null) was.views = (Number(was.views ?? 0)) + views; continue; }
-    seen.set(k, { post_id: post.id, term, views, period_start: start, period_end: end, channel_id: ch, source_label: label });
+    seen.set(k, { term, views });
   }
-  const rows = [...seen.values()];
-  const { data, error } = await sb.from("search_terms").upsert(rows, { onConflict: "post_id,term,period_start,period_end" }).select();
-  if (error) { needs016(error, "search_terms"); throw error; }
-  return json({ saved: (data ?? []).length, search_terms: data ?? [] });
+  const { data, error } = await sb.rpc("save_search_terms", {
+    target: post.id, p_start: start, p_end: end, items: [...seen.values()], replace_overlap: b.replace_overlap === true, p_channel: ch, p_label: label,
+  });
+  if (error) {
+    needs016(error, "save_search_terms");
+    const ov = /period overlap: (\[.*\])/s.exec(String(error.message ?? ""));
+    if (ov) {
+      let periods: J[] = [];
+      try { periods = (JSON.parse(ov[1]) as J[]).map((x) => ({ period_start: String(x.period_start), period_end: String(x.period_end) })); } catch { /* 모양이 달라도 409 는 그대로 */ }
+      fail(409, "period_overlap", { periods });
+    }
+    rpcError(error);
+  }
+  const saved = Array.isArray(data) ? (data as J[]) : [];
+  return json({ saved: saved.length, search_terms: saved });
 }
 async function deleteSearchTerm(c: Ctx) {
   const { data, error } = await sb.from("search_terms").delete().eq("id", c.params[0]).select("id").maybeSingle();

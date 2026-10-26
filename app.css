@@ -273,6 +273,8 @@ ol.steps{margin:6px 0;padding-left:20px;font-size:14px}
 .flow li.st-warn b{color:var(--warn)}
 .flow li.st-block{border-color:var(--late);background:var(--late-bg)}
 .flow li.st-block b,.flow li.st-block span{color:var(--late)}
+.flow li.st-none{border-style:dashed}
+.flow li.st-none b{color:var(--muted)}
 .ops .notice b,.ops .okline b{display:block;margin-bottom:2px}
 .ops .notice p,.ops .okline p{margin:0 0 6px}
 .okline{background:var(--done-bg);color:var(--done);border-radius:10px;padding:10px 12px;font-size:13px}

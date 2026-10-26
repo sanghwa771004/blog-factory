@@ -6,7 +6,9 @@
 -- 3) settings.backlog_limit: 검수·게시 안 한 원고가 이만큼 쌓이면 자동 작가가 새 자동 글을 안 씀 (0 = 하루 발행 수 × 7)
 -- 4) posts.refresh + 작업 종류 refresh: 게시한 글의 개선안(제목·도입부·소제목·링크 위치)을 자동 작가가 써서 저장. 글 자체는 안 바꿈
 -- 5) 함수: backlog_state(쌓인 원고), reschedule_overdue(예정일 지난 원고 날짜 다시 잡기), set_refresh(개선안 저장),
---    add_post(자동 글은 쌓인 원고가 한도 이상이면 거절), writer_context(쌓인 원고·유입 검색어·개선안 작업 정보 추가)
+--    add_post(자동 글은 쌓인 원고가 한도 이상이면 거절), writer_context(쌓인 원고·유입 검색어·개선안 작업 정보 추가),
+--    save_search_terms(유입 검색어 저장 — 같은 글에 기간이 겹치면 거절해서 숫자가 두 번 더해지지 않게),
+--    metric_post_ids(실적이 있는 글 id), stats_window(기간 통계 — 주간 비교는 기간 안에 다 들어가는 실적만)
 
 -- 1 ───────── 다른 채널에 올린 기록
 create table if not exists public.post_channels (
@@ -83,6 +85,8 @@ end $$;
 
 -- 5 ───────── 함수
 -- 쌓인 원고: 사람이 검수·게시해야 하는 원고(검수 필요·정보 필요·발행 준비·예약). 한도 0이면 하루 발행 수 × 7
+-- overdue = 예정일이 지난 원고 중 날짜를 다시 잡을 수 있는 것(검수 필요·정보 필요·발행 준비),
+-- overdue_scheduled = 예약한 날이 지난 원고 (블로그에 이미 올라갔을 수 있어서 날짜를 옮기지 않고 '게시 완료 기록'을 권함)
 create or replace function public.backlog_state() returns jsonb
 language sql stable set search_path = '' as $$
   select jsonb_build_object(
@@ -91,12 +95,16 @@ language sql stable set search_path = '' as $$
     'limit', coalesce((select case when s.backlog_limit > 0 then s.backlog_limit else greatest(coalesce(s.per_day, 1), 1) * 7 end
                        from public.settings s where s.id = 1), 7),
     'overdue', (select count(*) from public.posts p
-                where p.deleted_at is null and p.stage in ('review', 'verify', 'ready', 'scheduled')
+                where p.deleted_at is null and p.stage in ('review', 'verify', 'ready')
+                  and p.publish_date < (now() at time zone 'Asia/Seoul')::date),
+    'overdue_scheduled', (select count(*) from public.posts p
+                where p.deleted_at is null and p.stage = 'scheduled'
                   and p.publish_date < (now() at time zone 'Asia/Seoul')::date)
   )
 $$;
 
 -- 예정일이 지났는데 아직 게시 안 한 원고를 내일부터 빈 날에 다시 배정 (하루 발행 수를 넘지 않게, 지난 날짜 순서대로). 단계는 그대로
+-- '예약'(scheduled) 원고는 옮기지 않음 — 예약한 날이 지났으면 블로그에 이미 올라갔을 수 있어서 (앱이 '게시 완료 기록'을 권함)
 create or replace function public.reschedule_overdue() returns jsonb
 language plpgsql set search_path = '' as $$
 declare
@@ -107,7 +115,7 @@ declare
 begin
   for r in
     select p.id, p.publish_date from public.posts p
-    where p.deleted_at is null and p.stage in ('review', 'verify', 'ready', 'scheduled') and p.publish_date < kst_today
+    where p.deleted_at is null and p.stage in ('review', 'verify', 'ready') and p.publish_date < kst_today
     order by p.publish_date, p.created_at
     for update
   loop
@@ -118,20 +126,116 @@ begin
   return moved;
 end $$;
 
--- 개선안 저장 (자동 작가가 부름). 그 글의 refresh 작업만 완료로 바꿈
+-- 개선안 저장 (자동 작가가 부름). 그 글의 기다리는 refresh 작업을 완료로 바꿈
+-- 작업 번호가 그 글의 기다리는 refresh 작업이 아니면 저장도 안 하고 오류 (저장만 되고 작업이 남아서 다음 실행에 또 쓰는 일이 없게)
 create or replace function public.set_refresh(target uuid, job uuid, v jsonb) returns void
 language plpgsql set search_path = '' as $$
 begin
   if jsonb_typeof(v) <> 'object' then raise exception 'refresh must be an object'; end if;
   if length(v::text) > 30000 then raise exception 'refresh is too long'; end if;
+  if job is null then raise exception 'refresh job is required'; end if;
   update public.posts set refresh = v || jsonb_build_object('_updated_at', now(), '_job', job)
     where id = target and deleted_at is null;
   if not found then raise exception 'post not found'; end if;
-  if job is not null then
-    update public.requests set status = 'done', done_at = now(), note = ''
-      where id = job and kind = 'refresh' and post_id = target and status = 'pending';
-  end if;
+  update public.requests set status = 'done', done_at = now(), note = ''
+    where id = job and kind = 'refresh' and post_id = target and status = 'pending';
+  if not found then raise exception 'refresh job is not pending for this post'; end if;
 end $$;
+
+-- 유입 검색어 저장 (서버가 부름 — 값 검사는 서버에서). 한 번에 (중간에 실패하면 아무것도 안 바뀜)
+-- 같은 기간: 검색어별로 숫자만 새로 (나눠서 붙여넣어도 앞의 검색어는 남음)
+-- 기간이 겹치는 다른 기록이 그 글에 있으면 거절 — 겹치는 걸 다 더하면 같은 유입이 두 번 세져서.
+--   replace_overlap 이면 겹치는 기간의 기록을 지우고 저장 (사용자가 화면에서 확인한 뒤에만)
+create or replace function public.save_search_terms(target uuid, p_start date, p_end date, items jsonb,
+  replace_overlap boolean default false, p_channel text default null, p_label text default '')
+returns jsonb
+language plpgsql set search_path = '' as $$
+declare
+  ov jsonb;
+  saved jsonb;
+begin
+  if jsonb_typeof(items) <> 'array' or jsonb_array_length(items) = 0 then raise exception 'terms is required'; end if;
+  if p_start is null or p_end is null or p_end < p_start then raise exception 'period_end is required'; end if;
+  perform 1 from public.posts p where p.id = target and p.deleted_at is null for update; -- 같은 글 저장은 하나씩
+  if not found then raise exception 'post not found'; end if;
+  select jsonb_agg(x order by x->>'period_start', x->>'period_end') into ov from (
+    select distinct jsonb_build_object('period_start', s.period_start, 'period_end', s.period_end) as x
+    from public.search_terms s
+    where s.post_id = target and s.period_start <= p_end and s.period_end >= p_start
+      and not (s.period_start = p_start and s.period_end = p_end)) o;
+  if ov is not null then
+    if not coalesce(replace_overlap, false) then raise exception 'period overlap: %', ov::text; end if;
+    delete from public.search_terms s
+      where s.post_id = target and s.period_start <= p_end and s.period_end >= p_start
+        and not (s.period_start = p_start and s.period_end = p_end);
+  end if;
+  with ins as (
+    insert into public.search_terms as st (post_id, term, views, period_start, period_end, channel_id, source_label)
+    select target, y.term, y.views, p_start, p_end, p_channel, coalesce(p_label, '')
+    from (select x.term, sum(x.views)::int as views from jsonb_to_recordset(items) as x(term text, views int) group by x.term) y
+    on conflict (post_id, term, period_start, period_end) do update
+      set views = excluded.views, channel_id = excluded.channel_id, source_label = excluded.source_label
+    returning st.id, st.post_id, st.term, st.views, st.period_start, st.period_end, st.channel_id, st.source_label, st.created_at
+  )
+  select coalesce(jsonb_agg(to_jsonb(ins) order by ins.term), '[]'::jsonb) into saved from ins;
+  return saved;
+end $$;
+
+-- 실적이 한 줄이라도 있는 글 (흐름판 '실적' 단계). 실적 줄을 다 읽지 않고 글 id 만
+create or replace function public.metric_post_ids() returns jsonb
+language sql stable set search_path = '' as $$
+  select coalesce(jsonb_agg(x.post_id), '[]'::jsonb)
+  from (select distinct m.post_id from public.metrics m where m.post_id is not null) x
+$$;
+
+-- 기간 통계 (006 stats 와 같은 계산·같은 모양). within = false 면 stats 와 똑같이 기간에 걸친 실적을 다 셈
+-- within = true 면 기간 안에 '다 들어가는' 실적만 셈 (최근 7일·그 전 7일 비교에서 한 달치 실적이 두 주에 다 잡히지 않게)
+--   partial = 기간에 걸쳐 있지만 다 들어가지 않아서 뺀 실적 줄 수
+create or replace function public.stats_window(d_from date default null, d_to date default null, within boolean default false) returns jsonb
+language sql stable set search_path = '' as $$
+with m as (
+  select m.*,
+    coalesce(m.channel_id, p.channel_id) as ch,
+    coalesce(m.program_id, case when cardinality(p.program_ids) = 1 then p.program_ids[1] end) as pr,
+    nullif(p.category, '') as cat
+  from public.metrics m
+  left join public.posts p on p.id = m.post_id
+  where case when coalesce(within, false)
+             then (d_from is null or m.period_start >= d_from) and (d_to is null or m.period_end <= d_to)
+             else (d_from is null or m.period_end >= d_from) and (d_to is null or m.period_start <= d_to) end
+), g as (
+  select grouping(post_id) as g_post, grouping(ch) as g_ch, grouping(pr) as g_pr, grouping(cat) as g_cat,
+    post_id, ch, pr, cat, count(*) as rows,
+    jsonb_build_object(
+      'views', jsonb_build_object('sum', sum(views), 'n', count(views)),
+      'impressions', jsonb_build_object('sum', sum(impressions), 'n', count(impressions)),
+      'clicks', jsonb_build_object('sum', sum(clicks), 'n', count(clicks)),
+      'orders', jsonb_build_object('sum', sum(orders), 'n', count(orders)),
+      'cancels', jsonb_build_object('sum', sum(cancels), 'n', count(cancels)),
+      'revenue_est', jsonb_build_object('sum', sum(revenue_est), 'n', count(revenue_est)),
+      'revenue_confirmed', jsonb_build_object('sum', sum(revenue_confirmed), 'n', count(revenue_confirmed)),
+      'revenue_paid', jsonb_build_object('sum', sum(revenue_paid), 'n', count(revenue_paid)),
+      'cost', jsonb_build_object('sum', sum(cost), 'n', count(cost)),
+      'sources', to_jsonb(array_remove(array_agg(distinct nullif(source_label, '')), null)),
+      'last_date', max(period_end)
+    ) as v
+  from m
+  group by grouping sets ((), (post_id), (ch), (pr), (cat))
+)
+select jsonb_build_object(
+  'from', d_from, 'to', d_to, 'within', coalesce(within, false),
+  'partial', case when coalesce(within, false) then (
+      select count(*) from public.metrics x
+      where (d_from is null or x.period_end >= d_from) and (d_to is null or x.period_start <= d_to)
+        and not ((d_from is null or x.period_start >= d_from) and (d_to is null or x.period_end <= d_to))) end,
+  'totals', coalesce((select v || jsonb_build_object('rows', rows) from g where g_post = 1 and g_ch = 1 and g_pr = 1 and g_cat = 1),
+                     jsonb_build_object('rows', 0)),
+  'by_post', coalesce((select jsonb_agg(v || jsonb_build_object('key', post_id, 'rows', rows)) from g where g_post = 0), '[]'::jsonb),
+  'by_channel', coalesce((select jsonb_agg(v || jsonb_build_object('key', ch, 'rows', rows)) from g where g_ch = 0), '[]'::jsonb),
+  'by_program', coalesce((select jsonb_agg(v || jsonb_build_object('key', pr, 'rows', rows)) from g where g_pr = 0), '[]'::jsonb),
+  'by_category', coalesce((select jsonb_agg(v || jsonb_build_object('key', cat, 'rows', rows)) from g where g_cat = 0), '[]'::jsonb)
+);
+$$;
 
 -- 원고 저장 (011 add_post + 자동 글은 쌓인 원고가 한도 이상이면 거절 — 요청·Claude 안 글공장 원고는 그대로 받음)
 create or replace function public.add_post(p jsonb, start_offset int default 1)
@@ -293,6 +397,9 @@ alter table public.post_channels enable row level security;
 alter table public.search_terms enable row level security;
 revoke all on public.post_channels, public.search_terms from anon, authenticated;
 revoke execute on function
-  public.backlog_state(), public.reschedule_overdue(), public.set_refresh(uuid, uuid, jsonb), public.add_post(jsonb, int), public.writer_context()
+  public.backlog_state(), public.reschedule_overdue(), public.set_refresh(uuid, uuid, jsonb), public.add_post(jsonb, int), public.writer_context(),
+  public.save_search_terms(uuid, date, date, jsonb, boolean, text, text), public.metric_post_ids(), public.stats_window(date, date, boolean)
   from public, anon, authenticated;
-grant execute on function public.backlog_state(), public.reschedule_overdue() to service_role;
+grant execute on function public.backlog_state(), public.reschedule_overdue(),
+  public.save_search_terms(uuid, date, date, jsonb, boolean, text, text), public.metric_post_ids(), public.stats_window(date, date, boolean)
+  to service_role;

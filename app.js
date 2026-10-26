@@ -120,6 +120,7 @@ const ERR = {
   needs_experience: "'실제 경험 후기'는 내 경험을 적어야 요청할 수 있어. 경험을 적거나 글 유형을 바꿔줘.",
   db_update_needed: 'DB 업데이트가 아직 안 돼서 이 기능은 쓸 수 없어. 배포를 마저 해줘.',
   not_published: '게시한 글만 개선안을 요청할 수 있어 (실적·검색어를 보고 고쳐).',
+  period_overlap: '이 글에 기간이 겹치는 검색어 기록이 있어. 겹치면 같은 유입이 두 번 세져서, 겹치는 기간을 지우고 넣어줘.',
   job_exists: '이 글은 이미 개선안을 기다리고 있어. 자동 작가가 쓴 뒤에 다시 요청해줘.',
   too_many_jobs: '기다리는 작업이 30개라 더 넣을 수 없어. 자동 작가가 처리한 뒤에 넣어줘.',
   too_many_jobs_today: '오늘 넣을 수 있는 작업(60개)을 다 썼어. 내일 다시 넣어줘.',
@@ -208,10 +209,14 @@ async function run(button, fn, okMsg) {
 const S = {
   loaded: false, posts: [], trash: [], jobs: [], settings: null, runs: [], channels: [], programs: [], compat: [], topics: [],
   products: [], post_products: [], links: [], imports: [], image_slots: [], stats: {}, postMetrics: {}, manualMetrics: null,
-  post_channels: [], search_terms: [], metric_post_ids: [],
+  post_channels: [], search_terms: [], metric_post_ids: [], unavailable: [], runs_auto_7d: null,
 };
 let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {}, slotsBy: {}, pcBy: {}, terms: new Map() };
-const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids'];
+const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids', 'unavailable', 'runs_auto_7d'];
+// 서버가 null 로 보낼 수 있는 값 (null = 모름 — 예전 값을 그대로 두지 않음)
+const NULLABLE_KEYS = new Set(['runs_auto_7d']);
+// 서버가 못 읽은 것(DB 016 전이거나 오류)은 null — 계산에서 0이 아니라 '데이터 없음'으로
+const known = (k) => ((S.unavailable || []).includes(k) ? null : S[k]);
 function index() {
   M = {
     prog: Object.fromEntries(S.programs.map((p) => [p.id, p])),
@@ -260,7 +265,7 @@ async function load() {
     const sig = JSON.stringify(STATE_KEYS.map((k) => j[k]));
     const changed = sig !== lastSig;
     lastSig = sig;
-    for (const k of STATE_KEYS) S[k] = j[k] ?? S[k];
+    for (const k of STATE_KEYS) S[k] = NULLABLE_KEYS.has(k) && k in j ? j[k] : (j[k] ?? S[k]);
     S.serverVersion = j.version || '';
     S.loaded = true; lastLoad = Date.now(); index();
     $('#errLine').hidden = true;
@@ -287,12 +292,14 @@ function loadCache() {
   for (const k of STATE_KEYS) if (c[k] !== undefined) S[k] = c[k];
   S.loaded = true; index();
 }
-async function getStats(from, to, force) {
-  const key = `${from || ''}~${to || ''}`;
+// within: 기간 안에 다 들어가는 실적만 (홈 '최근 7일 정리')
+async function getStats(from, to, force, { within = false } = {}) {
+  const key = `${from || ''}~${to || ''}${within ? '~in' : ''}`;
   if (!force && S.stats[key] && Date.now() - S.stats[key].at < 60_000) return S.stats[key].data;
   const q = new URLSearchParams();
   if (from) q.set('from', from);
   if (to) q.set('to', to);
+  if (within) q.set('within', '1');
   const j = await api('/stats' + (q.toString() ? '?' + q : ''));
   S.stats[key] = { at: Date.now(), data: j.stats };
   return j.stats;
@@ -412,7 +419,7 @@ function viewHome() {
   const failedJobs = S.jobs.filter((j) => j.status === 'failed' && j.kind !== 'write' && L.daysSince(j.created_at, t) <= 14);
 
   // 운영 흐름 (1.4.0): 주제 → 원고 → 게시 → 다른 채널 → 실적 → 개선, 지금 막힌 곳
-  const syncRecs = homeRecs(t, null);
+  const syncRecs = homeRecs(t, null); // 실적을 불러오기 전 (불러오면 아래에서 바꿈)
   let ops = opsPanel(t, syncRecs.filter((r) => r.group === 'fix').length);
   box.append(ops);
 
@@ -436,14 +443,14 @@ function viewHome() {
   // 자동 작가
   const pend = pendingJobs();
   const lr = S.runs[0];
-  const plan = L.autoPlan({ posts: S.posts, settings: S.settings || {}, today: t, pendingWrites: pend.filter((j) => j.kind === 'write').length });
+  const plan = L.autoPlan({ posts: S.posts, settings: S.settings || {}, today: t, pendingWrites: pend.filter((j) => j.kind === 'write').length }); // 요청 원고가 채워지면 쌓인 원고가 그만큼 늘어 (프롬프트 3단계와 같음)
   const writer = panel('자동 작가',
     h('p', { class: 'hint' }, `다음 실행 ${nextRunText()} · 기다리는 작업 ${pend.length}개 (원고 ${pend.filter((j) => j.kind === 'write').length} · 주제 ${pend.filter((j) => j.kind === 'topics').length} · 변환 ${pend.filter((j) => j.kind === 'reformat').length} · 개선안 ${pend.filter((j) => j.kind === 'refresh').length})`),
     h('p', { class: 'hint' }, `앞으로 7일(내일부터) 발행일이 잡힌 원고 ${plan.scheduled}편 / 목표 ${plan.goal}편 (하루 ${plan.perDay}편 × 7일)`),
     h('p', { class: plan.backlogFull ? 'notice' : 'hint' }, plan.backlogFull
       ? `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개 — 한도가 차서 자동 작가가 새 자동 글을 멈췄어 (요청한 원고는 써). 검수·게시해서 ${plan.backlogLimit}개 아래로 줄이면 다시 써.`
       : `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개`),
-    h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편${plan.room < AUTO_MAX ? `, 쌓아둘 한도까지 ${plan.room}편` : ''}). 쓴 원고는 '검수 필요'로 들어와.` : plan.backlogFull ? '쌓인 원고가 한도라서 다음 실행에 새 자동 글은 없어.' : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.'),
+    h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편${plan.roomNext < AUTO_MAX ? `, 쌓아둘 한도까지 ${plan.roomNext}편` : ''}). 쓴 원고는 '검수 필요'로 들어와.` : plan.backlogFull || plan.gap ? `쌓인 원고가 한도라서${plan.jobs && !plan.backlogFull ? ' (기다리는 요청 원고를 채우면 한도가 차서)' : ''} 다음 실행에 새 자동 글은 없어.` : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.'),
     lr ? h('p', { class: lr.status === '성공' ? 'hint' : 'notice' }, `마지막 실행: ${L.fmtTime(lr.ran_at)} · ${lr.status} · ${lr.note || `${lr.written}개 저장`}${lr.error ? ' · ' + lr.error : ''}`) : h('p', { class: 'hint' }, '아직 실행 기록이 없어.'),
     h('p', { class: 'hint' }, '하루 세 번 네 Claude 구독으로 실행돼. 지금 바로 쓰고 싶으면 Claude 안 글공장에서 써도 돼.'),
     h('div', { class: 'go' }, h('a', { class: 'btn sm ghost', href: ARTIFACT_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Claude 안 글공장 열기 ↗'), btn('작업 기록', 'sm ghost', () => go('settings/jobs'))));
@@ -464,23 +471,35 @@ function viewHome() {
   const weekBox = panel('최근 7일 정리', h('p', { class: 'hint' }, '불러오는 중…'));
   box.append(money, traffic, recBox, weekBox);
   const mr = L.monthRange(0, t);
-  Promise.all([getStats(mr.from, mr.to), getStats(L.addDays(t, -29), t), getStats(L.addDays(t, -89), t), getStats(L.addDays(t, -6), t), getStats(L.addDays(t, -13), L.addDays(t, -7))]).then(([ms, ts, qs, ws, wp]) => {
-    money.replaceChildren(h('h2', null, '이번 달 수익'), revenueKpis(ms.totals), h('p', { class: 'hint' }, '직접 입력하거나 파일로 올린 실적 기준이야. 제휴사와 자동 연결된 숫자가 아니야.'), h('div', { class: 'go' }, btn('실적 입력', 'sm ghost', () => go('money'))));
-    traffic.replaceChildren(h('h2', null, '최근 30일 조회·클릭'), trafficKpis(ts));
-    const recs = homeRecs(t, qs.by_post);
-    recBox.replaceWith(loopPanel(recs, false, needMetrics));
-    const fresh = opsPanel(t, recs.filter((r) => r.group === 'fix').length);
-    ops.replaceWith(fresh); ops = fresh;
-    weekBox.replaceWith(weeklyPanel(L.weeklySummary({ posts: S.posts, postChannels: S.post_channels, searchTerms: S.search_terms, runs: S.runs, statsNow: ws, statsPrev: wp, today: t }), recs));
-  }).catch((e) => { if (e.code !== 'auth') { money.replaceChildren(h('h2', null, '이번 달 수익'), h('p', { class: 'hint' }, errText(e))); } });
+  // 하나가 실패해도 나머지는 보여줌. 실패한 칸은 '불러오는 중'으로 멈추지 않고 이유를 보여줌
+  Promise.allSettled([getStats(mr.from, mr.to), getStats(L.addDays(t, -29), t), getStats(L.addDays(t, -89), t),
+    getStats(L.addDays(t, -6), t, false, { within: true }), getStats(L.addDays(t, -13), L.addDays(t, -7), false, { within: true })]).then((rs) => {
+    if (rs.some((r) => r.status === 'rejected' && r.reason && r.reason.code === 'auth')) return;
+    const [ms, ts, qs, ws, wp] = rs.map((r) => (r.status === 'fulfilled' ? r.value : null));
+    const why = (i) => errText(rs[i].reason);
+    money.replaceChildren(h('h2', null, '이번 달 수익'), ...(ms ? [revenueKpis(ms.totals), h('p', { class: 'hint' }, '직접 입력하거나 파일로 올린 실적 기준이야. 제휴사와 자동 연결된 숫자가 아니야.')] : [h('p', { class: 'hint' }, '실적을 못 불러왔어: ' + why(0))]),
+      h('div', { class: 'go' }, btn('실적 입력', 'sm ghost', () => go('money'))));
+    traffic.replaceChildren(h('h2', null, '최근 30일 조회·클릭'), ts ? trafficKpis(ts) : h('p', { class: 'hint' }, '실적을 못 불러왔어: ' + why(1)));
+    const recs = qs ? homeRecs(t, qs.by_post) : syncRecs;
+    recBox.replaceWith(loopPanel(recs, false, needMetrics, qs ? '' : why(2)));
+    if (qs) { const fresh = opsPanel(t, recs.filter((r) => r.group === 'fix').length); ops.replaceWith(fresh); ops = fresh; }
+    weekBox.replaceWith(weeklyPanel(L.weeklySummary({ posts: S.posts, postChannels: known('post_channels'), searchTerms: known('search_terms'), runs: S.runs, runsAuto7d: S.runs_auto_7d, statsNow: ws, statsPrev: wp, today: t }), recs, ws && wp ? '' : why(ws ? 4 : 3)));
+  });
   return box;
 }
 const AUTO_MAX = L.AUTO_RULES.maxAutoPerRun;
 // 실적(stats)을 불러오기 전에는 실적이 필요 없는 추천만 (실적이 있는 글을 '실적 없음'으로 잠깐 잘못 보여주지 않게)
 const NO_STATS_KINDS = ['title_from_search', 'new_from_search', 'recheck'];
 const homeRecs = (t, byPost) => {
-  const recs = L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: S.search_terms, postChannels: S.post_channels, today: t });
+  const recs = L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: known('search_terms'), postChannels: known('post_channels'), channels: S.channels, today: t });
   return byPost ? recs : recs.filter((r) => NO_STATS_KINDS.includes(r.kind));
+};
+// 개선안은 게시한 글 중 본문이 있는 글만 (서버 createJob 과 같은 기준 — 직접 입력한 게시 기록은 본문이 없어서 못 만듦)
+const REFRESH_MIN_BODY = 200;
+const refreshBlock = (p) => (!p ? 'no_post' : !LIVE.includes(p.stage) ? 'not_live' : String(p.body || '').length < REFRESH_MIN_BODY ? 'no_body' : '');
+const REFRESH_BLOCK_TEXT = {
+  not_live: '게시한 글만 개선안을 요청할 수 있어 (실적·검색어를 보고 고쳐).',
+  no_body: '본문 없이 게시 기록만 넣은 글이라 자동 작가가 개선안을 쓸 수 없어. 블로그 글을 보면서 직접 고쳐줘.',
 };
 // 검색 노출 도우미: 주력 주제 비율·하루 발행·사람 손(내 경험·직접 찍은 사진)·다가올 시즌·쇼핑 커넥트
 // 검색 노출 점검 — 앱의 권장 기준 · 내 기록 · 실측 데이터 없음을 줄마다 구분해서 보여줌 (검색 순위 보장 아님)
@@ -584,7 +603,9 @@ function recAction(r) {
   if (a.type === 'topics') return h('div', { class: 'go' }, btn(a.hint ? '이 검색어로 주제 추천받기' : '비슷한 주제 추천받기', 'sm ghost', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', category: a.category || '', seed_post_id: a.seedPostId, hint: a.hint || (a.keyword ? `"${a.keyword}" 후속 주제` : ''), count: 6 })));
   if (a.type === 'refresh' && a.postId && M.post[a.postId]) {
     const pend = (M.jobsBy[a.postId] || []).some((j) => j.kind === 'refresh' && j.status === 'pending');
-    return h('div', { class: 'go' }, pend ? h('span', { class: 'chip' }, '개선안 기다리는 중') : btn('개선안 요청', 'sm ghost', () => refreshSheet(M.post[a.postId], a.focus)), btn('원고 보기', 'sm ghost', () => go('content/post/' + a.postId)));
+    const view = btn('원고 보기', 'sm ghost', () => go('content/post/' + a.postId));
+    if (refreshBlock(M.post[a.postId])) return h('div', { class: 'go' }, view); // 본문 없는 기록 등은 개선안을 못 만듦 — 원고에서 직접
+    return h('div', { class: 'go' }, pend ? h('span', { class: 'chip' }, '개선안 기다리는 중') : btn('개선안 요청', 'sm ghost', () => refreshSheet(M.post[a.postId], a.focus)), view);
   }
   return null;
 }
@@ -592,15 +613,17 @@ function recAction(r) {
 // ═════════ 운영 시스템 (1.4.0) ═════════
 // 흐름판: 주제 → 원고 → 게시 준비 → 게시 → 다른 채널 → 실적 → 개선 — 지금 막힌 곳과 바로 할 일 하나
 function opsPanel(t, fixCount) {
-  const f = L.opsFunnel({ posts: S.posts, postChannels: S.post_channels, metricPostIds: S.metric_post_ids, topics: S.topics, programs: S.programs, settings: S.settings || {}, fixCount, today: t });
+  const f = L.opsFunnel({ posts: S.posts, postChannels: known('post_channels'), metricPostIds: known('metric_post_ids'), topics: S.topics, programs: S.programs, settings: S.settings || {}, channels: S.channels, fixCount, today: t });
   const box = h('section', { class: 'panel hi ops' }, h('h2', null, '운영 흐름'));
   box.append(h('ol', { class: 'flow', 'aria-label': '주제부터 개선까지 흐름' }, f.stages.map((st) => h('li', { class: 'st-' + st.state },
-    h('span', null, st.label), h('b', { class: 'num' }, st.of != null ? `${st.count}/${st.of}` : String(st.count)), st.sub ? h('small', null, st.sub) : null))));
+    h('span', null, st.label), h('b', { class: 'num' }, st.count == null ? '–' : st.of != null ? `${st.count}/${st.of}` : String(st.count)), st.sub ? h('small', null, st.sub) : null))));
   const bn = f.bottleneck;
   box.append(h('div', { class: bn.key === 'ok' ? 'okline' : 'notice' }, h('b', null, bn.key === 'ok' ? bn.title : '지금 막힌 곳: ' + bn.title), h('p', null, bn.reason), opsAction(bn.action)));
   const bl = f.backlog;
+  if (bl.overdueScheduled) box.append(h('div', { class: 'split' }, h('span', { class: 'small' }, `예약한 날이 지난 원고 ${bl.overdueScheduled}개 — 블로그에 올라갔으면 '게시 완료 기록'을 해줘. 안 올라갔으면 원고에서 발행일을 바꿔줘 (예약 원고는 '날짜 다시 잡기'로 안 옮겨).`),
+    btn('보기', 'sm ghost', () => go('content/f/late'))));
   if (bl.overdue) {
-    box.append(h('div', { class: 'split' }, h('span', { class: 'small' }, `예정일이 지난 원고 ${bl.overdue}개 — 아직 안 올렸으면 내일부터 빈 날로 다시 잡을 수 있어 (하루 발행 수 그대로, 단계는 그대로)`),
+    box.append(h('div', { class: 'split' }, h('span', { class: 'small' }, `예정일이 지난 원고 ${bl.overdue}개 — 아직 안 올렸으면 내일부터 빈 날로 다시 잡을 수 있어 (하루 발행 수 그대로, 단계는 그대로. 예약 원고는 빼고)`),
       btn('날짜 다시 잡기', 'sm ghost', async (ev) => {
         if (!confirmBox(ev.currentTarget, `${bl.overdue}개를 다시 잡을까?`)) return;
         const j = await run(ev.currentTarget, () => api('/posts/reschedule-overdue', { method: 'POST', body: {} }));
@@ -622,9 +645,10 @@ function opsAction(a) {
   return null;
 }
 // 개선 루프: 실적·유입 검색어·게시 기록으로 고른 다음 할 일을 '고칠 것·더 쓸 것·그만할 것·데이터 먼저'로 묶어서
-function loopPanel(recs, waiting, needMetrics) {
+function loopPanel(recs, waiting, needMetrics, failed) {
   const box = panel('개선 루프');
   box.append(h('p', { class: 'hint' }, '입력한 실적·유입 검색어·게시 기록으로 정한 규칙 기반 추천이야. 근거 숫자를 같이 보여줘.' + (waiting ? ' (실적 불러오는 중…)' : '')));
+  if (failed) box.append(h('p', { class: 'notice' }, `실적을 못 불러와서 실적이 필요 없는 추천만 보여줘: ${failed}`));
   let any = false;
   for (const g of ['fix', 'more', 'stop', 'data']) {
     const list = recs.filter((r) => r.group === g);
@@ -632,17 +656,20 @@ function loopPanel(recs, waiting, needMetrics) {
     any = true;
     box.append(h('h3', null, `${L.REC_GROUPS[g]} ${list.length}`), recList(list.slice(0, 5)));
   }
-  if (!any) box.append(h('p', { class: 'hint' }, needMetrics ? `게시한 지 7일 지난 글 ${needMetrics}개에 실적을 넣어줘.` : '아직 고를 근거가 없어. 게시하고 실적·유입 검색어를 넣으면 여기서 고칠 글과 다음 글을 골라줘.'));
+  if (!any && !waiting && !failed) box.append(h('p', { class: 'hint' }, needMetrics ? `게시한 지 7일 지난 글 ${needMetrics}개에 실적을 넣어줘.` : '아직 고를 근거가 없어. 게시하고 실적·유입 검색어를 넣으면 여기서 고칠 글과 다음 글을 골라줘.'));
   box.append(h('div', { class: 'go' }, btn('실적으로 다음 주제 추천받기', 'sm', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', count: 6 }))));
   return box;
 }
 // 최근 7일 정리: 원고·게시·다른 채널·검색어는 앱 기록, 조회·클릭·수익은 입력한 실적 (그 전 7일과 비교)
-function weeklyPanel(w, recs) {
+function weeklyPanel(w, recs, failed) {
   const md = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8, 10))}`;
   const box = panel(`최근 7일 정리 (${md(w.range.from)}~${md(w.range.to)})`);
   const fmt = (r, v) => (v == null ? null : r.money ? L.won(v) : L.fmtNum(v));
   const cmp = (r) => (r.prev == null ? (r.now == null ? null : '그 전 7일 데이터 없음') : `그 전 7일 ${fmt(r, r.prev)}`);
   box.append(h('div', { class: 'kpis' }, w.rows.map((r) => kpi(r.label, fmt(r, r.now), [cmp(r), r.sub].filter(Boolean).join(' · ') || null))));
+  // 조회·클릭·수익은 그 7일 안에 다 들어가는 실적만 셈 — 한 달치처럼 걸쳐 있는 실적은 빼고 몇 줄인지 알려줌
+  if (failed) box.append(h('p', { class: 'notice' }, `조회·클릭·수익을 못 불러왔어: ${failed}`));
+  else if (w.partial || w.partialPrev) box.append(h('p', { class: 'hint' }, `조회·클릭·수익은 그 7일 안에 다 들어가는 실적만 셌어. 기간이 더 긴 실적(예: 한 달치) ${[w.partial && `최근 7일에 걸친 ${w.partial}줄`, w.partialPrev && `그 전 7일에 걸친 ${w.partialPrev}줄`].filter(Boolean).join(', ')}은 빼서 두 주에 똑같이 잡히지 않게 했어.`));
   if (w.top.length) box.append(h('h3', null, '이번 주 잘 된 글'), h('div', { class: 'list' }, w.top.map((x) => h('button', { type: 'button', class: 'rowbtn', onclick: () => go('content/post/' + x.postId) },
     h('span', null, M.post[x.postId] ? titleOf(M.post[x.postId]) : '지워진 글'), h('small', null, [x.revenue != null && `발생 ${L.won(x.revenue)}`, x.clicks != null && `클릭 ${L.fmtNum(x.clicks)}`, x.views != null && `조회 ${L.fmtNum(x.views)}`].filter(Boolean).join(' · '))))));
   const next = (recs || []).filter((r) => r.group === 'fix' || r.group === 'data').slice(0, 2).map((r) => r.title);
@@ -656,9 +683,12 @@ function spreadPanel(p) {
   const rows = M.pcBy[p.id] || [];
   const live = LIVE.includes(p.stage);
   const others = S.channels.filter((c) => c.active && c.id !== p.channel_id);
-  const box = det('spread:' + p.id, `다른 채널에 올리기 (${rows.length}/${others.length})`, live);
+  const unknownPc = known('post_channels') === null;
+  const box = det('spread:' + p.id, unknownPc ? '다른 채널에 올리기' : `다른 채널에 올리기 (${rows.length}/${others.length})`, live);
   const inner = h('div', { class: 'stack', style: 'margin-top:10px' });
   if (!live) inner.append(h('p', { class: 'hint' }, `먼저 ${chName(p.channel_id)}에 올리고 '게시 완료 기록'을 해줘. 그다음 같은 글을 다른 채널에 맞게 바꿔 올리면 여기서 기록해.`));
+  else if (unknownPc) inner.append(h('p', { class: 'notice' }, '다른 채널 기록을 지금 못 읽었어 (DB 업데이트(016) 전이거나 잠깐 오류). 새로고침해보고, 계속 그러면 배포를 확인해줘.'));
+  else if (!others.length) inner.append(h('p', { class: 'hint' }, "켜 둔 다른 채널이 없어. 설정 > 게시 채널에서 쓰는 채널을 켜면 여기서 기록할 수 있어."), h('div', { class: 'go' }, btn('게시 채널 보기', 'sm ghost', () => go('settings/channels'))));
   else {
     inner.append(h('p', { class: 'hint' }, '같은 글을 채널에 맞게 바꿔 올리면 들어오는 길이 늘어. 앱이 대신 올리지는 않으니, 직접 올린 다음 기록해줘. 실적을 넣을 때 채널을 고르면 채널별로 따로 볼 수 있어.'));
     const v = p.variants || {};
@@ -702,14 +732,18 @@ function spreadSheet(p, c, rec) {
 function searchTermsPanel(p) {
   const list = M.terms.get(p.id) || [];
   const rows = (S.search_terms || []).filter((x) => x.post_id === p.id);
-  const box = det('terms:' + p.id, `검색 유입 키워드 (${list.length})`, true);
+  const unknownSt = known('search_terms') === null;
+  const box = det('terms:' + p.id, unknownSt ? '검색 유입 키워드' : `검색 유입 키워드 (${list.length})`, true);
   const inner = h('div', { class: 'stack', style: 'margin-top:10px' });
   inner.append(h('p', { class: 'hint' }, '블로그 통계의 유입 검색어를 복사해서 붙여넣어줘. 실제로 이 글에 들어온 검색어로 제목을 고치고 다음 주제를 골라. 앱이 직접 모으지는 않아.'));
+  if (unknownSt) inner.append(h('p', { class: 'notice' }, '저장한 검색어를 지금 못 읽었어 (DB 업데이트(016) 전이거나 잠깐 오류). 새로고침해봐.'));
   if (list.length) {
-    inner.append(h('div', { class: 'list' }, list.slice(0, 20).map((x) => h('div', { class: 'split' }, h('span', null, x.term), h('b', { class: 'num' }, x.views == null ? '데이터 없음' : `${L.fmtNum(x.views)}회`)))));
-    const gaps = L.titleGaps(p, list, 1);
-    if (gaps.length) inner.append(h('p', { class: 'notice' }, `제목·키워드에 없는 검색어: ${gaps.slice(0, 3).map((g) => `'${g.term}'(${L.fmtNum(g.views)}회)`).join(', ')} — 제목이나 소제목에 넣어볼 만해.`),
-      h('div', { class: 'go' }, btn('이 검색어로 개선안 요청', 'sm', () => refreshSheet(p, 'search'))));
+    inner.append(h('div', { class: 'list' }, list.slice(0, 20).map((x) => h('div', { class: 'split' }, h('span', null, x.term), h('b', { class: 'num' }, x.views == null ? '숫자 없음' : `${L.fmtNum(x.views)}회`)))));
+    // 숫자 없이 들어온 검색어(비율만 있는 통계)도 제목에 없으면 알려줌 — 추천(홈)은 숫자가 있는 것만 씀
+    const gaps = L.titleGaps(p, list, 1, { unknown: true });
+    const rb = refreshBlock(p);
+    if (gaps.length) inner.append(h('p', { class: 'notice' }, `제목·키워드에 없는 검색어: ${gaps.slice(0, 3).map((g) => `'${g.term}'(${g.views == null ? '숫자 없음' : L.fmtNum(g.views) + '회'})`).join(', ')} — 제목이나 소제목에 넣어볼 만해.`),
+      rb ? h('p', { class: 'hint' }, REFRESH_BLOCK_TEXT[rb] || '') : h('div', { class: 'go' }, btn('이 검색어로 개선안 요청', 'sm', () => refreshSheet(p, 'search'))));
     const periods = new Map();
     for (const r of rows) { const k = `${r.period_start}~${r.period_end}`; (periods.get(k) || periods.set(k, []).get(k)).push(r); }
     inner.append(h('div', { class: 'list' }, [...periods.entries()].map(([k, rs]) => h('div', { class: 'split' },
@@ -730,15 +764,34 @@ function searchTermsPanel(p) {
       : (ta.value.trim() ? '읽은 검색어가 없어. 한 줄에 "검색어 숫자"로 적어줘.' : '');
   };
   ta.addEventListener('input', () => { markDirty(); draw(); });
+  // 같은 글에 기간이 겹치는 기록이 있으면 서버가 거절(period_overlap) → 겹치는 기간을 보여주고, 확인을 받은 뒤에만 지우고 저장
+  const overlapBox = h('div', { class: 'stack', hidden: true });
+  const save = async (button, replace) => {
+    const r = L.parseSearchTerms(ta.value);
+    if (!r.items.length) { toast('읽은 검색어가 없어'); return; }
+    if (!start.value) { toast('시작일을 넣어줘'); return; }
+    if (end.value && end.value < start.value) { toast('종료일이 시작일보다 빨라'); return; }
+    const body = { period_start: start.value, period_end: end.value || start.value, source_label: label.value.trim(), terms: r.items, ...(replace ? { replace_overlap: true } : {}) };
+    button.disabled = true;
+    let j;
+    try { j = await api(`/posts/${p.id}/search-terms`, { method: 'POST', body }); } catch (e) {
+      if (e && e.code === 'period_overlap' && !replace) showOverlap(e.periods || []); else showError(e);
+      return;
+    } finally { if (button.isConnected) button.disabled = false; }
+    overlapBox.hidden = true;
+    toast(`검색어 ${j.saved}개를 저장했어${replace ? ' (겹치던 기간은 지웠어)' : ''}`); dirty = false; await load();
+  };
+  const showOverlap = (periods) => {
+    const txt = periods.map((x) => `${L.fmtDate(x.period_start)}~${L.fmtDate(x.period_end)}`).join(', ');
+    overlapBox.replaceChildren(
+      h('p', { class: 'notice' }, `이 글에 기간이 겹치는 검색어 기록이 있어${txt ? ` (${txt})` : ''}. 겹친 채로 넣으면 같은 유입이 두 번 세져. 겹치는 기간의 검색어를 지우고 이번 것으로 저장할까? (같은 기간을 다시 넣는 건 겹치는 게 아니라 숫자만 새로 바뀌어)`),
+      h('div', { class: 'go' },
+        btn('겹치는 기간 지우고 저장', 'sm', (ev) => { if (confirmBox(ev.currentTarget, '지우고 저장할까?')) save(ev.currentTarget, true); }),
+        btn('그만두기', 'sm ghost', () => { overlapBox.hidden = true; })));
+    overlapBox.hidden = false;
+  };
   inner.append(field('유입 검색어 붙여넣기', ta), preview, h('div', { class: 'row' }, field('시작일', start), field('종료일', end)), field('어디서 본 숫자야?', label),
-    btn('검색어 저장', 'sm', async (ev) => {
-      const r = L.parseSearchTerms(ta.value);
-      if (!r.items.length) { toast('읽은 검색어가 없어'); return; }
-      if (!start.value) { toast('시작일을 넣어줘'); return; }
-      if (end.value && end.value < start.value) { toast('종료일이 시작일보다 빨라'); return; }
-      const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/search-terms`, { method: 'POST', body: { period_start: start.value, period_end: end.value || start.value, source_label: label.value.trim(), terms: r.items } }));
-      if (j) { toast(`검색어 ${j.saved}개를 저장했어`); dirty = false; await load(); }
-    }));
+    btn('검색어 저장', 'sm', (ev) => save(ev.currentTarget, false)), overlapBox);
   box.append(inner);
   return box;
 }
@@ -767,15 +820,17 @@ function refreshPanel(p) {
     inner.append(h('div', { class: 'go' }, btn('개선안 지우기', 'sm ghost', async (ev) => { if (!confirmBox(ev.currentTarget, '지울까?')) return; await patchPost(p, { refresh: null }, ev.currentTarget, '지웠어'); })));
   }
   if (!pend) {
-    const live = LIVE.includes(p.stage);
-    inner.append(btn(has ? '개선안 다시 요청' : '개선안 요청', 'sm', () => refreshSheet(p), { disabled: !live }));
-    inner.append(h('p', { class: 'hint' }, live ? '자동 작가가 이 글의 실적·유입 검색어·다른 채널 기록을 보고 제목·도입부·소제목·링크 위치를 어떻게 고치면 좋을지 써줘. 없는 숫자는 만들지 않아.' : '게시한 글만 개선안을 요청할 수 있어 (실적·검색어를 보고 고쳐).'));
+    const rb = refreshBlock(p);
+    inner.append(btn(has ? '개선안 다시 요청' : '개선안 요청', 'sm', () => refreshSheet(p), { disabled: !!rb }));
+    inner.append(h('p', { class: 'hint' }, rb ? (REFRESH_BLOCK_TEXT[rb] || '') : '자동 작가가 이 글의 실적·유입 검색어·다른 채널 기록을 보고 제목·도입부·소제목·링크 위치를 어떻게 고치면 좋을지 써줘. 없는 숫자는 만들지 않아.'));
   }
   box.append(inner);
   return box;
 }
 function refreshSheet(p, focus = 'all') {
   if (!p) return;
+  const rb = refreshBlock(p);
+  if (rb) { toast(REFRESH_BLOCK_TEXT[rb] || ERR.server, 4000); return; }
   const sel = h('select', { value: REFRESH_FOCUS[focus] ? focus : 'all' }, Object.entries(REFRESH_FOCUS).map(([k, v]) => opt(k, v)));
   const note = h('input', { type: 'text', maxlength: '300', placeholder: '예: 제목에 전기세 얘기를 넣고 싶어' });
   openSheet('개선안 요청', h('p', { class: 'hint' }, `「${titleOf(p)}」 — 자동 작가가 다음 실행(${nextRunText()})에 이 글의 실적·유입 검색어·다른 채널 기록을 보고 고칠 점을 써줘. 글은 바꾸지 않고 개선안만 남겨.`),

@@ -21,7 +21,7 @@ export const pg = {
   check: (tbl, con) => [400, { code: '23514', details: null, hint: null, message: `new row for relation "${tbl}" violates check constraint "${con}"` }],
 };
 
-// handle({ method, table, select, one, body, url, query }) → [status, data] 또는 undefined(빈 표로 답함)
+// handle({ method, table, rpc, select, one, body, url, query, prefer }) → [status, data, headers?] 또는 undefined(빈 표로 답함)
 export async function startServer(handle) {
   const calls = [];
   const fake = http.createServer(async (req, res) => {
@@ -37,11 +37,11 @@ export async function startServer(handle) {
     try { body = raw ? JSON.parse(raw) : null; } catch { body = raw; }
     const call = { method: req.method, table, rpc, select, body, query: Object.fromEntries(url.searchParams), prefer: String(req.headers.prefer || '') };
     calls.push(call);
-    const send = (status, data) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(data)); };
+    const send = (status, data, headers = {}) => { res.writeHead(status, { 'content-type': 'application/json', ...headers }); res.end(JSON.stringify(data)); };
     const now = new Date().toISOString();
     if (table === 'app_sessions' && req.method === 'GET') return send(200, [{ id: 'sess-1', revoked_at: null, last_used_at: now, created_at: now }]);
     const r = await handle({ ...call, one, url });
-    if (r) return send(r[0], r[1]);
+    if (r) return send(r[0], r[1], r[2]); // r[2]: 응답 머리글 (예: 개수 세기의 content-range)
     return send(200, one ? {} : []);
   });
   const dbPort = await new Promise((ok) => fake.listen(0, '127.0.0.1', () => ok(fake.address().port)));

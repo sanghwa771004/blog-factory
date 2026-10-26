@@ -623,16 +623,21 @@ export function crowdedDays(posts, today = todayStr(), perDay = 1) {
 export const AUTO_RULES = { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 };
 export const BACKLOG_STAGES = ['review', 'verify', 'ready', 'scheduled'];
 // 쌓인 원고: 사람이 검수·게시해야 하는 원고. 한도는 설정(backlog_limit, 1~60), 0이면 하루 발행 수 × 7 (DB backlog_state 와 같음)
+// overdue = 예정일이 지난 원고 중 날짜를 다시 잡을 수 있는 것(검수 필요·정보 필요·발행 준비),
+// overdueScheduled = 예약한 날이 지난 원고 (블로그에 이미 올라갔을 수 있어서 날짜를 옮기지 않음 — '게시 완료 기록'을 권함)
+export const RESCHEDULE_STAGES = ['review', 'verify', 'ready'];
 export function backlogInfo(posts, settings, today = todayStr()) {
   const st = settings || {};
   const perDay = Math.min(3, Math.max(1, Number(st.per_day) || 1));
   const own = Math.round(Number(st.backlog_limit) || 0);
   const limit = own > 0 ? Math.min(60, own) : perDay * AUTO_RULES.days;
   const list = (posts || []).filter((p) => p && !p.deleted_at && BACKLOG_STAGES.includes(p.stage));
-  const overdue = list.filter((p) => p.publish_date && p.publish_date < today).length;
+  const late = list.filter((p) => p.publish_date && p.publish_date < today);
+  const overdue = late.filter((p) => RESCHEDULE_STAGES.includes(p.stage)).length;
   const review = list.filter((p) => p.stage === 'review' || p.stage === 'verify').length;
-  return { backlog: list.length, limit, auto: !(own > 0), full: list.length >= limit, room: Math.max(0, limit - list.length), overdue, review, ready: list.length - review };
+  return { backlog: list.length, limit, auto: !(own > 0), full: list.length >= limit, room: Math.max(0, limit - list.length), overdue, overdueScheduled: late.length - overdue, review, ready: list.length - review };
 }
+// pendingWrites: 기다리는 원고 작업 수 — 2단계에서 채우면 '검수 필요'가 돼서 쌓인 원고가 그만큼 늘어 (프롬프트 3단계: 한도 − 쌓인 원고 − 2단계에서 저장한 원고)
 export function autoPlan({ posts, settings, today = todayStr(), pendingWrites = 0 } = {}) {
   const st = settings || {};
   const perDay = Math.min(3, Math.max(1, Number(st.per_day) || 1));
@@ -643,50 +648,71 @@ export function autoPlan({ posts, settings, today = todayStr(), pendingWrites = 
   const enabled = st.auto_enabled !== false && !!(String(st.focus_topic || '').trim() || String(st.auto_topics || '').trim());
   const jobs = Math.min(Math.max(0, Number(pendingWrites) || 0), AUTO_RULES.maxJobsPerRun);
   const bl = backlogInfo(posts, st, today);
-  const autoNext = enabled ? Math.min(gap, AUTO_RULES.maxAutoPerRun, Math.max(0, AUTO_RULES.maxPerRun - jobs), bl.room) : 0;
+  const roomNext = Math.max(0, bl.room - jobs); // 요청 원고를 먼저 쓰고 남는 자리
+  const autoNext = enabled ? Math.min(gap, AUTO_RULES.maxAutoPerRun, Math.max(0, AUTO_RULES.maxPerRun - jobs), roomNext) : 0;
   return { perDay, recommended: SEO_RULES.perDayRecommended, differs: perDay !== SEO_RULES.perDayRecommended, goal, scheduled, gap, enabled, jobs, autoNext,
-    backlog: bl.backlog, backlogLimit: bl.limit, backlogFull: bl.full, room: bl.room, overdue: bl.overdue };
+    backlog: bl.backlog, backlogLimit: bl.limit, backlogFull: bl.full, room: bl.room, roomNext, overdue: bl.overdue };
 }
 
 // ───────── 유입 검색어 (블로그 통계에서 복사해 붙여넣은 글) ─────────
 // 한 줄에 검색어 하나: "원룸 전기요 12", "1. 원룸 전기요 12회 4.5%", "원룸 전기요 (12)", 표에서 복사한 "1\t원룸 전기요\t12\t4.5%"
-// 숫자가 없으면 views 는 null(데이터 없음). 같은 검색어가 두 번 나오면 숫자를 더함. 머리글 줄(검색어·키워드·유입수…)은 건너뜀
+// 숫자가 없으면 views 는 null(데이터 없음). 비율(%)은 유입 수가 아니라서 숫자로 안 씀. 같은 검색어가 두 번 나오면 숫자를 더함. 머리글 줄(검색어·키워드·유입수…)은 건너뜀
+// 없는 숫자를 만들지 않게 — 끝의 숫자가 검색어의 일부일 수 있으면(예: "아이폰 16 12.5%") 유입 수로 읽지 않음:
+//  - 비율이 붙은 줄은 '회·건·명'이나 괄호가 붙은 숫자만 유입 수로 읽어. 단 비율이 붙은 줄이 2줄 이상이고 모두 비율 바로 앞에 숫자가 있으면
+//    그 칸을 유입 수로 봐 (표에서 복사하다 칸 구분이 사라진 경우: "1 원룸 전기요 7 2.1%")
+//  - 맨 앞의 "1." "1)"은 순위로 빼고, 점 없는 맨 앞 숫자(1~3자리)는 여러 줄이 1, 2, 3…처럼 이어질 때만 순위로 봐 ("2026 달력"·"10 평 원룸" 같은 검색어를 지키려고)
 const TERM_HEADERS = new Set(['검색어', '키워드', '유입 검색어', '유입검색어', '검색 키워드', '순위', '유입수', '조회수', '비율', '검색어 유입수']);
+const HEADER_WORDS = new Set(['검색어', '키워드', '유입', '검색', '순위', '유입수', '조회수', '비율', '횟수', '건수', '점유율', '유입검색어']);
 const isCountCell = (c) => /^[\d,]+\s*(회|건|명)?$/.test(c);
 const isPctCell = (c) => /^\d+(\.\d+)?\s*%$/.test(c);
 const toCount = (c) => { const n = Number(String(c).replace(/[^\d]/g, '')); return Number.isFinite(n) ? n : null; };
+const PCT_END = /\s+\d+(\.\d+)?\s*%$/;
+const BARE_RANK = /^(\d{1,3})\s+(?=\S)/;
+const UNIT_COUNT = /^(.*\S)\s*[([]\s*([\d,]+)\s*(?:회|건|명)?\s*[)\]]$|^(.*\S)\s+([\d,]+)\s*(?:회|건|명)$/;
+const BARE_COUNT = /^(.*\S)\s+([\d,]+)$/;
 export function parseSearchTerms(text) {
   const items = [], skipped = [];
   const seen = new Map();
-  String(text || '').split(/\r?\n/).forEach((raw, i) => {
-    let line = raw.replace(/ /g, ' ').trim();
-    if (!line) return;
+  const rows = String(text || '').split(/\r?\n/).map((raw, i) => ({ raw, n: i + 1, line: raw.replace(/ /g, ' ').trim() })).filter((r) => r.line);
+  // 칸 구분(탭)이 없는 줄: 순위 칸·유입 수 칸이 있는지 붙여넣은 줄 전체를 보고 정함
+  const plain = rows.filter((r) => !r.line.includes('\t')).map((r) => ({ r, s: r.line.replace(/^\d+\s*[.)]\s*/, '') }));
+  const bare = plain.map((x) => { const m = x.s.match(BARE_RANK); return m ? Number(m[1]) : null; }).filter((v) => v != null);
+  const rankCol = bare.length >= 2 && bare.every((v, k) => v === bare[0] + k);
+  if (rankCol) for (const x of plain) x.s = x.s.replace(BARE_RANK, '');
+  const pct = plain.filter((x) => PCT_END.test(x.s)).map((x) => x.s.replace(PCT_END, '').trim());
+  const pctCountCol = pct.length >= 2 && pct.every((s) => UNIT_COUNT.test(s) || BARE_COUNT.test(s));
+  const plainOf = new Map(plain.map((x) => [x.r, x.s]));
+  for (const r of rows) {
+    const { raw, n } = r;
     let term = '', views = null;
-    const cols = line.split('\t').map((c) => c.trim()).filter(Boolean);
+    const cols = r.line.split('\t').map((c) => c.trim()).filter(Boolean);
     if (cols.length > 1) {
       let cs = cols;
       if (/^\d+$/.test(cs[0]) && cs.length >= 3) cs = cs.slice(1); // 순위 칸
       const ti = cs.findIndex((c) => !isCountCell(c) && !isPctCell(c));
-      if (ti < 0) { skipped.push({ line: i + 1, text: raw.trim(), why: '검색어가 없어' }); return; }
+      if (ti < 0) { skipped.push({ line: n, text: raw.trim(), why: '검색어가 없어' }); continue; }
       term = cs[ti];
       const num = cs.slice(ti + 1).find(isCountCell);
       views = num != null ? toCount(num) : null;
     } else {
-      line = line.replace(/^\d+\s*[.)]\s*/, '').replace(/\s+\d+(\.\d+)?\s*%$/, '').trim();
-      const m = line.match(/^(.*\S)\s*[([]\s*([\d,]+)\s*(?:회|건|명)?\s*[)\]]$/) || line.match(/^(.*\S)\s+([\d,]+)\s*(?:회|건|명)?$/);
-      if (m) { term = m[1]; views = toCount(m[2]); } else term = line;
+      let s = plainOf.get(r) ?? r.line;
+      const hadPct = PCT_END.test(s);
+      if (hadPct) s = s.replace(PCT_END, '').trim();
+      const u = s.match(UNIT_COUNT);
+      const b = !u && (!hadPct || pctCountCol) ? s.match(BARE_COUNT) : null;
+      if (u) { term = u[1] ?? u[3]; views = toCount(u[2] ?? u[4]); } else if (b) { term = b[1]; views = toCount(b[2]); } else term = s;
     }
     term = term.replace(/\s+/g, ' ').trim();
-    if (!term || TERM_HEADERS.has(term.replace(/\s+/g, ' '))) return;
-    if (/^[\d,.%\s]+$/.test(term)) { skipped.push({ line: i + 1, text: raw.trim(), why: '숫자만 있어' }); return; }
-    if (term.length > 100) { skipped.push({ line: i + 1, text: raw.trim().slice(0, 40), why: '100자 넘어' }); return; }
+    if (!term || TERM_HEADERS.has(term) || term.split(' ').every((w) => HEADER_WORDS.has(w))) continue;
+    if (/^[\d,.%\s]+$/.test(term)) { skipped.push({ line: n, text: raw.trim(), why: '숫자만 있어' }); continue; }
+    if (term.length > 100) { skipped.push({ line: n, text: raw.trim().slice(0, 40), why: '100자 넘어' }); continue; }
     const key = term.toLowerCase();
     const was = seen.get(key);
-    if (was) { if (views != null) was.views = (was.views ?? 0) + views; return; }
+    if (was) { if (views != null) was.views = (was.views ?? 0) + views; continue; }
     const it = { term, views };
     seen.set(key, it);
     items.push(it);
-  });
+  }
   return { items, skipped };
 }
 const normTerm = (s) => String(s || '').toLowerCase().replace(/[\s·,./!?~\-_'"()[\]]+/g, '');
@@ -708,19 +734,23 @@ export function termsByPost(terms) {
   return res;
 }
 // 제목·키워드에 없는 검색어 (많이 들어온 순, 숫자가 있는 것만) — 제목·소제목을 고칠 때 쓸 말
-export function titleGaps(post, list, min = 1) {
+// unknown: true 면 숫자 없이 들어온 검색어(비율만 있는 통계 등)도 같이 (원고 화면 알림용 — 추천은 숫자가 있는 것만 씀)
+export function titleGaps(post, list, min = 1, { unknown = false } = {}) {
   const have = normTerm([post && post.keyword, ...((post && post.titles) || [])].join(' '));
-  return (list || []).filter((t) => t.views != null && t.views >= min && !have.includes(normTerm(t.term)));
+  return (list || []).filter((t) => (t.views != null ? t.views >= min : unknown) && !have.includes(normTerm(t.term)));
 }
 // 어느 글의 키워드·제목도 다루지 않는 검색어 (모든 글 합계 min회 이상) — 새 글 후보
 // 검색어 낱말의 절반 이상이 어떤 글의 키워드·제목에 있으면 그 글이 다루는 걸로 봄 (그건 '제목에 없는 검색어'로 따로 알려줌)
+// 지운 글(posts 에 없는 글)의 검색어는 안 셈 — DB writer_context search_terms_top 과 같음
 const termWords = (s) => String(s || '').toLowerCase().split(/[\s·,./!?~\-_'"()[\]]+/).filter(Boolean);
 export function uncoveredTerms(posts, terms, min = 5) {
-  const texts = (posts || []).filter((p) => p && !p.deleted_at).map((p) => [p.keyword, ...(p.titles || [])].join(' ').toLowerCase());
+  const alive = (posts || []).filter((p) => p && !p.deleted_at);
+  const ids = new Set(alive.map((p) => p.id));
+  const texts = alive.map((p) => [p.keyword, ...(p.titles || [])].join(' ').toLowerCase());
   const covered = (term) => { const ws = termWords(term); return !ws.length || texts.some((tx) => ws.filter((w) => tx.includes(w)).length / ws.length >= 0.5); };
   const sum = new Map();
   for (const t of terms || []) {
-    if (!t || !t.term || t.views == null) continue;
+    if (!t || !t.term || t.views == null || (t.post_id && !ids.has(t.post_id))) continue;
     const k = normTerm(t.term);
     if (!k) continue;
     const was = sum.get(k) || { term: t.term, views: 0, posts: new Set() };
@@ -734,16 +764,22 @@ export function uncoveredTerms(posts, terms, min = 5) {
 
 // ───────── 운영 흐름판: 주제 → 원고 → 게시 준비 → 게시 → 다른 채널 → 실적 → 개선, 어디서 막혔는지 ─────────
 // metricPostIds: 실적이 한 줄이라도 있는 글 id (Set 또는 배열). 실적은 게시한 지 7일 지난 글만 따짐
+// postChannels·metricPostIds 가 null 이면 '못 읽음'(DB 016 전이거나 읽다가 오류) — 0으로 보지 않고 '데이터 없음', 그 단계로 막힌 곳을 정하지 않음
+// channels(채널 목록)를 주면, 켜 둔 다른 채널이 없는 글은 '다른 채널' 단계에서 빼 (퍼뜨릴 곳이 없는데 막혔다고 하지 않게)
 export const OPS_RULES = { measureAfterDays: 7, spreadGoal: 0.5 };
-export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs, settings, fixCount = 0, today = todayStr() } = {}) {
+// 이 글을 올릴 수 있는 다른 채널 (켜 둔 채널 중 글의 채널이 아닌 것). channels 를 안 주면 null(모름)
+export const otherChannels = (p, channels) => (Array.isArray(channels) ? channels.filter((c) => c && c.active && c.id !== p.channel_id) : null);
+export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs, settings, channels, fixCount = 0, today = todayStr() } = {}) {
   const ps = (posts || []).filter((p) => p && !p.deleted_at);
   const bl = backlogInfo(ps, settings, today);
+  const pcKnown = postChannels !== null, mKnown = metricPostIds !== null;
   const mset = metricPostIds instanceof Set ? metricPostIds : new Set(metricPostIds || []);
   const spreadIds = new Set((postChannels || []).map((x) => x.post_id));
   const live = ps.filter((p) => LIVE_STAGES.includes(p.stage));
   const measurable = live.filter((p) => !p.published_on || daysSince(p.published_on, today) >= OPS_RULES.measureAfterDays);
   const withData = measurable.filter((p) => mset.has(p.id));
-  const spread = live.filter((p) => spreadIds.has(p.id));
+  const spreadable = live.filter((p) => { const o = otherChannels(p, channels); return o == null || o.length > 0; });
+  const spread = spreadable.filter((p) => spreadIds.has(p.id));
   const refreshed = ps.filter((p) => p.refresh && Object.keys(p.refresh).some((k) => !k.startsWith('_'))).length;
   const nTopics = (topics || []).filter((t) => t.status === '후보' || t.status === '채택').length;
   const drafting = ps.filter((p) => ['queued', 'researching', 'writing', 'review', 'verify'].includes(p.stage)).length;
@@ -756,8 +792,10 @@ export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs
     { key: 'draft', label: '원고', count: drafting, sub: '쓰는 중·검수' },
     { key: 'ready', label: '게시 준비', count: ready, sub: '준비·예약' },
     { key: 'live', label: '게시', count: live.length, sub: `최근 7일 ${live7}` },
-    { key: 'spread', label: '다른 채널', count: spread.length, of: live.length, sub: live.length ? `게시 글 ${live.length}개 중` : '' },
-    { key: 'data', label: '실적', count: withData.length, of: measurable.length, sub: measurable.length ? `7일 지난 ${measurable.length}개 중` : '' },
+    !pcKnown ? { key: 'spread', label: '다른 채널', count: null, sub: '데이터 없음' }
+      : { key: 'spread', label: '다른 채널', count: spread.length, of: spreadable.length, sub: spreadable.length ? `게시 글 ${spreadable.length}개 중` : (live.length ? '올릴 다른 채널 없음' : '') },
+    !mKnown ? { key: 'data', label: '실적', count: null, sub: '데이터 없음' }
+      : { key: 'data', label: '실적', count: withData.length, of: measurable.length, sub: measurable.length ? `7일 지난 ${measurable.length}개 중` : '' },
     { key: 'improve', label: '개선', count: refreshed, sub: fixCount ? `고칠 것 ${fixCount}` : '' },
   ];
   let bottleneck;
@@ -766,11 +804,11 @@ export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs
       reason: bl.full ? `검수·게시 안 한 원고가 ${bl.backlog}개 쌓여서(한도 ${bl.limit}개) 자동 작가가 새 글을 멈췄어. 오늘 1편만 검수해서 올리면 다시 돌아가.`
         : `원고 ${bl.backlog}개가 검수·게시를 기다리는데 게시한 글이 아직 없어. 1편만 올려도 다음 단계(다른 채널·실적)를 시작할 수 있어.`,
       action: { type: 'go', path: bl.review ? 'content/f/you' : 'content/f/ready', label: bl.review ? '검수할 원고 보기' : '게시할 원고 보기' } };
-  } else if (live.length && spread.length / live.length < OPS_RULES.spreadGoal) {
-    const next = live.find((p) => !spreadIds.has(p.id));
-    bottleneck = { key: 'spread', title: '다른 채널로 안 퍼지고 있어', reason: `게시한 글 ${live.length}개 중 다른 채널(티스토리·쓰레드·인스타 등)에도 올린 글이 ${spread.length}개야. 같은 글을 채널에 맞게 바꿔 올리면 들어오는 길이 늘어.`,
+  } else if (pcKnown && spreadable.length && spread.length / spreadable.length < OPS_RULES.spreadGoal) {
+    const next = spreadable.find((p) => !spreadIds.has(p.id));
+    bottleneck = { key: 'spread', title: '다른 채널로 안 퍼지고 있어', reason: `게시한 글 ${spreadable.length}개 중 다른 채널(티스토리·쓰레드·인스타 등)에도 올린 글이 ${spread.length}개야. 같은 글을 채널에 맞게 바꿔 올리면 들어오는 길이 늘어.`,
       action: next ? { type: 'post', postId: next.id, label: '안 퍼뜨린 글 보기' } : null };
-  } else if (measurable.length && withData.length < measurable.length) {
+  } else if (mKnown && measurable.length && withData.length < measurable.length) {
     const next = measurable.find((p) => !mset.has(p.id));
     bottleneck = { key: 'data', title: '실적이 안 들어오고 있어', reason: `게시한 지 7일 지난 글 ${measurable.length}개 중 실적(조회·클릭·수익)을 넣은 글이 ${withData.length}개야. 숫자가 있어야 다음 글을 고를 수 있어.`,
       action: next ? { type: 'metrics', postId: next.id, label: '실적 넣기' } : { type: 'go', path: 'money', label: '실적 넣으러 가기' } };
@@ -781,14 +819,15 @@ export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs
   } else {
     bottleneck = { key: 'ok', title: '흐름이 막힌 곳은 없어', reason: live.length ? '게시·확산·실적이 고르게 돌고 있어. 개선 루프에서 다음 글을 골라봐.' : '원고가 들어오는 중이야.', action: null };
   }
-  for (const st of stages) st.state = st.key === bottleneck.key ? 'block' : (st.of != null && st.of > 0 && st.count < st.of ? 'warn' : 'ok');
+  for (const st of stages) st.state = st.key === bottleneck.key ? 'block' : st.count == null ? 'none' : (st.of != null && st.of > 0 && st.count < st.of ? 'warn' : 'ok');
   return { stages, bottleneck, backlog: bl, money: { joined, waiting, total: (programs || []).filter((x) => x.active !== false).length } };
 }
 
 // ───────── 다음 할 일 추천 (규칙 기반, 근거 데이터 같이 표시) ─────────
 // 묶음(group): more = 더 쓸 것, fix = 고칠 것, stop = 그만할 것(줄일 것), data = 데이터 먼저
 export const REC_GROUPS = { more: '더 쓸 것', fix: '고칠 것', stop: '그만할 것', data: '데이터 먼저' };
-export function recommendations({ posts, byPost, products, postProducts, searchTerms, postChannels, today }) {
+// postChannels 가 null 이면(못 읽음) '안 퍼뜨린 글' 추천은 안 함. channels 를 주면 올릴 다른 채널이 없는 글도 뺌
+export function recommendations({ posts, byPost, products, postProducts, searchTerms, postChannels, channels, today }) {
   const recs = [];
   const t = today || todayStr();
   const map = new Map((byPost || []).map((a) => [a.key, a]));
@@ -838,8 +877,9 @@ export function recommendations({ posts, byPost, products, postProducts, searchT
 
   // 6) 반응이 있는데 다른 채널에 안 올린 글 → 퍼뜨리기
   const spread = new Set((postChannels || []).map((x) => x.post_id));
-  for (const p of withData) {
-    if (spread.has(p.id)) continue;
+  for (const p of postChannels === null ? [] : withData) {
+    const others = otherChannels(p, channels);
+    if (spread.has(p.id) || (others && !others.length)) continue;
     const a = map.get(p.id); const v = val(a, 'views'), c = val(a, 'clicks'), rev = val(a, 'revenue_est');
     if ((v != null && v >= 100) || (c != null && c >= 5) || (rev != null && rev > 0)) {
       recs.push({ kind: 'spread', group: 'more', postId: p.id, title: '반응이 있는 글인데 다른 채널에는 안 올렸어', reason: '쓰레드·인스타·티스토리 버전을 만들어 올리면 같은 글로 들어오는 길이 늘어.', data: [v != null && { label: '조회수', value: fmtNum(v) }, c != null && { label: '클릭', value: fmtNum(c) }].filter(Boolean), action: { type: 'post', postId: p.id }, confidence: '참고' });
@@ -882,17 +922,23 @@ export function recommendations({ posts, byPost, products, postProducts, searchT
 
 // ───────── 주간 정리: 최근 7일(오늘 포함)과 그 전 7일 비교 ─────────
 // 숫자는 앱 기록(원고·게시·다른 채널·검색어)과 입력한 실적(stats) 기준. 실적이 없으면 null(데이터 없음)
+// statsNow·statsPrev 는 그 7일 안에 '다 들어가는' 실적만 센 통계(stats_window within) — 한 달치 실적이 두 주에 똑같이 잡히지 않게. partial = 그래서 뺀 줄 수
+// postChannels·searchTerms 가 null 이면(못 읽음) 그 줄은 데이터 없음. 지운 글(posts 에 없는 글)의 기록은 안 셈
+// runsAuto7d: 서버가 센 최근 7일 자동 실행 수 (주면 그것, 없으면 runs 목록에서 셈)
 const dayOf = (iso) => (iso ? ymd(new Date(iso)) : '');
-export function weeklySummary({ posts, postChannels, searchTerms, runs, statsNow, statsPrev, today = todayStr() } = {}) {
+export function weeklySummary({ posts, postChannels, searchTerms, runs, runsAuto7d, statsNow, statsPrev, today = todayStr() } = {}) {
   const r = { from: addDays(today, -6), to: today }, q = { from: addDays(today, -13), to: addDays(today, -7) };
   const inR = (d, x) => d && d >= x.from && d <= x.to;
   const ps = (posts || []).filter((p) => p && !p.deleted_at);
+  const ids = new Set(ps.map((p) => p.id));
+  const pcs = postChannels === null ? null : (postChannels || []).filter((c) => ids.has(c.post_id));
+  const sts = searchTerms === null ? null : (searchTerms || []).filter((t) => ids.has(t.post_id));
   const count = (x) => ({
     drafts: ps.filter((p) => inR(dayOf(p.created_at), x)).length,
     auto: ps.filter((p) => p.source === 'auto' && inR(dayOf(p.created_at), x)).length,
     published: ps.filter((p) => LIVE_STAGES.includes(p.stage) && inR(p.published_on, x)).length,
-    spread: (postChannels || []).filter((c) => inR(c.posted_on, x)).length,
-    terms: (searchTerms || []).filter((t) => inR(dayOf(t.created_at), x)).length,
+    spread: pcs ? pcs.filter((c) => inR(c.posted_on, x)).length : null,
+    terms: sts ? sts.filter((t) => inR(dayOf(t.created_at), x)).length : null,
     runs: (runs || []).filter((u) => u.kind === 'auto' && inR(dayOf(u.ran_at), x)).length,
   });
   const a = count(r), b = count(q);
@@ -906,12 +952,14 @@ export function weeklySummary({ posts, postChannels, searchTerms, runs, statsNow
     { key: 'clicks', label: '링크 클릭', now: val(tn, 'clicks'), prev: val(tp, 'clicks') },
     { key: 'revenue', label: '발생 수익', now: val(tn, 'revenue_est'), prev: val(tp, 'revenue_est'), money: true },
   ];
-  const top = ((statsNow && statsNow.by_post) || []).filter((x) => x.key)
+  const top = ((statsNow && statsNow.by_post) || []).filter((x) => x.key && ids.has(x.key))
     .map((x) => ({ postId: x.key, revenue: val(x, 'revenue_est'), clicks: val(x, 'clicks'), views: val(x, 'views') }))
     .filter((x) => x.revenue != null || x.clicks != null || x.views != null)
     .sort((m, n) => (n.revenue ?? -1) - (m.revenue ?? -1) || (n.clicks ?? -1) - (m.clicks ?? -1) || (n.views ?? -1) - (m.views ?? -1))
     .slice(0, 3);
-  return { range: r, prevRange: q, rows, top, ranAuto: a.runs };
+  const partial = (statsNow && Number(statsNow.partial)) || 0;
+  const partialPrev = (statsPrev && Number(statsPrev.partial)) || 0;
+  return { range: r, prevRange: q, rows, top, ranAuto: Number.isFinite(runsAuto7d) ? runsAuto7d : a.runs, partial, partialPrev, statsMissing: !statsNow };
 }
 
 export const hasUnfilledMe = (p) => countMe(p.body) > 0;

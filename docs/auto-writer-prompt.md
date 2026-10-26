@@ -7,7 +7,7 @@
 - 1.1.0 → 1.1.1에서 바뀐 것: SNS 버전에 고지문을 직접 쓰지 않음(앱이 복사할 때 공식 고지문을 붙임), 쓰레드 글자 수 420자, 가상 인물 금지 규칙 추가.
 - 1.1.1 → 1.3.0에서 바뀐 것 (검색 노출 도우미): 주력 주제(settings.focus_topic)가 있으면 자동 글·주제 추천을 그 안에서만, 2~4주 뒤 시즌을 미리, 1~2단어 짧은 키워드 금지, 블로그 글 첫 부분에 사용자가 채울 [내 경험] 자리 1곳, 사진 자리 중 1곳은 '(직접 찍기)', 링크는 첫 소제목 앞에 넣지 않고 2곳까지, 틀에 박힌 AI 말투 피하기.
 - 1.3.0 → 1.3.1에서 바뀐 것: 자동 글·채택 주제·주제 추천의 category 를 주력 주제 이름으로 덮어쓰지 않고 세부 분류로 적음, 키워드나 제목에 주력 주제 낱말(settings.focus_terms, 없으면 주력 주제 이름 전체나 낱말 두 개 이상)이 자연스럽게 드러나게 (앱이 키워드·제목으로 주제 글인지 확인하고 카테고리만으로는 주제 글로 보지 않아서 — 억지로 넣지는 않음), 하루 발행 수(settings.per_day)는 사용자가 고른 값 그대로 따름, 숫자 기준은 '앱 권장 기준'이라고 밝힘.
-- 1.3.1 → 1.4.0에서 바뀐 것 (운영 시스템): 검수·게시 안 한 원고(writer_context backlog)가 한도 이상이면 자동 글을 안 씀 (DB add_post 도 자동 글을 거절), 실제 유입 검색어(search_terms_top)를 주제 근거로, 새 작업 종류 refresh(게시한 글의 개선안 — set_refresh 로 저장, 글 본문은 안 바꿈).
+- 1.3.1 → 1.4.0에서 바뀐 것 (운영 시스템): 검수·게시 안 한 원고(writer_context backlog)가 한도 이상이면 자동 글을 안 씀 (DB add_post 도 자동 글을 거절), 새로 쓸 자동 글 수 = 한도 − 쌓인 원고 − 2단계에서 저장한 원고, 실제 유입 검색어(search_terms_top)를 주제 근거로, 새 작업 종류 refresh(게시한 글의 개선안 — set_refresh 로 저장, 글 본문은 안 바꿈, 작업 번호가 맞지 않으면 저장 없이 오류).
 - 앱 검사와 같은 숫자: 키워드 3~5어절, 링크 2곳까지, 하루 목표 = per_day × 7, 한 번에 자동 글 최대 4편·요청 포함 최대 6편, 쌓아둘 원고 한도 = settings.backlog_limit (0이면 per_day × 7) — `checks.js` SEO_RULES·`lib.js` AUTO_RULES·backlogInfo 와 같은지 `tests/sync.test.js` 가 확인해.
 
 아래 `---` 사이가 프롬프트 전문이야.
@@ -32,7 +32,7 @@ select public.writer_context();
 - compat: 수익 모델 × 채널 판정 (verdict: 가능 / 불가 / 확인 필요)
 - jobs: 처리할 작업 (오래된 순, 최대 8개). kind = write(원고) / topics(주제 추천) / reformat(채널별 버전) / refresh(게시한 글의 개선안). attempts = 지금까지 시도한 횟수
 - upcoming: 내일부터 7일 안에 발행일이 잡힌 원고 수
-- backlog: { backlog: 사람이 검수·게시해야 하는 원고 수(검수 필요·정보 필요·발행 준비·예약), limit: 쌓아둘 한도, overdue: 예정일이 지났는데 아직 게시 안 한 원고 수 }
+- backlog: { backlog: 사람이 검수·게시해야 하는 원고 수(검수 필요·정보 필요·발행 준비·예약), limit: 쌓아둘 한도, overdue: 예정일이 지났는데 아직 검수·게시 안 한 원고 수(예약 빼고), overdue_scheduled: 예약한 날이 지난 원고 수 }
 - recent_keywords: 최근 90일 키워드 (겹치지 않게)
 - adopted_topics: 사용자가 '채택'한 주제
 - performance_90d: 사용자가 입력한 최근 90일 실적 (글별 조회·클릭·주문·수익). 비어 있으면 실적 데이터가 아직 없는 거야.
@@ -68,9 +68,10 @@ select public.job_start('<작업 id>');
 - 저장: select public.set_variants('<post_id>', '<작업 id>', $gf${<버전 JSON>}$gf$::jsonb);
 
 ### refresh — 개선안 (게시한 글을 어떻게 고칠지)
-- 작업의 post: title·titles·keyword·body·sources·content_type·channel_id, metrics(사용자가 넣은 실적 합계 — rows·views·impressions·clicks·orders·revenue_est·last_date, 없으면 null), search_terms(이 글에 실제로 들어온 검색어와 유입 수), other_channels(다른 채널에 올린 기록). payload.focus(all / title / ctr / conversion / search)와 payload.note(사용자 요청, 없을 수 있음).
+- 작업의 post: title·titles·keyword·body·sources·content_type·channel_id, metrics(사용자가 넣은 실적 합계 — rows·views·impressions·clicks·orders·revenue_est·last_date. rows 가 0이면 실적이 없는 거고 숫자 칸은 null — 0으로 쓰지 마), search_terms(이 글에 실제로 들어온 검색어와 유입 수, 유입 수가 null 이면 숫자 없이 들어온 검색어), other_channels(다른 채널에 올린 기록). payload.focus(all / title / ctr / conversion / search)와 payload.note(사용자 요청, 없을 수 있음).
 - 글 본문은 바꾸지 말고 개선안만 만들어 (아래 [개선안 규칙]). 사용자가 블로그에서 직접 고쳐.
-- 저장: select public.set_refresh('<post_id>', '<작업 id>', $gf${<개선안 JSON>}$gf$::jsonb);
+- 저장: select public.set_refresh('<post_id>', '<작업 id>', $gf$<개선안 JSON>$gf$::jsonb);
+- set_refresh 는 그 글의 기다리는 개선안 작업 번호일 때만 저장돼 (아니면 저장 없이 오류). 오류가 나면: select public.job_fail('<작업 id>', '<짧은 이유>', false);
 
 ## 3단계: 발행표 자동 채우기
 settings.auto_enabled 가 true 이고 settings.focus_topic 이나 settings.auto_topics 중 하나라도 비어 있지 않을 때만 해.
@@ -168,7 +169,7 @@ add_post 로 저장할 때만 추가: "channel_id", "program_ids", "topic_id", "
   "based_on": ["근거 한 줄 — 작업에 들어온 실제 숫자·검색어만"],
   "notes": "사용자에게 남길 짧은 말 (없으면 생략)"
 }
-- 근거는 작업에 들어온 metrics·search_terms·other_channels 만 써. 없는 숫자·검색량·순위를 만들지 마. metrics 가 비어 있으면 based_on 에 "실적 데이터 없음"이라고 적고 글 구조만 보고 제안해.
+- 근거는 작업에 들어온 metrics·search_terms·other_channels 만 써. 없는 숫자·검색량·순위를 만들지 마. metrics.rows 가 0이면 based_on 에 "실적 데이터 없음"이라고 적고 글 구조만 보고 제안해.
 - payload.focus: title → 제목·소제목 중심, ctr → 링크 위치·버튼 문구·링크 앞 설명, conversion → 상품 고르는 기준·단점·안 맞는 사람 보강, search → search_terms 중 제목·본문에 없는 검색어를 자연스럽게 넣는 방법, all → 위를 짧게 모두. payload.note 가 있으면 그 요청을 먼저 반영해.
 - 실제 유입 검색어를 제목에 넣을 때 같은 키워드를 억지로 반복하지 마.
 - 제휴 링크 주소·고지문·가격은 바꾸지 마. 링크를 새로 만들지 말고 위치·문구만 제안해.
