@@ -27,6 +27,7 @@
 | DB 변경 기록 | `supabase/migrations/001~014` (표를 지우거나 새로 만들지 않고 더하기만. 012 = 이미지 스튜디오, 013 = 하루 이미지 한도 100, 014 = 주력 주제) |
 | 이미지 스튜디오 안내 (키·비용 한도·사용법) | `docs/image-studio.md` |
 | 검색 노출 도우미 (무엇을 검사하고 무엇이 앱 기준인지, 근거) | `docs/seo-helper.md` |
+| 1.3.0 보고서 (검색 노출 도우미 — 바뀐 파일·실제로 돌린 테스트·배포 상태) | `docs/REPORT-1.3.0.md` |
 | 1.2.0 보고서·테스트 | `docs/REPORT-1.2.0.md`, `docs/testing-1.2.0.md` |
 | 자동 작가 지시문 | `docs/auto-writer-prompt.md` (Claude 예약 작업, 하루 세 번) |
 | Claude 안 글공장 (바로 쓰기·주제 추천·요청 바로 처리) | `claude-artifact/blog-factory.html` (claude.ai 아티팩트 원본 — 고치면 Claude에서 같은 주소로 다시 게시) |
