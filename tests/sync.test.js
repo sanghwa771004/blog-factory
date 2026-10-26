@@ -24,7 +24,10 @@ test('버전이 모두 같음: version.json · 앱 · 서버 · 자동 작가 �
 test('문서가 저장소 사본과 실제 예약 작업이 따로라는 것과 반영 상태를 밝힘 (검증 안 한 걸 검증했다고 쓰지 않음)', () => {
   assert.match(DOC, /이 파일을 고쳐도 예약 작업은 저절로 바뀌지 않아/);
   assert.match(DOC, /반영 상태/);
-  assert.match(DOC, new RegExp(`${VERSION.replace(/\./g, '\\.')}은 아직 예약 작업에 넣지 않았어`));
+  // 이 버전을 예약 작업에 넣었는지 아닌지 둘 중 하나를 꼭 밝힘 (넣었으면 날짜와 함께)
+  const v = VERSION.replace(/\./g, '\\.');
+  assert.match(DOC, new RegExp(`(${v}은 아직 예약 작업에 넣지 않았어|실제 예약 작업에 \\*\\*${v}\\*\\* 프롬프트를 넣었어 \\(\\d{4}-\\d{2}-\\d{2})`));
+  // 실제 예약 실행 결과를 확인하기 전에는 '검증 안 됨'
   assert.match(DOC, /검증 안 됨/);
   assert.doesNotMatch(DOC, /검증 완료/);
 });
