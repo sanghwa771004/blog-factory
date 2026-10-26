@@ -88,6 +88,7 @@ class Mock:
         self.calls = []
         self.force_401 = False
         self.pre015 = False  # True면 서버가 DB 015(주력 주제 낱말·사진 출처 열) 전인 것처럼 답함
+        self.post_channels, self.search_terms = [], []  # 1.4.0 다른 채널 기록·유입 검색어
         self.seq = 100
         P1, P2, P3, P4, P5, P6, P7 = (uid(i) for i in range(1, 8))
         self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, P6=P6, P7=P7, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
@@ -294,7 +295,9 @@ class Mock:
         return {'version': json.loads((ROOT / 'version.json').read_text(encoding='utf-8'))['version'], 'now': NOW, 'today': TODAY.isoformat(), 'auth': 'session', 'posts': live, 'trash': [], 'jobs': self.jobs,
                 'settings': self.settings, 'runs': self.runs, 'channels': self.channels, 'programs': self.programs, 'compat': self.compat,
                 'topics': self.topics, 'products': self.products, 'post_products': self.post_products, 'links': self.links,
-                'imports': self.imports, 'image_slots': self.image_slots_state()}
+                'imports': self.imports, 'image_slots': self.image_slots_state(),
+                'post_channels': self.post_channels, 'search_terms': self.search_terms,
+                'metric_post_ids': sorted({m['post_id'] for m in self.metrics if m.get('post_id')})}
 
     def verdict(self, prog, ch):
         row = next((c for c in self.compat if c['program_id'] == prog and c['channel_id'] == ch), None)
@@ -317,13 +320,16 @@ class Mock:
             return 200, {'stats': {**self.stats(query.get('from', [None])[0], query.get('to', [None])[0]), 'image_costs': self.image_costs()}}
         if path == 'settings' and method == 'POST' and 'focus_topic' in body:
             # 자동 글쓰기 칸만 저장해 둠 (이미지 설정 같은 다른 설정은 다른 시험에 영향 주지 않게 — 시험 끝에 되돌림)
-            for k in ('focus_topic', 'focus_terms', 'per_day'):
+            for k in ('focus_topic', 'focus_terms', 'per_day', 'backlog_limit'):
                 if k in body and not (k == 'focus_terms' and self.pre015):
                     self.settings[k] = body[k]
             if self.pre015 and 'focus_terms' in body:
                 # 서버처럼: 015 전 DB면 주력 주제 낱말만 빼고 저장하고 알려줌
                 return 200, {'settings': self.settings, 'skipped': ['focus_terms']}
         r = self.handle_images(method, path, query, headers, body)
+        if r is not None:
+            return r
+        r = self.handle_ops(method, path, body)
         if r is not None:
             return r
         if path == 'metrics' and method == 'GET':
@@ -368,6 +374,88 @@ class Mock:
                                     'created_at': NOW})
             return 200, {'import_id': iid, 'ok': len(body['rows']), 'dup': body.get('dup_in_file', 0), 'changed': 0, 'errors': body.get('error_count', 0)}
         return 200, {'ok': True}
+
+    # ── 1.4.0 운영: 다른 채널 기록·유입 검색어·예정일 다시 잡기·개선안 (서버와 같은 규칙만 흉내) ──
+    def handle_ops(self, method, path, body):
+        post = lambda pid: next((p for p in self.posts if p['id'] == pid and not p['deleted_at']), None)
+        if path == 'posts/reschedule-overdue' and method == 'POST':
+            per = int(self.settings.get('per_day') or 1)
+            moved = []
+            for p in sorted([p for p in self.posts if not p['deleted_at'] and p['stage'] in ('review', 'verify', 'ready', 'scheduled') and p.get('publish_date') and p['publish_date'] < D(0)], key=lambda x: x['publish_date']):
+                n = 1
+                while sum(1 for q in self.posts if not q['deleted_at'] and q['stage'] not in ('failed', 'queued') and q.get('publish_date') == D(n)) >= per:
+                    n += 1
+                moved.append({'id': p['id'], 'from': p['publish_date'], 'to': D(n)})
+                p['publish_date'] = D(n)
+            return 200, {'moved': moved}
+        m = re.fullmatch(r'posts/([0-9a-f-]{36})/channels', path)
+        if m and method == 'POST':
+            p = post(m.group(1))
+            if not p:
+                return 404, {'error': 'not_found'}
+            ch = body.get('channel_id')
+            if ch not in [c['id'] for c in self.channels] or ch == p['channel_id']:
+                return 400, {'error': 'bad_field', 'field': 'channel_id'}
+            if body.get('url') and not re.match(r'^https://[^\s"\'<>]+$', body['url']):
+                return 400, {'error': 'bad_field', 'field': 'url'}
+            if not body.get('posted_on'):
+                return 400, {'error': 'bad_field', 'field': 'posted_on'}
+            row = next((x for x in self.post_channels if x['post_id'] == p['id'] and x['channel_id'] == ch), None)
+            if not row:
+                row = {'id': self.new_id(), 'post_id': p['id'], 'channel_id': ch, 'created_at': NOW}
+                self.post_channels.append(row)
+            row.update({'url': body.get('url', ''), 'posted_on': body['posted_on'], 'variant_key': body.get('variant_key', ''), 'note': body.get('note', ''), 'updated_at': NOW})
+            return 200, {'post_channel': row}
+        m = re.fullmatch(r'post-channels/([0-9a-f-]{36})', path)
+        if m and method == 'DELETE':
+            n0 = len(self.post_channels)
+            self.post_channels = [x for x in self.post_channels if x['id'] != m.group(1)]
+            return (200, {'ok': True}) if len(self.post_channels) < n0 else (404, {'error': 'not_found'})
+        m = re.fullmatch(r'posts/([0-9a-f-]{36})/search-terms', path)
+        if m and method == 'POST':
+            p = post(m.group(1))
+            if not p:
+                return 404, {'error': 'not_found'}
+            terms = body.get('terms') or []
+            if not terms:
+                return 400, {'error': 'empty'}
+            saved = []
+            for t in terms:
+                term = ' '.join(str(t.get('term', '')).split())
+                if not term or len(term) > 100 or (t.get('views') is not None and (not isinstance(t['views'], int) or t['views'] < 0)):
+                    return 400, {'error': 'bad_field', 'field': 'terms'}
+                row = next((x for x in self.search_terms if x['post_id'] == p['id'] and x['term'] == term and x['period_start'] == body['period_start'] and x['period_end'] == body['period_end']), None)
+                if not row:
+                    row = {'id': self.new_id(), 'post_id': p['id'], 'term': term, 'period_start': body['period_start'], 'period_end': body['period_end'], 'created_at': NOW}
+                    self.search_terms.append(row)
+                row.update({'views': t.get('views'), 'channel_id': p['channel_id'], 'source_label': body.get('source_label', '')})
+                saved.append(row)
+            return 200, {'saved': len(saved), 'search_terms': saved}
+        m = re.fullmatch(r'search-terms/([0-9a-f-]{36})', path)
+        if m and method == 'DELETE':
+            n0 = len(self.search_terms)
+            self.search_terms = [x for x in self.search_terms if x['id'] != m.group(1)]
+            return (200, {'ok': True}) if len(self.search_terms) < n0 else (404, {'error': 'not_found'})
+        if path == 'jobs' and method == 'POST' and body.get('kind') == 'refresh':
+            p = post(body.get('post_id'))
+            if not p:
+                return 404, {'error': 'not_found'}
+            if p['stage'] not in ('published', 'collecting', 'analyzed'):
+                return 409, {'error': 'not_published'}
+            if any(j for j in self.jobs if j['kind'] == 'refresh' and j['post_id'] == p['id'] and j['status'] == 'pending'):
+                return 409, {'error': 'job_exists'}
+            job = {'id': self.new_id(), 'kind': 'refresh', 'keyword': p['keyword'], 'status': 'pending', 'post_id': p['id'], 'attempts': 0, 'started_at': None,
+                   'created_at': NOW, 'done_at': None, 'note': '', 'payload': {'focus': body.get('focus', 'all'), **({'note': body['note']} if body.get('note') else {})}}
+            self.jobs.append(job)
+            return 200, {'job': job}
+        m = re.fullmatch(r'posts/([0-9a-f-]{36})', path)
+        if m and method == 'POST' and 'refresh' in body:
+            p = post(m.group(1))
+            if body['refresh'] is not None:
+                return 400, {'error': 'bad_field', 'field': 'refresh'}
+            p['refresh'] = {}
+            return 200, {'post': p, 'demoted': None, 'image_sync': None}
+        return None
 
     def handle_images(self, method, path, query, headers, body):
         m = re.fullmatch(r'posts/([0-9a-f-]{36})/images', path)
@@ -955,7 +1043,7 @@ def main():
                 src = sheet.get_by_label('이 사진은 어디서 났어?')
                 expect(src).to_have_value('own')
                 src.select_option('official')
-                expect(page.locator('#toast')).to_contain_text('DB 업데이트가 아직 안 돼서')
+                expect(page.locator('#toast')).to_contain_text('DB 업데이트(015)가 아직 안 돼서')
                 expect(src).to_have_value('own')
                 sheet.get_by_role('button', name='닫기').click()
                 expect(page.locator('section.studio .slot').nth(1).locator('.chip.o-own')).to_contain_text('직접 촬영')
@@ -1413,6 +1501,136 @@ def main():
             shot('20-home-seo')
             mock.settings.update({'focus_topic': '', 'focus_terms': '', 'per_day': 1})
         check('검색 노출 점검: 권장 기준·내 기록·실측 없음 구분, 게시한 글 기준 주력 주제 비율·근거, 하루 발행량은 고른 값 그대로, 시즌 주제 추천', t_seo_helper)
+
+        # 1.4.0 운영 시스템: 흐름판(막힌 곳) → 다른 채널 기록 → 유입 검색어 → 개선안 → 채널별 실적 → 쌓인 원고 한도·날짜 다시 잡기 → 최근 7일 정리
+        def t_ops_140():
+            P3 = mock.ids['P3']
+            goto_hash('home')
+            ops = page.locator('section.panel.ops')
+            expect(ops).to_contain_text('운영 흐름')
+            expect(ops.locator('ol.flow li')).to_have_count(7)
+            expect(ops).to_contain_text('지금 막힌 곳: 다른 채널로 안 퍼지고 있어')
+            expect(ops).to_contain_text("'사용 중'인 수익 모델이 아직 없어")
+            ops.get_by_role('button', name='안 퍼뜨린 글 보기').click()
+            view = page.locator('#view')
+            spread = view.locator('details', has=page.locator('summary', has_text='다른 채널에 올리기'))
+            expect(spread.locator('summary')).to_contain_text('(0/4)')
+            row = spread.locator('.mrow', has_text='쓰레드')
+            row.get_by_role('button', name='올렸어 — 기록').click()
+            sheet = page.locator('#sheet')
+            sheet.get_by_label('올린 글 주소 (https)').fill('http://www.threads.net/@me/post/abc')
+            sheet.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('https://로 시작해야 해')
+            sheet.get_by_label('올린 글 주소 (https)').fill('https://www.threads.net/@me/post/abc')
+            sheet.get_by_label('메모 (선택)').fill('오전에 올림')
+            sheet.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('기록했어')
+            body = [c for c in mock.calls if c['path'] == f'posts/{P3}/channels'][-1]['body']
+            assert body['channel_id'] == 'threads' and body['url'] == 'https://www.threads.net/@me/post/abc' and body['note'] == '오전에 올림', body
+            spread = view.locator('details', has=page.locator('summary', has_text='다른 채널에 올리기'))
+            expect(spread.locator('summary')).to_contain_text('(1/4)')
+            expect(spread.locator('.mrow', has_text='쓰레드')).to_contain_text('올림')
+            # 유입 검색어 붙여넣기 → 미리보기 → 저장 → 제목에 없는 검색어 알림
+            terms = view.locator('details', has=page.locator('summary', has_text='검색 유입 키워드'))
+            ta = terms.get_by_label('유입 검색어 붙여넣기')
+            ta.fill('검색어\t유입수\n1\t전기요 두 가지 비교\t30\n2\t전기요 전자파\t12\n원룸 전기요 추천 7회')
+            expect(terms).to_contain_text('읽은 검색어 3개')
+            terms.get_by_role('button', name='검색어 저장').click()
+            expect(page.locator('#toast')).to_contain_text('검색어 3개를 저장했어')
+            st = [c for c in mock.calls if c['path'] == f'posts/{P3}/search-terms'][-1]['body']
+            assert [(t['term'], t['views']) for t in st['terms']] == [('전기요 두 가지 비교', 30), ('전기요 전자파', 12), ('원룸 전기요 추천', 7)], st
+            terms = view.locator('details', has=page.locator('summary', has_text='검색 유입 키워드'))
+            expect(terms.locator('summary')).to_contain_text('(3)')
+            expect(terms).to_contain_text("제목·키워드에 없는 검색어: '전기요 전자파'(12회), '원룸 전기요 추천'(7회)")
+            # 개선안 요청 (검색어 반영) → 기다리는 중 → 자동 작가가 쓴 것처럼 넣고 새로고침 → 보이고 지울 수 있음
+            terms.get_by_role('button', name='이 검색어로 개선안 요청').click()
+            sheet = page.locator('#sheet')
+            expect(sheet.get_by_label('무엇을 고칠까?')).to_have_value('search')
+            sheet.get_by_role('button', name='요청하기').click()
+            expect(page.locator('#toast')).to_contain_text('개선안을 요청했어')
+            jb = [c for c in mock.calls if c['path'] == 'jobs' and c['method'] == 'POST'][-1]['body']
+            assert jb['kind'] == 'refresh' and jb['post_id'] == P3 and jb['focus'] == 'search', jb
+            refresh = view.locator('details', has=page.locator('summary', has_text='개선안'))
+            expect(refresh).to_contain_text('개선안을 기다리는 중이야')
+            p3 = next(p for p in mock.posts if p['id'] == P3)
+            p3['refresh'] = {'titles': ['전기요 두 가지 비교, 전자파까지 정리'], 'intro': '전자파가 걱정되는 분을 위한 도입부', 'based_on': ["유입 검색어 '전기요 전자파' 12회"], '_updated_at': NOW}
+            for j in mock.jobs:
+                if j['kind'] == 'refresh' and j['post_id'] == P3:
+                    j['status'] = 'done'
+            page.get_by_role('button', name='새로고침').click()
+            refresh = page.locator('#view details', has=page.locator('summary', has_text='개선안'))
+            expect(refresh).to_contain_text('제목 후보')
+            expect(refresh).to_contain_text('전기요 두 가지 비교, 전자파까지 정리')
+            expect(refresh).to_contain_text("유입 검색어 '전기요 전자파' 12회")
+            no_overflow('원고 개선안')
+            b = refresh.get_by_role('button', name='개선안 지우기')
+            b.click()
+            refresh.get_by_role('button', name=re.compile('한 번 더')).click()
+            expect(page.locator('#toast')).to_contain_text('지웠어')
+            expect(page.locator('#view details', has=page.locator('summary', has_text='개선안')).get_by_role('button', name='개선안 요청')).to_be_visible()
+            # 채널별 실적: 쓰레드에서 본 숫자 넣기 → 채널별 합계
+            page.locator('#view').get_by_role('button', name='실적 입력').first.click()
+            sheet = page.locator('#sheet')
+            sheet.get_by_label('채널').select_option('threads')
+            sheet.get_by_label('조회수').fill('30')
+            sheet.get_by_label('어디서 본 숫자야?').fill('쓰레드 인사이트')
+            sheet.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            mb = [c for c in mock.calls if c['path'] == 'metrics' and c['method'] == 'POST'][-1]['body']
+            assert mb['channel_id'] == 'threads' and mb['views'] == 30, mb
+            expect(page.locator('#view')).to_contain_text('채널별 합계')
+            shot('21-post-ops')
+            # 홈: 다른 채널·실적이 채워지면 막힌 곳은 '고칠 글' (제목에 없는 검색어), 개선 루프에 '고칠 것', 최근 7일 정리
+            goto_hash('home')
+            ops = page.locator('section.panel.ops')
+            expect(ops).to_contain_text('지금 막힌 곳: 고칠 글이 있어')
+            loop = page.locator('section.panel', has=page.locator('h2', has_text='개선 루프'))
+            expect(loop).to_contain_text('고칠 것')
+            expect(loop).to_contain_text('실제로 들어온 검색어가 제목에 없어')
+            expect(loop.get_by_role('button', name='개선안 요청').first).to_be_visible()
+            week = page.locator('section.panel', has=page.locator('h2', has_text='최근 7일 정리'))
+            expect(week.locator('.kpi', has_text='다른 채널에 올림')).to_contain_text('1')
+            expect(week.locator('.kpi', has_text='넣은 검색어')).to_contain_text('3')
+            # 쌓인 원고 한도: 한도를 3개로 → 자동 작가 멈춤 안내, 막힌 곳은 게시
+            mock.settings['backlog_limit'] = 3
+            page.get_by_role('button', name='새로고침').click()
+            ops = page.locator('section.panel.ops')
+            expect(ops).to_contain_text('지금 막힌 곳: 게시가 막혔어')
+            expect(ops).to_contain_text('쌓여서(한도 3개) 자동 작가가 새 글을 멈췄어')
+            writer = page.locator('section.panel', has=page.locator('h2', has_text='자동 작가'))
+            expect(writer).to_contain_text('한도가 차서 자동 작가가 새 자동 글을 멈췄어')
+            expect(writer).to_contain_text('쌓인 원고가 한도라서 다음 실행에 새 자동 글은 없어')
+            mock.settings['backlog_limit'] = 0
+            # 예정일 지난 원고 → 날짜 다시 잡기 (확인 한 번 더) → 내일부터
+            p1 = next(p for p in mock.posts if p['id'] == mock.ids['P1']); p2 = next(p for p in mock.posts if p['id'] == mock.ids['P2'])
+            keep = (p1['publish_date'], p2['publish_date'])
+            p1['publish_date'], p2['publish_date'] = D(-2), D(-1)
+            page.get_by_role('button', name='새로고침').click()
+            ops = page.locator('section.panel.ops')
+            expect(ops).to_contain_text('예정일이 지난 원고 2개')
+            ops.get_by_role('button', name='날짜 다시 잡기').click()
+            ops.get_by_role('button', name=re.compile('한 번 더')).click()
+            expect(page.locator('#toast')).to_contain_text('2개를')
+            expect(page.locator('#toast')).to_contain_text('다시 잡았어')
+            assert p1['publish_date'] >= D(1) and p2['publish_date'] >= D(1), (p1['publish_date'], p2['publish_date'])
+            expect(page.locator('section.panel.ops')).not_to_contain_text('예정일이 지난 원고')
+            p1['publish_date'], p2['publish_date'] = keep
+            no_overflow('홈 운영 흐름')
+            shot('22-home-ops')
+            # 설정: 쌓아둘 원고 한도
+            goto_hash('settings/auto')
+            sec = page.locator('#sec-auto')
+            sel = sec.locator('label', has_text='쌓아둘 원고 한도').locator('select')
+            sel.select_option('10')
+            expect(sec).to_contain_text('검수·게시 안 한 원고가 10개 쌓이면 자동 작가가 새 자동 글을 멈춰')
+            sec.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            assert [c for c in mock.calls if c['path'] == 'settings'][-1]['body']['backlog_limit'] == 10
+            mock.settings['backlog_limit'] = 0
+            mock.post_channels.clear(); mock.search_terms.clear()
+            mock.metrics = [m for m in mock.metrics if m.get('channel_id') != 'threads']
+            page.get_by_role('button', name='새로고침').click()
+        check('운영 시스템(1.4.0): 흐름판 막힌 곳 → 다른 채널 기록 → 유입 검색어 → 개선안 → 채널별 실적 → 원고 한도·날짜 다시 잡기 → 최근 7일 정리 → 한도 설정', t_ops_140)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():

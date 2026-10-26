@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { SEO_RULES, countMe } from '../checks.js';
-import { AUTO_RULES } from '../lib.js';
+import { AUTO_RULES, BACKLOG_STAGES, backlogInfo } from '../lib.js';
 import { isOwnPhotoSlot } from '../images.js';
 
 const read = (p) => readFileSync(new URL('../' + p, import.meta.url), 'utf8');
@@ -71,4 +71,36 @@ test('키워드·링크·경험·사진 규칙이 앱 검사 숫자·표시와 �
   assert.ok(ART.includes('[이미지: (직접 찍기) 무엇을 찍을지]'));
   const me = PROMPT.match(/"\[내 경험: [^"]*\]"/)[0].slice(1, -1);
   assert.equal(countMe(me), 1, '빈 [내 경험] 자리는 앱이 미완성으로 알아봄');
+});
+
+test('1.4.0 운영: 쌓인 원고 한도·개선안·유입 검색어 규칙이 프롬프트·앱·DB·서버에서 같음', () => {
+  const M016 = read('supabase/migrations/016_operations_1_4_0.sql');
+  const APP = read('app.js');
+  const SRV = read('supabase/functions/blog-app/index.ts');
+  // 쓰기 함수 목록에 개선안 저장(set_refresh)이 있음
+  assert.match(PROMPT, /쓰기는 아래에 적힌 함수 호출만 써: writer_context, job_start, fill_post, job_fail, add_topics, set_variants, set_refresh, add_post, log_run\./);
+  // 쌓인 원고: 같은 단계(검수 필요·정보 필요·발행 준비·예약)와 같은 기본 한도(하루 발행 수 × 7)
+  assert.deepEqual(BACKLOG_STAGES, ['review', 'verify', 'ready', 'scheduled']);
+  assert.ok(M016.includes("p.stage in ('review', 'verify', 'ready', 'scheduled')"), 'DB backlog_state 가 같은 단계를 셈');
+  assert.ok(M016.includes('greatest(coalesce(s.per_day, 1), 1) * 7'), 'DB 기본 한도 = 하루 발행 수 × 7');
+  assert.equal(backlogInfo([], { per_day: 2 }).limit, 2 * AUTO_RULES.days);
+  assert.equal(backlogInfo([], { per_day: 2, backlog_limit: 5 }).limit, 5);
+  assert.match(PROMPT, /backlog_limit\(쌓아둘 원고 한도, 0이면 per_day × 7\)/);
+  assert.match(PROMPT, /backlog\.backlog 가 backlog\.limit 이상이면 3단계를 통째로 건너뛰어/);
+  assert.ok(M016.includes("coalesce(nullif(p->>'source', ''), 'auto') = 'auto'") && M016.includes('backlog full'), 'DB 도 자동 글만 막음');
+  // 개선안: 프롬프트가 쓰는 칸 = 앱이 보여주는 칸, 고칠 점(focus) 목록이 셋 다 같음
+  for (const k of ['titles', 'intro', 'headings', 'add_sections', 'cta', 'link_positions', 'keep', 'based_on', 'notes']) {
+    assert.ok(PROMPT.includes(`"${k}"`), `프롬프트 개선안 JSON: ${k}`);
+    assert.ok(APP.includes(`rf.${k}`), `앱 개선안 칸: ${k}`);
+  }
+  const focus = ['all', 'title', 'ctr', 'conversion', 'search'];
+  assert.ok(SRV.includes(`const REFRESH_FOCUS = ${JSON.stringify(focus).replace(/,/g, ', ')};`), '서버 focus 목록');
+  assert.ok(PROMPT.includes('payload.focus(all / title / ctr / conversion / search)'), '프롬프트 focus 목록');
+  for (const f of focus) assert.match(APP, new RegExp(`\\b${f}: '`), `앱 focus: ${f}`);
+  assert.match(PROMPT, /select public\.set_refresh\('<post_id>', '<작업 id>', \$gf\$\{<개선안 JSON>\}\$gf\$::jsonb\);/);
+  assert.match(PROMPT, /글 본문은 바꾸지 말고 개선안만 만들어/);
+  // 유입 검색어: 사용자가 옮겨 적은 숫자만 근거로, 부풀리지 않음
+  assert.match(PROMPT, /search_terms_top: 최근 90일 실제 유입 검색어/);
+  assert.match(PROMPT, /숫자는 그대로, 부풀리지 마/);
+  assert.ok(M016.includes("'search_terms_top'"), 'DB writer_context 에 유입 검색어');
 });

@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.3.1)
+// 블로그 글공장 서버 API (1.4.0)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -13,7 +13,7 @@ import {
 } from "./images.js";
 import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
 
-const VERSION = "1.3.1";
+const VERSION = "1.4.0";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -364,6 +364,16 @@ async function getState(c: Ctx) {
   ]);
   for (const r of [posts, trash, jobs, settings, runs, channels, programs, compat, topics, imports]) if (r.error) throw r.error;
   // 1000줄이 넘어도 빠지지 않게 끝까지 (링크·상품이 잘리면 '링크 없음' 같은 잘못된 오류가 뜸)
+  const since400 = new Date(Date.now() - 400 * 86400e3).toISOString().slice(0, 10);
+  // 1.4.0: 다른 채널 기록·유입 검색어 (016 전 DB면 빈 목록 — 화면은 '데이터 없음'으로)
+  const softAll = (p: Promise<J[]>, what: string) => p.catch((e) => { console.error(`state ${what}:`, String((e as Error)?.message ?? e)); return [] as J[]; });
+  const [postChannels, searchTerms, metricPosts] = await Promise.all([
+    softAll(fetchAll("post_channels", [["posted_on", false], ["id", true]]), "post_channels"),
+    softAll(fetchAll("search_terms", [["period_end", false], ["id", true]], (q) => q.gte("period_end", since400),
+      "id, post_id, term, views, period_start, period_end, channel_id, source_label, created_at"), "search_terms"),
+    // 흐름판의 '실적' 단계: 실적이 한 줄이라도 있는 글
+    softAll(fetchAll("metrics", [["id", true]], (q) => q.not("post_id", "is", null), "post_id"), "metric_posts"),
+  ]);
   const [products, pp, links, imageSlots] = await Promise.all([
     fetchAll("products", [["updated_at", false], ["id", true]]),
     fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
@@ -382,6 +392,7 @@ async function getState(c: Ctx) {
     posts: posts.data, trash: trash.data, jobs: jobs.data, settings: settings.data, runs: runs.data,
     channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products,
     post_products: pp, links, imports: imports.data, image_slots: imageSlots.error ? [] : imageSlots.data,
+    post_channels: postChannels, search_terms: searchTerms, metric_post_ids: [...new Set(metricPosts.map((m) => String(m.post_id)))],
     requests: jobs.data, lastRun: runs.data?.[0] ?? null, // 예전 화면 호환
   });
 }
@@ -404,7 +415,10 @@ const EXPORT_TABLES: [string, [string, boolean][]][] = [
   ["topics", [["id", true]]], ["products", [["id", true]]], ["post_products", [["post_id", true], ["product_id", true]]],
   ["links", [["id", true]]], ["metrics", [["id", true]]], ["imports", [["id", true]]],
   ["post_images", [["id", true]]], ["post_image_slots", [["id", true]]], ["image_generations", [["id", true]]], ["post_card_decks", [["post_id", true]]],
+  ["post_channels", [["id", true]]], ["search_terms", [["id", true]]],
 ];
+// 016(1.4.0)에서 생긴 표 — 아직 016 전인 DB면 빈 목록으로
+const OPS_TABLES = ["post_channels", "search_terms"];
 async function getExport(_c: Ctx) {
   const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결)만 들어 있어." };
   const counts: J = {};
@@ -414,7 +428,7 @@ async function getExport(_c: Ctx) {
     try { rows = await fetchAll(t, order); } catch (e) {
       // 이미지 표가 아직 없는 DB(012 적용 전)여도 나머지 백업은 받을 수 있게 — 그 밖의 오류는 그대로 실패
       const code = String((e as { code?: string })?.code ?? "");
-      if (t.startsWith("post_image") || t === "image_generations" || t === "post_card_decks") {
+      if (t.startsWith("post_image") || t === "image_generations" || t === "post_card_decks" || OPS_TABLES.includes(t)) {
         if (code === "PGRST205" || code === "42P01") { missing.push(t); out[t] = []; counts[t] = null; continue; }
       }
       throw e;
@@ -556,6 +570,11 @@ async function patchPost(c: Ctx) {
   if ("publish_date" in b) patch.publish_date = optDate(b.publish_date, "publish_date");
   if ("blog_url" in b) patch.blog_url = optUrl(b.blog_url, "blog_url");
   if ("published_on" in b) patch.published_on = optDate(b.published_on, "published_on");
+  if ("refresh" in b) {
+    // 개선안은 자동 작가만 쓰고, 화면에서는 지우기만 (다 고쳤거나 필요 없을 때)
+    if (b.refresh !== null) fail(400, "bad_field", { field: "refresh" });
+    patch.refresh = {};
+  }
 
   if ("channel_id" in b || "program_ids" in b) {
     const ch = "channel_id" in b ? str(b.channel_id, 40) : String(post.channel_id ?? "");
@@ -614,6 +633,7 @@ async function patchPost(c: Ctx) {
 
   if (!Object.keys(patch).length) fail(400, "empty");
   const { data, error } = await sb.from("posts").update(patch).eq("id", id).select().single();
+  if (error && "refresh" in patch && missingColumn(error, "refresh")) fail(409, "db_update_needed", { migration: "016" }); // 016 전 DB
   if (error) throw error;
   // 본문이 바뀌면 사진 자리 연결을 새 본문에 맞춤 (설명을 조금 고친 자리는 옮기고, 사라진 자리의 이미지는 보관함에 그대로)
   let image_sync: unknown = null;
@@ -842,8 +862,28 @@ async function createJob(c: Ctx) {
     if (error) throw error;
     return json({ job: data });
   }
+  if (b.kind === "refresh") {
+    // 개선안: 게시한 글을 실적·유입 검색어로 어떻게 고칠지 (자동 작가가 써서 글의 '개선안' 칸에 저장. 글 본문은 안 바꿈)
+    if (!isUuid(b.post_id)) fail(400, "bad_field", { field: "post_id" });
+    const post = await getPost(b.post_id as string);
+    if (!LIVE.includes(String(post.stage))) fail(409, "not_published");
+    if (String(post.body || "").length < 200) fail(400, "no_body");
+    const focus = REFRESH_FOCUS.includes(String(b.focus)) ? String(b.focus) : "all";
+    const note = str(b.note, 300).trim();
+    const { data: dup, error: e1 } = await sb.from("requests").select("id").eq("post_id", post.id).eq("kind", "refresh").eq("status", "pending").limit(1);
+    if (e1) throw e1;
+    if ((dup ?? []).length) fail(409, "job_exists");
+    await jobLimits(1);
+    const { data, error } = await sb.from("requests").insert({ keyword: String(post.keyword || ""), kind: "refresh", post_id: post.id, payload: { focus, ...(note ? { note } : {}) }, money: String(post.money || ""), platform: String(post.platform || "") }).select().single();
+    if (error && kindNotAllowed(error)) fail(409, "db_update_needed", { migration: "016" });
+    if (error) throw error;
+    return json({ job: data });
+  }
   return fail(400, "bad_field", { field: "kind" });
 }
+const REFRESH_FOCUS = ["all", "title", "ctr", "conversion", "search"];
+// 016 전 DB: 작업 종류 검사(requests_kind_check)에 refresh 가 없음
+const kindNotAllowed = (e: unknown) => String((e as { code?: string })?.code ?? "") === "23514" && String((e as { message?: string })?.message ?? "").includes("requests_kind_check");
 async function cancelJob(c: Ctx) {
   const { error } = await sb.rpc("job_cancel", { job: c.params[0] });
   if (error) rpcError(error);
@@ -991,6 +1031,7 @@ async function patchSettings(c: Ctx) {
   if ("auto_topics" in b) s.auto_topics = str(b.auto_topics, 300);
   if ("focus_topic" in b) s.focus_topic = str(b.focus_topic, 60).trim();
   if ("focus_terms" in b) s.focus_terms = str(b.focus_terms, 300).trim();
+  if ("backlog_limit" in b) s.backlog_limit = optInt(b.backlog_limit, "backlog_limit", 0, 60) ?? 0;
   if ("auto_enabled" in b) s.auto_enabled = b.auto_enabled === true;
   if ("len" in b) s.len = oneOf(String(b.len), ["1500", "2500", "3500"] as const, "len");
   if ("score_weights" in b) {
@@ -1034,10 +1075,12 @@ async function patchSettings(c: Ctx) {
   let { data, error } = await sb.from("settings").update(s).eq("id", 1).select().single();
   // DB에 015(주력 주제 낱말 열)가 아직 없으면 그 칸만 빼고 저장 — 서버를 DB보다 먼저 올려도 다른 설정 저장이 막히지 않게
   const skipped: string[] = [];
-  if (error && "focus_terms" in s && missingColumn(error, "focus_terms")) {
-    delete s.focus_terms;
-    skipped.push("focus_terms");
-    // 주력 주제 낱말만 보냈으면 저장할 게 없으니 지금 설정만 다시 읽어서 돌려줌 (빈 저장 요청을 보내지 않음)
+  // DB에 그 열이 아직 없으면(015 전: 주력 주제 낱말, 016 전: 쌓아둘 원고 한도) 그 칸만 빼고 저장
+  for (const col of ["focus_terms", "backlog_limit"]) {
+    if (!(error && col in s && missingColumn(error, col))) continue;
+    delete s[col];
+    skipped.push(col);
+    // 그 칸만 보냈으면 저장할 게 없으니 지금 설정만 다시 읽어서 돌려줌 (빈 저장 요청을 보내지 않음)
     ({ data, error } = Object.keys(s).length
       ? await sb.from("settings").update(s).eq("id", 1).select().single()
       : await sb.from("settings").select("*").eq("id", 1).single());
@@ -1746,6 +1789,77 @@ async function saveCards(c: Ctx) {
   return json({ deck: data });
 }
 
+// ───────── 1.4.0 운영: 다른 채널 기록 · 유입 검색어 · 예정일 다시 잡기 ─────────
+// 016 전 DB(표·함수가 아직 없음)면 'DB 업데이트 필요'로 알려줌
+function missingTable(e: unknown, name: string): boolean {
+  const x = (e ?? {}) as { code?: string; message?: string };
+  return ["PGRST205", "42P01", "PGRST202", "42883"].includes(String(x.code ?? "")) && String(x.message ?? "").includes(name);
+}
+const needs016 = (e: unknown, name: string) => { if (missingTable(e, name)) fail(409, "db_update_needed", { migration: "016" }); };
+async function savePostChannel(c: Ctx) {
+  const b = await readJson(c.req, 10_000);
+  const post = await getPost(c.params[0]);
+  const cat = await catalog();
+  const ch = str(b.channel_id, 40);
+  if (!has(cat.channels, ch)) fail(400, "bad_field", { field: "channel_id" });
+  if (ch === post.channel_id) fail(400, "bad_field", { field: "channel_id" }); // 메인 채널은 '게시 완료 기록'으로
+  const url = optUrl(b.url, "url");
+  if (url && !/^https:\/\//i.test(url)) fail(400, "bad_field", { field: "url" });
+  if (url.length > 500) fail(400, "bad_field", { field: "url" });
+  const row: J = {
+    post_id: post.id, channel_id: ch, url, posted_on: reqDate(b.posted_on, "posted_on"),
+    variant_key: REFORMAT_TARGETS.includes(String(b.variant_key)) ? String(b.variant_key) : "", note: str(b.note, 300).trim(),
+  };
+  const { data, error } = await sb.from("post_channels").upsert(row, { onConflict: "post_id,channel_id" }).select().single();
+  if (error) { needs016(error, "post_channels"); throw error; }
+  return json({ post_channel: data });
+}
+async function deletePostChannel(c: Ctx) {
+  const { data, error } = await sb.from("post_channels").delete().eq("id", c.params[0]).select("id").maybeSingle();
+  if (error) { needs016(error, "post_channels"); throw error; }
+  if (!data) fail(404, "not_found");
+  return json({ ok: true });
+}
+// 유입 검색어: 블로그 통계에서 옮겨 적은 숫자 (앱이 직접 모으지 않음). 같은 글·검색어·기간이면 숫자만 새로
+async function saveSearchTerms(c: Ctx) {
+  const b = await readJson(c.req, 200_000);
+  const post = await getPost(c.params[0]);
+  const start = reqDate(b.period_start, "period_start");
+  const end = optDate(b.period_end, "period_end") ?? start;
+  if (end < start) fail(400, "bad_field", { field: "period_end" });
+  const items = Array.isArray(b.terms) ? (b.terms as J[]) : fail(400, "bad_field", { field: "terms" });
+  if (!items.length) fail(400, "empty");
+  if (items.length > 300) fail(413, "too_many_rows");
+  const cat = await catalog();
+  const ch = has(cat.channels, b.channel_id) ? String(b.channel_id) : String(post.channel_id || "") || null;
+  const label = str(b.source_label, 60).trim() || "블로그 통계 · 유입 검색어";
+  const seen = new Map<string, J>();
+  for (const it of items) {
+    const term = str(it?.term, 200).replace(/\s+/g, " ").trim();
+    if (!term || term.length > 100) fail(400, "bad_field", { field: "terms" });
+    const views = optInt(it?.views, "terms", 0, 1e9);
+    const k = term.toLowerCase();
+    const was = seen.get(k);
+    if (was) { if (views != null) was.views = (Number(was.views ?? 0)) + views; continue; }
+    seen.set(k, { post_id: post.id, term, views, period_start: start, period_end: end, channel_id: ch, source_label: label });
+  }
+  const rows = [...seen.values()];
+  const { data, error } = await sb.from("search_terms").upsert(rows, { onConflict: "post_id,term,period_start,period_end" }).select();
+  if (error) { needs016(error, "search_terms"); throw error; }
+  return json({ saved: (data ?? []).length, search_terms: data ?? [] });
+}
+async function deleteSearchTerm(c: Ctx) {
+  const { data, error } = await sb.from("search_terms").delete().eq("id", c.params[0]).select("id").maybeSingle();
+  if (error) { needs016(error, "search_terms"); throw error; }
+  if (!data) fail(404, "not_found");
+  return json({ ok: true });
+}
+async function rescheduleOverdue(_c: Ctx) {
+  const { data, error } = await sb.rpc("reschedule_overdue");
+  if (error) { needs016(error, "reschedule_overdue"); rpcError(error); }
+  return json({ moved: data ?? [] });
+}
+
 // ───────── 경로표 ─────────
 const U = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
 const R = (s: string) => new RegExp(`^${s}$`);
@@ -1758,6 +1872,11 @@ const ROUTES: [string, RegExp, (c: Ctx) => Promise<Response>][] = [
   ["POST", R(`sessions/${U}/revoke`), revokeSession],
   ["POST", R("code/rotate"), rotateCode],
   ["POST", R("posts"), createPost],
+  ["POST", R("posts/reschedule-overdue"), rescheduleOverdue],
+  ["POST", R(`posts/${U}/channels`), savePostChannel],
+  ["DELETE", R(`post-channels/${U}`), deletePostChannel],
+  ["POST", R(`posts/${U}/search-terms`), saveSearchTerms],
+  ["DELETE", R(`search-terms/${U}`), deleteSearchTerm],
   ["POST", R(`posts/${U}`), patchPost],
   ["PATCH", R(`posts/${U}`), patchPost],
   ["DELETE", R(`posts/${U}`), deletePost],

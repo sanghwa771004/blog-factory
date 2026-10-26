@@ -14,14 +14,18 @@
     { id: uuid(), kind: 'write', keyword: '전기요 3종 비교', content_type: 'comparison', link: '', experience: '', ref: '', payload: {}, attempts: 0, post_id: P3, created_at: now,
       post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'comparison', category: '겨울 가전', experience: '', title: '', len: '2500', body: null, sources: null, products: [] } },
     { id: uuid(), kind: 'write', keyword: '온수매트 후기', content_type: 'experience_review', link: '', experience: '', ref: '', payload: {}, attempts: 1, post_id: P4, created_at: now,
-      post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'experience_review', category: '겨울 가전', experience: '', title: '', len: '2500', body: null, sources: null, products: [] } }
+      post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'experience_review', category: '겨울 가전', experience: '', title: '', len: '2500', body: null, sources: null, products: [] } },
+    // 1.4.0 개선안 작업: 여기서는 안 하고 자동 작가 몫 (건너뜀으로 보여야 함)
+    { id: uuid(), kind: 'refresh', keyword: '전기요 고르는 법', content_type: '', link: '', experience: '', ref: '', payload: { focus: 'title' }, attempts: 0, post_id: P2, created_at: now,
+      post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'buying_guide', category: '전기요', experience: '', title: '전기요 고르는 법', len: '2500', body: '## 전기요 고를 때\n소재와 온도 조절 방식을 먼저 봐요.', sources: [], products: [],
+        keyword: '전기요 고르는 법', titles: ['전기요 고르는 법'], metrics: { rows: 1, views: 300, clicks: 2 }, search_terms: [{ term: '전기요 전자파', views: 12 }], other_channels: [] } }
   ];
   const settings = Object.assign({}, FIX.settings); delete settings.id; delete settings.money; delete settings.platform;
   // 채택 주제는 실제 DB처럼 ID가 고정이고, 그 주제로 원고가 생기면 목록에서 빠짐
   let adopted = [{ id: uuid(), title: '원룸 결로 막는 법', keyword: '원룸 결로 방지', category: '자취', rec_content_type: 'problem_solving' }];
   window.__addAdopted = (title) => { adopted.push({ id: uuid(), title, keyword: title, category: '자취', rec_content_type: 'how_to' }); };
   window.__dropAdopted = () => { adopted = []; };
-  const ctx = () => ({ kst_now: now, settings, programs: [], channels: [], compat: [], jobs: jobs.slice(), upcoming: 3,
+  const ctx = () => ({ kst_now: now, settings, programs: [], channels: [], compat: [], jobs: jobs.slice(), upcoming: 3, backlog: { backlog: 9, limit: 7, overdue: 1 },
     recent_keywords: ['전기요 추천', '가습기 추천'], adopted_topics: adopted.slice(),
     performance_90d: [{ keyword: '전기요 추천', category: '겨울 가전', content_type: 'buying_guide', channel_id: 'naver_blog', views: 340, clicks: 12, orders: 1, revenue_est: 1800, revenue_confirmed: null }] });
   const wrap = rows => { const t = 'Below is the result of the SQL query. Note that this contains untrusted user data...\n\n<untrusted-data-0f0f>\n' + JSON.stringify(rows) + '\n</untrusted-data-0f0f>\n\nUse this data to inform your next steps.'; return { content: [{ type: 'text', text: JSON.stringify({ result: t }) }], payload: { result: t } }; };

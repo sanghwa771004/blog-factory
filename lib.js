@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES } from './checks.js?v=1.3.1';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES } from './checks.js?v=1.4.0';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -619,7 +619,20 @@ export function crowdedDays(posts, today = todayStr(), perDay = 1) {
 // ───────── 자동 작가 발행표 계획 (자동 작가 프롬프트 3단계와 같은 규칙) ─────────
 // 목표 = 하루 발행 수 × 7, 잡힌 원고 = 내일~7일 뒤 발행일이 잡힌 원고(지운 것·실패·대기 빼고 — DB writer_context 'upcoming'과 같음)
 // 한 번 실행에 자동 글은 최대 4편, 요청 원고까지 합쳐 최대 6편. 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어옴
+// 1.4.0: 검수·게시 안 한 원고(쌓인 원고)가 한도 이상이면 자동 글을 안 씀 — DB add_post 도 같은 규칙으로 막음 (backlog_state)
 export const AUTO_RULES = { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 };
+export const BACKLOG_STAGES = ['review', 'verify', 'ready', 'scheduled'];
+// 쌓인 원고: 사람이 검수·게시해야 하는 원고. 한도는 설정(backlog_limit, 1~60), 0이면 하루 발행 수 × 7 (DB backlog_state 와 같음)
+export function backlogInfo(posts, settings, today = todayStr()) {
+  const st = settings || {};
+  const perDay = Math.min(3, Math.max(1, Number(st.per_day) || 1));
+  const own = Math.round(Number(st.backlog_limit) || 0);
+  const limit = own > 0 ? Math.min(60, own) : perDay * AUTO_RULES.days;
+  const list = (posts || []).filter((p) => p && !p.deleted_at && BACKLOG_STAGES.includes(p.stage));
+  const overdue = list.filter((p) => p.publish_date && p.publish_date < today).length;
+  const review = list.filter((p) => p.stage === 'review' || p.stage === 'verify').length;
+  return { backlog: list.length, limit, auto: !(own > 0), full: list.length >= limit, room: Math.max(0, limit - list.length), overdue, review, ready: list.length - review };
+}
 export function autoPlan({ posts, settings, today = todayStr(), pendingWrites = 0 } = {}) {
   const st = settings || {};
   const perDay = Math.min(3, Math.max(1, Number(st.per_day) || 1));
@@ -629,38 +642,179 @@ export function autoPlan({ posts, settings, today = todayStr(), pendingWrites = 
   const gap = Math.max(0, goal - scheduled);
   const enabled = st.auto_enabled !== false && !!(String(st.focus_topic || '').trim() || String(st.auto_topics || '').trim());
   const jobs = Math.min(Math.max(0, Number(pendingWrites) || 0), AUTO_RULES.maxJobsPerRun);
-  const autoNext = enabled ? Math.min(gap, AUTO_RULES.maxAutoPerRun, Math.max(0, AUTO_RULES.maxPerRun - jobs)) : 0;
-  return { perDay, recommended: SEO_RULES.perDayRecommended, differs: perDay !== SEO_RULES.perDayRecommended, goal, scheduled, gap, enabled, jobs, autoNext };
+  const bl = backlogInfo(posts, st, today);
+  const autoNext = enabled ? Math.min(gap, AUTO_RULES.maxAutoPerRun, Math.max(0, AUTO_RULES.maxPerRun - jobs), bl.room) : 0;
+  return { perDay, recommended: SEO_RULES.perDayRecommended, differs: perDay !== SEO_RULES.perDayRecommended, goal, scheduled, gap, enabled, jobs, autoNext,
+    backlog: bl.backlog, backlogLimit: bl.limit, backlogFull: bl.full, room: bl.room, overdue: bl.overdue };
+}
+
+// ───────── 유입 검색어 (블로그 통계에서 복사해 붙여넣은 글) ─────────
+// 한 줄에 검색어 하나: "원룸 전기요 12", "1. 원룸 전기요 12회 4.5%", "원룸 전기요 (12)", 표에서 복사한 "1\t원룸 전기요\t12\t4.5%"
+// 숫자가 없으면 views 는 null(데이터 없음). 같은 검색어가 두 번 나오면 숫자를 더함. 머리글 줄(검색어·키워드·유입수…)은 건너뜀
+const TERM_HEADERS = new Set(['검색어', '키워드', '유입 검색어', '유입검색어', '검색 키워드', '순위', '유입수', '조회수', '비율', '검색어 유입수']);
+const isCountCell = (c) => /^[\d,]+\s*(회|건|명)?$/.test(c);
+const isPctCell = (c) => /^\d+(\.\d+)?\s*%$/.test(c);
+const toCount = (c) => { const n = Number(String(c).replace(/[^\d]/g, '')); return Number.isFinite(n) ? n : null; };
+export function parseSearchTerms(text) {
+  const items = [], skipped = [];
+  const seen = new Map();
+  String(text || '').split(/\r?\n/).forEach((raw, i) => {
+    let line = raw.replace(/ /g, ' ').trim();
+    if (!line) return;
+    let term = '', views = null;
+    const cols = line.split('\t').map((c) => c.trim()).filter(Boolean);
+    if (cols.length > 1) {
+      let cs = cols;
+      if (/^\d+$/.test(cs[0]) && cs.length >= 3) cs = cs.slice(1); // 순위 칸
+      const ti = cs.findIndex((c) => !isCountCell(c) && !isPctCell(c));
+      if (ti < 0) { skipped.push({ line: i + 1, text: raw.trim(), why: '검색어가 없어' }); return; }
+      term = cs[ti];
+      const num = cs.slice(ti + 1).find(isCountCell);
+      views = num != null ? toCount(num) : null;
+    } else {
+      line = line.replace(/^\d+\s*[.)]\s*/, '').replace(/\s+\d+(\.\d+)?\s*%$/, '').trim();
+      const m = line.match(/^(.*\S)\s*[([]\s*([\d,]+)\s*(?:회|건|명)?\s*[)\]]$/) || line.match(/^(.*\S)\s+([\d,]+)\s*(?:회|건|명)?$/);
+      if (m) { term = m[1]; views = toCount(m[2]); } else term = line;
+    }
+    term = term.replace(/\s+/g, ' ').trim();
+    if (!term || TERM_HEADERS.has(term.replace(/\s+/g, ' '))) return;
+    if (/^[\d,.%\s]+$/.test(term)) { skipped.push({ line: i + 1, text: raw.trim(), why: '숫자만 있어' }); return; }
+    if (term.length > 100) { skipped.push({ line: i + 1, text: raw.trim().slice(0, 40), why: '100자 넘어' }); return; }
+    const key = term.toLowerCase();
+    const was = seen.get(key);
+    if (was) { if (views != null) was.views = (was.views ?? 0) + views; return; }
+    const it = { term, views };
+    seen.set(key, it);
+    items.push(it);
+  });
+  return { items, skipped };
+}
+const normTerm = (s) => String(s || '').toLowerCase().replace(/[\s·,./!?~\-_'"()[\]]+/g, '');
+// 글별 검색어 합계 (기간 상관없이 같은 검색어는 더함, 빈 값만 있으면 null), 많은 순
+export function termsByPost(terms) {
+  const out = new Map();
+  for (const t of terms || []) {
+    if (!t || !t.post_id || !t.term) continue;
+    const m = out.get(t.post_id) || new Map();
+    const k = t.term.toLowerCase();
+    const was = m.get(k) || { term: t.term, views: null, rows: 0 };
+    if (t.views != null) was.views = (was.views ?? 0) + Number(t.views);
+    was.rows++;
+    m.set(k, was);
+    out.set(t.post_id, m);
+  }
+  const res = new Map();
+  for (const [id, m] of out) res.set(id, [...m.values()].sort((a, b) => (b.views ?? -1) - (a.views ?? -1) || a.term.localeCompare(b.term)));
+  return res;
+}
+// 제목·키워드에 없는 검색어 (많이 들어온 순, 숫자가 있는 것만) — 제목·소제목을 고칠 때 쓸 말
+export function titleGaps(post, list, min = 1) {
+  const have = normTerm([post && post.keyword, ...((post && post.titles) || [])].join(' '));
+  return (list || []).filter((t) => t.views != null && t.views >= min && !have.includes(normTerm(t.term)));
+}
+// 어느 글의 키워드·제목도 다루지 않는 검색어 (모든 글 합계 min회 이상) — 새 글 후보
+// 검색어 낱말의 절반 이상이 어떤 글의 키워드·제목에 있으면 그 글이 다루는 걸로 봄 (그건 '제목에 없는 검색어'로 따로 알려줌)
+const termWords = (s) => String(s || '').toLowerCase().split(/[\s·,./!?~\-_'"()[\]]+/).filter(Boolean);
+export function uncoveredTerms(posts, terms, min = 5) {
+  const texts = (posts || []).filter((p) => p && !p.deleted_at).map((p) => [p.keyword, ...(p.titles || [])].join(' ').toLowerCase());
+  const covered = (term) => { const ws = termWords(term); return !ws.length || texts.some((tx) => ws.filter((w) => tx.includes(w)).length / ws.length >= 0.5); };
+  const sum = new Map();
+  for (const t of terms || []) {
+    if (!t || !t.term || t.views == null) continue;
+    const k = normTerm(t.term);
+    if (!k) continue;
+    const was = sum.get(k) || { term: t.term, views: 0, posts: new Set() };
+    was.views += Number(t.views);
+    if (t.post_id) was.posts.add(t.post_id);
+    sum.set(k, was);
+  }
+  return [...sum.values()].filter((x) => x.views >= min && !covered(x.term))
+    .map((x) => ({ term: x.term, views: x.views, posts: x.posts.size })).sort((a, b) => b.views - a.views);
+}
+
+// ───────── 운영 흐름판: 주제 → 원고 → 게시 준비 → 게시 → 다른 채널 → 실적 → 개선, 어디서 막혔는지 ─────────
+// metricPostIds: 실적이 한 줄이라도 있는 글 id (Set 또는 배열). 실적은 게시한 지 7일 지난 글만 따짐
+export const OPS_RULES = { measureAfterDays: 7, spreadGoal: 0.5 };
+export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs, settings, fixCount = 0, today = todayStr() } = {}) {
+  const ps = (posts || []).filter((p) => p && !p.deleted_at);
+  const bl = backlogInfo(ps, settings, today);
+  const mset = metricPostIds instanceof Set ? metricPostIds : new Set(metricPostIds || []);
+  const spreadIds = new Set((postChannels || []).map((x) => x.post_id));
+  const live = ps.filter((p) => LIVE_STAGES.includes(p.stage));
+  const measurable = live.filter((p) => !p.published_on || daysSince(p.published_on, today) >= OPS_RULES.measureAfterDays);
+  const withData = measurable.filter((p) => mset.has(p.id));
+  const spread = live.filter((p) => spreadIds.has(p.id));
+  const refreshed = ps.filter((p) => p.refresh && Object.keys(p.refresh).some((k) => !k.startsWith('_'))).length;
+  const nTopics = (topics || []).filter((t) => t.status === '후보' || t.status === '채택').length;
+  const drafting = ps.filter((p) => ['queued', 'researching', 'writing', 'review', 'verify'].includes(p.stage)).length;
+  const ready = ps.filter((p) => p.stage === 'ready' || p.stage === 'scheduled').length;
+  const live7 = live.filter((p) => p.published_on && daysSince(p.published_on, today) <= 6).length;
+  const joined = (programs || []).filter((x) => x.active !== false && x.my_status === '사용 중').length;
+  const waiting = (programs || []).filter((x) => x.active !== false && x.my_status === '가입 대기').length;
+  const stages = [
+    { key: 'topic', label: '주제', count: nTopics, sub: '후보·채택' },
+    { key: 'draft', label: '원고', count: drafting, sub: '쓰는 중·검수' },
+    { key: 'ready', label: '게시 준비', count: ready, sub: '준비·예약' },
+    { key: 'live', label: '게시', count: live.length, sub: `최근 7일 ${live7}` },
+    { key: 'spread', label: '다른 채널', count: spread.length, of: live.length, sub: live.length ? `게시 글 ${live.length}개 중` : '' },
+    { key: 'data', label: '실적', count: withData.length, of: measurable.length, sub: measurable.length ? `7일 지난 ${measurable.length}개 중` : '' },
+    { key: 'improve', label: '개선', count: refreshed, sub: fixCount ? `고칠 것 ${fixCount}` : '' },
+  ];
+  let bottleneck;
+  if (bl.full || (!live.length && bl.backlog > 0)) {
+    bottleneck = { key: 'live', title: '게시가 막혔어',
+      reason: bl.full ? `검수·게시 안 한 원고가 ${bl.backlog}개 쌓여서(한도 ${bl.limit}개) 자동 작가가 새 글을 멈췄어. 오늘 1편만 검수해서 올리면 다시 돌아가.`
+        : `원고 ${bl.backlog}개가 검수·게시를 기다리는데 게시한 글이 아직 없어. 1편만 올려도 다음 단계(다른 채널·실적)를 시작할 수 있어.`,
+      action: { type: 'go', path: bl.review ? 'content/f/you' : 'content/f/ready', label: bl.review ? '검수할 원고 보기' : '게시할 원고 보기' } };
+  } else if (live.length && spread.length / live.length < OPS_RULES.spreadGoal) {
+    const next = live.find((p) => !spreadIds.has(p.id));
+    bottleneck = { key: 'spread', title: '다른 채널로 안 퍼지고 있어', reason: `게시한 글 ${live.length}개 중 다른 채널(티스토리·쓰레드·인스타 등)에도 올린 글이 ${spread.length}개야. 같은 글을 채널에 맞게 바꿔 올리면 들어오는 길이 늘어.`,
+      action: next ? { type: 'post', postId: next.id, label: '안 퍼뜨린 글 보기' } : null };
+  } else if (measurable.length && withData.length < measurable.length) {
+    const next = measurable.find((p) => !mset.has(p.id));
+    bottleneck = { key: 'data', title: '실적이 안 들어오고 있어', reason: `게시한 지 7일 지난 글 ${measurable.length}개 중 실적(조회·클릭·수익)을 넣은 글이 ${withData.length}개야. 숫자가 있어야 다음 글을 고를 수 있어.`,
+      action: next ? { type: 'metrics', postId: next.id, label: '실적 넣기' } : { type: 'go', path: 'money', label: '실적 넣으러 가기' } };
+  } else if (fixCount) {
+    bottleneck = { key: 'improve', title: '고칠 글이 있어', reason: `실적·검색어로 보면 고칠 만한 글이 ${fixCount}개야. 아래 '개선 루프'에서 개선안을 요청해봐.`, action: null };
+  } else if (!nTopics && !drafting && !ready) {
+    bottleneck = { key: 'topic', title: '쓸 주제가 없어', reason: '주제 추천을 받거나 새 원고를 요청해줘.', action: { type: 'go', path: 'topics', label: '주제 추천 보기' } };
+  } else {
+    bottleneck = { key: 'ok', title: '흐름이 막힌 곳은 없어', reason: live.length ? '게시·확산·실적이 고르게 돌고 있어. 개선 루프에서 다음 글을 골라봐.' : '원고가 들어오는 중이야.', action: null };
+  }
+  for (const st of stages) st.state = st.key === bottleneck.key ? 'block' : (st.of != null && st.of > 0 && st.count < st.of ? 'warn' : 'ok');
+  return { stages, bottleneck, backlog: bl, money: { joined, waiting, total: (programs || []).filter((x) => x.active !== false).length } };
 }
 
 // ───────── 다음 할 일 추천 (규칙 기반, 근거 데이터 같이 표시) ─────────
-export function recommendations({ posts, byPost, products, postProducts, today }) {
+// 묶음(group): more = 더 쓸 것, fix = 고칠 것, stop = 그만할 것(줄일 것), data = 데이터 먼저
+export const REC_GROUPS = { more: '더 쓸 것', fix: '고칠 것', stop: '그만할 것', data: '데이터 먼저' };
+export function recommendations({ posts, byPost, products, postProducts, searchTerms, postChannels, today }) {
   const recs = [];
   const t = today || todayStr();
   const map = new Map((byPost || []).map((a) => [a.key, a]));
-  const live = posts.filter((p) => ['published', 'collecting', 'analyzed'].includes(p.stage));
+  const live = posts.filter((p) => !p.deleted_at && ['published', 'collecting', 'analyzed'].includes(p.stage));
   const withData = live.filter((p) => map.has(p.id));
 
   // 1) 게시했는데 실적이 없음
   for (const p of live) {
     const since = p.published_on ? daysSince(p.published_on, t) : null;
     if (since != null && since >= 7 && !map.has(p.id)) {
-      recs.push({ kind: 'need_metrics', postId: p.id, title: '실적 입력이 필요해', reason: `게시한 지 ${since}일 지났는데 조회수·클릭·수익 기록이 하나도 없어.`, data: [{ label: '게시일', value: p.published_on }], action: { type: 'metrics', postId: p.id }, confidence: '확실' });
+      recs.push({ kind: 'need_metrics', group: 'data', postId: p.id, title: '실적 입력이 필요해', reason: `게시한 지 ${since}일 지났는데 조회수·클릭·수익 기록이 하나도 없어.`, data: [{ label: '게시일', value: p.published_on }], action: { type: 'metrics', postId: p.id }, confidence: '확실' });
     }
   }
 
-  // 2) 조회는 많은데 클릭이 적음 / 3) 클릭은 많은데 구매가 적음
+  // 2) 조회는 많은데 클릭이 적음 / 3) 클릭은 많은데 구매가 적음 → 개선안 요청
   const ctrs = withData.map((p) => { const a = map.get(p.id); const v = val(a, 'views'), c = val(a, 'clicks'); return v && c != null ? { p, v, c, r: c / v } : null; }).filter(Boolean);
   const sorted = ctrs.map((x) => x.r).sort((a, b) => a - b);
   const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
   for (const x of ctrs) {
     if (x.v < 100) continue;
     const low = ctrs.length >= 3 ? x.r < median * 0.5 : x.r < 0.005;
-    if (low) recs.push({ kind: 'low_ctr', postId: x.p.id, title: '조회는 많은데 링크 클릭이 적어', reason: ctrs.length >= 3 ? `클릭률이 다른 글 중간값(${pct(median)})의 절반도 안 돼. 링크 위치·버튼 문구를 바꿔볼 만해.` : `클릭률이 0.5% 미만이야. 비교할 글이 적어서 참고만 해.`, data: [{ label: '조회수', value: fmtNum(x.v) }, { label: '클릭', value: fmtNum(x.c) }, { label: '클릭률', value: pct(x.r) }], action: { type: 'post', postId: x.p.id }, confidence: ctrs.length >= 3 ? '보통' : '참고' });
+    if (low) recs.push({ kind: 'low_ctr', group: 'fix', postId: x.p.id, title: '조회는 많은데 링크 클릭이 적어', reason: ctrs.length >= 3 ? `클릭률이 다른 글 중간값(${pct(median)})의 절반도 안 돼. 링크 위치·버튼 문구를 바꿔볼 만해.` : `클릭률이 0.5% 미만이야. 비교할 글이 적어서 참고만 해.`, data: [{ label: '조회수', value: fmtNum(x.v) }, { label: '클릭', value: fmtNum(x.c) }, { label: '클릭률', value: pct(x.r) }], action: { type: 'refresh', postId: x.p.id, focus: 'ctr' }, confidence: ctrs.length >= 3 ? '보통' : '참고' });
   }
   for (const p of withData) {
     const a = map.get(p.id); const c = val(a, 'clicks'), o = val(a, 'orders');
-    if (c != null && c >= 30 && o != null && o / c < 0.01) recs.push({ kind: 'low_conversion', postId: p.id, title: '클릭은 많은데 구매가 거의 없어', reason: '연결 상품이 독자가 찾는 것과 맞는지, 가격대가 맞는지 봐줘.', data: [{ label: '클릭', value: fmtNum(c) }, { label: '구매', value: fmtNum(o) }, { label: '전환율', value: pct(o / c) }], action: { type: 'post', postId: p.id }, confidence: c >= 100 ? '보통' : '참고' });
+    if (c != null && c >= 30 && o != null && o / c < 0.01) recs.push({ kind: 'low_conversion', group: 'fix', postId: p.id, title: '클릭은 많은데 구매가 거의 없어', reason: '연결 상품이 독자가 찾는 것과 맞는지, 가격대가 맞는지 봐줘.', data: [{ label: '클릭', value: fmtNum(c) }, { label: '구매', value: fmtNum(o) }, { label: '전환율', value: pct(o / c) }], action: { type: 'refresh', postId: p.id, focus: 'conversion' }, confidence: c >= 100 ? '보통' : '참고' });
   }
 
   // 4) 돈이 된 글 → 후속 글
@@ -668,29 +822,96 @@ export function recommendations({ posts, byPost, products, postProducts, today }
     const a = map.get(p.id); const o = val(a, 'orders'), rev = val(a, 'revenue_est');
     if ((o != null && o >= 1) || (rev != null && rev > 0)) {
       const prods = (postProducts || []).filter((pp) => pp.post_id === p.id).map((pp) => (products || []).find((x) => x.id === pp.product_id)).filter(Boolean);
-      recs.push({ kind: 'follow_up', postId: p.id, title: '구매가 나온 글이야 — 후속 글을 만들어볼까', reason: `${prods.length ? '연결 상품(' + prods.slice(0, 2).map((x) => x.name).join(', ') + ')과 ' : ''}비슷한 주제로 비교 글이나 사용법 글을 만들 가치가 있어.`, data: [{ label: '구매', value: o == null ? '데이터 없음' : fmtNum(o) }, { label: '발생 수익', value: rev == null ? '데이터 없음' : won(rev) }], action: { type: 'topics', seedPostId: p.id, category: p.category, keyword: p.keyword }, confidence: (o || 0) >= 3 ? '보통' : '참고' });
+      recs.push({ kind: 'follow_up', group: 'more', postId: p.id, title: '구매가 나온 글이야 — 후속 글을 만들어볼까', reason: `${prods.length ? '연결 상품(' + prods.slice(0, 2).map((x) => x.name).join(', ') + ')과 ' : ''}비슷한 주제로 비교 글이나 사용법 글을 만들 가치가 있어.`, data: [{ label: '구매', value: o == null ? '데이터 없음' : fmtNum(o) }, { label: '발생 수익', value: rev == null ? '데이터 없음' : won(rev) }], action: { type: 'topics', seedPostId: p.id, category: p.category, keyword: p.keyword }, confidence: (o || 0) >= 3 ? '보통' : '참고' });
     }
   }
 
-  // 5) 제작 시간 대비 수익
+  // 5) 실제 유입 검색어: 제목에 없는 검색어 → 제목·소제목 고치기 / 아무 글도 안 다룬 검색어 → 새 글
+  const tbp = termsByPost(searchTerms);
+  for (const p of live) {
+    const gaps = titleGaps(p, tbp.get(p.id), 3);
+    if (gaps.length) recs.push({ kind: 'title_from_search', group: 'fix', postId: p.id, title: '실제로 들어온 검색어가 제목에 없어', reason: `'${gaps[0].term}'(${fmtNum(gaps[0].views)}회)${gaps[1] ? `, '${gaps[1].term}'(${fmtNum(gaps[1].views)}회)` : ''}로 들어왔는데 제목·키워드에 그 말이 없어. 제목이나 소제목에 넣어볼 만해.`, data: gaps.slice(0, 3).map((g) => ({ label: g.term, value: `${fmtNum(g.views)}회` })), action: { type: 'refresh', postId: p.id, focus: 'title' }, confidence: gaps[0].views >= 10 ? '보통' : '참고' });
+  }
+  for (const u of uncoveredTerms(posts, searchTerms, 5).slice(0, 3)) {
+    recs.push({ kind: 'new_from_search', group: 'more', title: `'${u.term}' 검색으로 들어오는데 그걸 다룬 글이 없어`, reason: `글 ${u.posts}개에 이 검색어로 ${fmtNum(u.views)}회 들어왔어. 이 검색어를 직접 다루는 글을 따로 써볼 만해.`, data: [{ label: '유입', value: `${fmtNum(u.views)}회` }], action: { type: 'topics', keyword: u.term, hint: `"${u.term}" 검색 유입 ${u.views}회 — 이 검색어를 직접 다루는 글` }, confidence: u.views >= 20 ? '보통' : '참고' });
+  }
+
+  // 6) 반응이 있는데 다른 채널에 안 올린 글 → 퍼뜨리기
+  const spread = new Set((postChannels || []).map((x) => x.post_id));
+  for (const p of withData) {
+    if (spread.has(p.id)) continue;
+    const a = map.get(p.id); const v = val(a, 'views'), c = val(a, 'clicks'), rev = val(a, 'revenue_est');
+    if ((v != null && v >= 100) || (c != null && c >= 5) || (rev != null && rev > 0)) {
+      recs.push({ kind: 'spread', group: 'more', postId: p.id, title: '반응이 있는 글인데 다른 채널에는 안 올렸어', reason: '쓰레드·인스타·티스토리 버전을 만들어 올리면 같은 글로 들어오는 길이 늘어.', data: [v != null && { label: '조회수', value: fmtNum(v) }, c != null && { label: '클릭', value: fmtNum(c) }].filter(Boolean), action: { type: 'post', postId: p.id }, confidence: '참고' });
+    }
+  }
+
+  // 7) 제작 시간 대비 수익 (줄일 것)
   for (const p of withData) {
     const a = map.get(p.id); const rev = val(a, 'revenue_est');
     if (p.effort_minutes && p.effort_minutes >= 60 && rev != null) {
       const perHour = rev / (p.effort_minutes / 60);
-      if (perHour < 1000) recs.push({ kind: 'effort', postId: p.id, title: '들인 시간에 비해 수익이 적어', reason: `제작에 ${p.effort_minutes}분 들었고 시간당 ${won(perHour)} 벌었어. 비슷한 글은 더 짧게 만들거나 다른 주제를 고려해봐.`, data: [{ label: '제작 시간', value: `${p.effort_minutes}분` }, { label: '발생 수익', value: won(rev) }], action: { type: 'post', postId: p.id }, confidence: '참고' });
+      if (perHour < 1000) recs.push({ kind: 'effort', group: 'stop', postId: p.id, title: '들인 시간에 비해 수익이 적어', reason: `제작에 ${p.effort_minutes}분 들었고 시간당 ${won(perHour)} 벌었어. 비슷한 글은 더 짧게 만들거나 다른 주제를 고려해봐.`, data: [{ label: '제작 시간', value: `${p.effort_minutes}분` }, { label: '발생 수익', value: won(rev) }], action: { type: 'post', postId: p.id }, confidence: '참고' });
     }
   }
+  // 8) 30일 넘게 반응이 없는 카테고리 (실적을 넣은 글이 3개 이상인데 클릭·구매·수익이 모두 0)
+  const cats = new Map();
+  for (const p of withData) {
+    if (!p.category || !p.published_on || daysSince(p.published_on, t) < 30) continue;
+    const a = map.get(p.id);
+    const c = cats.get(p.category) || { n: 0, hit: 0 };
+    c.n++;
+    if ((val(a, 'clicks') || 0) > 0 || (val(a, 'orders') || 0) > 0 || (val(a, 'revenue_est') || 0) > 0) c.hit++;
+    cats.set(p.category, c);
+  }
+  for (const [cat, c] of cats) {
+    if (c.n >= 3 && c.hit === 0) recs.push({ kind: 'stop_category', group: 'stop', title: `'${cat}' 글은 반응이 없어`, reason: `30일 넘은 '${cat}' 글 ${c.n}개 모두 클릭·구매·수익이 0이야. 이 카테고리는 줄이거나 방향을 바꿔볼 만해.`, data: [{ label: '글', value: `${c.n}개` }], action: null, confidence: '참고' });
+  }
 
-  // 6) 가격·출처 다시 확인
-  for (const p of posts.filter((x) => ['ready', 'scheduled', 'published', 'collecting'].includes(x.stage))) {
+  // 9) 가격·출처 다시 확인
+  for (const p of posts.filter((x) => !x.deleted_at && ['ready', 'scheduled', 'published', 'collecting'].includes(x.stage))) {
     const prods = (postProducts || []).filter((pp) => pp.post_id === p.id).map((pp) => (products || []).find((x) => x.id === pp.product_id)).filter(Boolean);
     const stale = prods.filter((x) => (x.price_checked_at && daysSince(x.price_checked_at, t) > 30) || (x.info_checked_at && daysSince(x.info_checked_at, t) > 90));
     const oldSrc = (p.sources || []).filter((s) => s && s.checked_at && daysSince(s.checked_at, t) > 180);
-    if (stale.length || oldSrc.length) recs.push({ kind: 'recheck', postId: p.id, title: '가격·출처를 다시 확인할 때야', reason: [stale.length ? `오래된 상품 정보 ${stale.length}개` : '', oldSrc.length ? `6개월 넘은 출처 ${oldSrc.length}개` : ''].filter(Boolean).join(', '), data: stale.slice(0, 2).map((x) => ({ label: x.name, value: `가격 확인 ${x.price_checked_at || '없음'}` })), action: { type: 'post', postId: p.id }, confidence: '확실' });
+    if (stale.length || oldSrc.length) recs.push({ kind: 'recheck', group: 'fix', postId: p.id, title: '가격·출처를 다시 확인할 때야', reason: [stale.length ? `오래된 상품 정보 ${stale.length}개` : '', oldSrc.length ? `6개월 넘은 출처 ${oldSrc.length}개` : ''].filter(Boolean).join(', '), data: stale.slice(0, 2).map((x) => ({ label: x.name, value: `가격 확인 ${x.price_checked_at || '없음'}` })), action: { type: 'post', postId: p.id }, confidence: '확실' });
   }
 
-  if (!withData.length && live.length) recs.push({ kind: 'no_data', title: '성과 분석을 하려면 실적이 필요해', reason: '게시한 글의 조회수·클릭·수익을 입력하거나 파일로 올리면, 어떤 글이 돈이 되는지 비교해줄게.', data: [{ label: '게시한 글', value: String(live.length) }], action: { type: 'import' }, confidence: '확실' });
+  if (!withData.length && live.length) recs.push({ kind: 'no_data', group: 'data', title: '성과 분석을 하려면 실적이 필요해', reason: '게시한 글의 조회수·클릭·수익을 입력하거나 파일로 올리면, 어떤 글이 돈이 되는지 비교해줄게.', data: [{ label: '게시한 글', value: String(live.length) }], action: { type: 'import' }, confidence: '확실' });
   return recs;
+}
+
+// ───────── 주간 정리: 최근 7일(오늘 포함)과 그 전 7일 비교 ─────────
+// 숫자는 앱 기록(원고·게시·다른 채널·검색어)과 입력한 실적(stats) 기준. 실적이 없으면 null(데이터 없음)
+const dayOf = (iso) => (iso ? ymd(new Date(iso)) : '');
+export function weeklySummary({ posts, postChannels, searchTerms, runs, statsNow, statsPrev, today = todayStr() } = {}) {
+  const r = { from: addDays(today, -6), to: today }, q = { from: addDays(today, -13), to: addDays(today, -7) };
+  const inR = (d, x) => d && d >= x.from && d <= x.to;
+  const ps = (posts || []).filter((p) => p && !p.deleted_at);
+  const count = (x) => ({
+    drafts: ps.filter((p) => inR(dayOf(p.created_at), x)).length,
+    auto: ps.filter((p) => p.source === 'auto' && inR(dayOf(p.created_at), x)).length,
+    published: ps.filter((p) => LIVE_STAGES.includes(p.stage) && inR(p.published_on, x)).length,
+    spread: (postChannels || []).filter((c) => inR(c.posted_on, x)).length,
+    terms: (searchTerms || []).filter((t) => inR(dayOf(t.created_at), x)).length,
+    runs: (runs || []).filter((u) => u.kind === 'auto' && inR(dayOf(u.ran_at), x)).length,
+  });
+  const a = count(r), b = count(q);
+  const tn = (statsNow && statsNow.totals) || {}, tp = (statsPrev && statsPrev.totals) || {};
+  const rows = [
+    { key: 'drafts', label: '새 원고', now: a.drafts, prev: b.drafts, sub: a.auto ? `자동 ${a.auto}` : '' },
+    { key: 'published', label: '게시', now: a.published, prev: b.published },
+    { key: 'spread', label: '다른 채널에 올림', now: a.spread, prev: b.spread },
+    { key: 'terms', label: '넣은 검색어', now: a.terms, prev: b.terms },
+    { key: 'views', label: '조회수', now: val(tn, 'views'), prev: val(tp, 'views') },
+    { key: 'clicks', label: '링크 클릭', now: val(tn, 'clicks'), prev: val(tp, 'clicks') },
+    { key: 'revenue', label: '발생 수익', now: val(tn, 'revenue_est'), prev: val(tp, 'revenue_est'), money: true },
+  ];
+  const top = ((statsNow && statsNow.by_post) || []).filter((x) => x.key)
+    .map((x) => ({ postId: x.key, revenue: val(x, 'revenue_est'), clicks: val(x, 'clicks'), views: val(x, 'views') }))
+    .filter((x) => x.revenue != null || x.clicks != null || x.views != null)
+    .sort((m, n) => (n.revenue ?? -1) - (m.revenue ?? -1) || (n.clicks ?? -1) - (m.clicks ?? -1) || (n.views ?? -1) - (m.views ?? -1))
+    .slice(0, 3);
+  return { range: r, prevRange: q, rows, top, ranAuto: a.runs };
 }
 
 export const hasUnfilledMe = (p) => countMe(p.body) > 0;

@@ -373,8 +373,11 @@ describe('검색 노출 도우미 (1.3.0)', () => {
       { stage: 'review', publish_date: '2026-10-26' },        // 오늘 — 내일부터 셈
       { stage: 'review', publish_date: '2026-11-02' }, { stage: 'review', publish_date: '2026-11-03' }, // 7일 뒤까지만
     ];
-    const one = L.autoPlan({ posts, settings: { per_day: 1, auto_topics: '겨울 가전' }, today: t });
+    // 1.4.0: 쌓인 원고 한도도 같이 봄 — 여기서는 목표·빈자리 계산만 보려고 한도를 넉넉하게
+    const one = L.autoPlan({ posts, settings: { per_day: 1, auto_topics: '겨울 가전', backlog_limit: 30 }, today: t });
     assert.deepEqual([one.perDay, one.goal, one.scheduled, one.gap, one.autoNext, one.differs], [1, 7, 3, 4, 4, false]);
+    const capped = L.autoPlan({ posts, settings: { per_day: 1, auto_topics: '겨울 가전' }, today: t });
+    assert.deepEqual([capped.backlog, capped.backlogLimit, capped.autoNext], [5, 7, 2], '기본 한도(하루 1편 × 7)면 쌓인 원고 5개라 2편만');
     const two = L.autoPlan({ posts, settings: { per_day: 2, focus_topic: '겨울 가전' }, today: t, pendingWrites: 3 });
     assert.deepEqual([two.perDay, two.goal, two.gap, two.autoNext, two.differs, two.recommended], [2, 14, 11, 3, true, 1], '고른 값(2편) 그대로 · 요청 3편 먼저라 자동은 최대 3편');
     assert.equal(L.autoPlan({ posts, settings: { per_day: 3, auto_topics: 'x', auto_enabled: false }, today: t }).autoNext, 0, '자동 채우기 꺼짐');

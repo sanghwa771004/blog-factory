@@ -1,12 +1,12 @@
-// 글공장 앱 1.3.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.4.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.3.1';
-import * as L from './lib.js?v=1.3.1';
-import * as IMG from './images.js?v=1.3.1';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.3.1';
+} from './checks.js?v=1.4.0';
+import * as L from './lib.js?v=1.4.0';
+import * as IMG from './images.js?v=1.4.0';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.4.0';
 
-const APP_VER = '1.3.1';
+const APP_VER = '1.4.0';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -14,7 +14,7 @@ const LIVE = ['published', 'collecting', 'analyzed'];
 const WORK = ['queued', 'researching', 'writing'];
 const KIND_LABEL = { affiliate: '제휴 링크', ads: '광고 수익', sponsor: '협찬', product: '내 상품 판매', cpa: 'CPA·리드', other: '기타' };
 const CH_KIND = { blog: '블로그', site: '웹사이트', sns: 'SNS', other: '기타' };
-const JOB_KIND = { write: '원고', topics: '주제 추천', reformat: '채널별 버전' };
+const JOB_KIND = { write: '원고', topics: '주제 추천', reformat: '채널별 버전', refresh: '개선안' };
 const JOB_ST = { pending: '대기', done: '완료', failed: '실패', cancelled: '취소됨' };
 const SNS_VARIANTS = ['threads', 'instagram', 'cards', 'shortform']; // 복사할 때 고지문을 맨 앞에 붙이는 버전
 const VARIANT_LABEL = { threads: '쓰레드', instagram: '인스타그램', cards: '카드뉴스 문구', shortform: '숏폼 대본', summary: '요약', faq: '자주 묻는 질문', titles: '제목 후보', naver_blog: '네이버 블로그용', tistory: '티스토리용', website: '웹사이트용' };
@@ -110,6 +110,7 @@ const FIELD = {
   channel_id: '채널', program_ids: '수익 모델', content_type: '글 유형', sources: '출처', name: '이름', price: '가격', price_checked_at: '가격 확인일',
   source_urls: '출처 주소', period_start: '시작일', period_end: '종료일', category: '카테고리', max_chars: '글자 수 제한', policy_url: '정책 주소',
   policy_checked_at: '확인일', source_url: '출처 주소', checked_at: '확인일', default_channel: '기본 채널', default_programs: '기본 수익 모델', per_day: '하루 발행 수',
+  posted_on: '올린 날', terms: '검색어', backlog_limit: '쌓아둘 원고 한도', refresh: '개선안', focus: '고칠 점',
 };
 const ERR = {
   network: '인터넷 연결이 안 돼. 연결을 확인하고 다시 해줘.',
@@ -117,7 +118,9 @@ const ERR = {
   rate_limited: '접속 코드를 여러 번 틀려서 잠시 막혔어. 15분 뒤에 다시 해줘.',
   incompatible: '이 채널에서는 쓸 수 없는 수익 모델이야. 채널이나 수익 모델을 바꿔줘.',
   needs_experience: "'실제 경험 후기'는 내 경험을 적어야 요청할 수 있어. 경험을 적거나 글 유형을 바꿔줘.",
-  db_update_needed: 'DB 업데이트가 아직 안 돼서 이 기능은 쓸 수 없어. 배포를 마저 해줘 (DB 015).',
+  db_update_needed: 'DB 업데이트가 아직 안 돼서 이 기능은 쓸 수 없어. 배포를 마저 해줘.',
+  not_published: '게시한 글만 개선안을 요청할 수 있어 (실적·검색어를 보고 고쳐).',
+  job_exists: '이 글은 이미 개선안을 기다리고 있어. 자동 작가가 쓴 뒤에 다시 요청해줘.',
   too_many_jobs: '기다리는 작업이 30개라 더 넣을 수 없어. 자동 작가가 처리한 뒤에 넣어줘.',
   too_many_jobs_today: '오늘 넣을 수 있는 작업(60개)을 다 썼어. 내일 다시 넣어줘.',
   check_failed: '발행 전 검사에서 고칠 게 남았어.',
@@ -153,6 +156,7 @@ function errText(e) {
   if (code === 'incompatible' && e.detail) return `쓸 수 없는 조합이야: ${e.detail}`;
   if (code === 'bad_image' && e.reason && IMAGE_REASON[e.reason]) return IMAGE_REASON[e.reason];
   if (code === 'image_in_use' && e.uses) return `${e.uses}곳에서 쓰는 이미지라 지울 수 없어. 먼저 연결을 빼줘.`;
+  if (code === 'db_update_needed' && e.migration) return `DB 업데이트(${e.migration})가 아직 안 돼서 이 기능은 쓸 수 없어. 배포를 마저 해줘.`;
   return ERR[code] || ERR.server;
 }
 function showError(e) {
@@ -204,9 +208,10 @@ async function run(button, fn, okMsg) {
 const S = {
   loaded: false, posts: [], trash: [], jobs: [], settings: null, runs: [], channels: [], programs: [], compat: [], topics: [],
   products: [], post_products: [], links: [], imports: [], image_slots: [], stats: {}, postMetrics: {}, manualMetrics: null,
+  post_channels: [], search_terms: [], metric_post_ids: [],
 };
-let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {}, slotsBy: {} };
-const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots'];
+let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {}, slotsBy: {}, pcBy: {}, terms: new Map() };
+const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids'];
 function index() {
   M = {
     prog: Object.fromEntries(S.programs.map((p) => [p.id, p])),
@@ -217,6 +222,8 @@ function index() {
     ppBy: groupBy(S.post_products, 'post_id'),
     jobsBy: groupBy(S.jobs.filter((j) => j.post_id), 'post_id'),
     slotsBy: groupBy(S.image_slots || [], 'post_id'),
+    pcBy: groupBy(S.post_channels || [], 'post_id'),
+    terms: L.termsByPost(S.search_terms || []),
   };
 }
 const linksOf = (id) => L.sortedLinks(M.linksBy[id] || []);
@@ -404,6 +411,11 @@ function viewHome() {
   const noSrc = checked.filter((x) => x.r.warnings.some((w) => w.code === 'sources_missing') || x.r.errors.some((e) => e.code === 'news_no_sources'));
   const failedJobs = S.jobs.filter((j) => j.status === 'failed' && j.kind !== 'write' && L.daysSince(j.created_at, t) <= 14);
 
+  // 운영 흐름 (1.4.0): 주제 → 원고 → 게시 → 다른 채널 → 실적 → 개선, 지금 막힌 곳
+  const syncRecs = homeRecs(t, null);
+  let ops = opsPanel(t, syncRecs.filter((r) => r.group === 'fix').length);
+  box.append(ops);
+
   // 오늘 할 일
   const todo = h('div', { class: 'todo' });
   const add = (n, label, path, err) => { if (n) todo.append(h('button', { type: 'button', class: err ? 'e' : '', onclick: () => go(path) }, h('span', null, label), h('b', null, String(n)))); };
@@ -426,9 +438,12 @@ function viewHome() {
   const lr = S.runs[0];
   const plan = L.autoPlan({ posts: S.posts, settings: S.settings || {}, today: t, pendingWrites: pend.filter((j) => j.kind === 'write').length });
   const writer = panel('자동 작가',
-    h('p', { class: 'hint' }, `다음 실행 ${nextRunText()} · 기다리는 작업 ${pend.length}개 (원고 ${pend.filter((j) => j.kind === 'write').length} · 주제 ${pend.filter((j) => j.kind === 'topics').length} · 변환 ${pend.filter((j) => j.kind === 'reformat').length})`),
+    h('p', { class: 'hint' }, `다음 실행 ${nextRunText()} · 기다리는 작업 ${pend.length}개 (원고 ${pend.filter((j) => j.kind === 'write').length} · 주제 ${pend.filter((j) => j.kind === 'topics').length} · 변환 ${pend.filter((j) => j.kind === 'reformat').length} · 개선안 ${pend.filter((j) => j.kind === 'refresh').length})`),
     h('p', { class: 'hint' }, `앞으로 7일(내일부터) 발행일이 잡힌 원고 ${plan.scheduled}편 / 목표 ${plan.goal}편 (하루 ${plan.perDay}편 × 7일)`),
-    h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편). 쓴 원고는 '검수 필요'로 들어와.` : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.'),
+    h('p', { class: plan.backlogFull ? 'notice' : 'hint' }, plan.backlogFull
+      ? `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개 — 한도가 차서 자동 작가가 새 자동 글을 멈췄어 (요청한 원고는 써). 검수·게시해서 ${plan.backlogLimit}개 아래로 줄이면 다시 써.`
+      : `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개`),
+    h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편${plan.room < AUTO_MAX ? `, 쌓아둘 한도까지 ${plan.room}편` : ''}). 쓴 원고는 '검수 필요'로 들어와.` : plan.backlogFull ? '쌓인 원고가 한도라서 다음 실행에 새 자동 글은 없어.' : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.'),
     lr ? h('p', { class: lr.status === '성공' ? 'hint' : 'notice' }, `마지막 실행: ${L.fmtTime(lr.ran_at)} · ${lr.status} · ${lr.note || `${lr.written}개 저장`}${lr.error ? ' · ' + lr.error : ''}`) : h('p', { class: 'hint' }, '아직 실행 기록이 없어.'),
     h('p', { class: 'hint' }, '하루 세 번 네 Claude 구독으로 실행돼. 지금 바로 쓰고 싶으면 Claude 안 글공장에서 써도 돼.'),
     h('div', { class: 'go' }, h('a', { class: 'btn sm ghost', href: ARTIFACT_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Claude 안 글공장 열기 ↗'), btn('작업 기록', 'sm ghost', () => go('settings/jobs'))));
@@ -445,20 +460,23 @@ function viewHome() {
   // 수익·실적 (서버 통계)
   const money = panel('이번 달 수익', h('p', { class: 'hint' }, '불러오는 중…'));
   const traffic = panel('최근 30일 조회·클릭', h('p', { class: 'hint' }, '불러오는 중…'));
-  const recBox = panel('다음에 할 일 추천', h('p', { class: 'hint' }, '불러오는 중…'));
-  box.append(money, traffic, recBox);
+  const recBox = loopPanel(syncRecs, true);
+  const weekBox = panel('최근 7일 정리', h('p', { class: 'hint' }, '불러오는 중…'));
+  box.append(money, traffic, recBox, weekBox);
   const mr = L.monthRange(0, t);
-  Promise.all([getStats(mr.from, mr.to), getStats(L.addDays(t, -29), t), getStats(L.addDays(t, -89), t)]).then(([ms, ts, qs]) => {
+  Promise.all([getStats(mr.from, mr.to), getStats(L.addDays(t, -29), t), getStats(L.addDays(t, -89), t), getStats(L.addDays(t, -6), t), getStats(L.addDays(t, -13), L.addDays(t, -7))]).then(([ms, ts, qs, ws, wp]) => {
     money.replaceChildren(h('h2', null, '이번 달 수익'), revenueKpis(ms.totals), h('p', { class: 'hint' }, '직접 입력하거나 파일로 올린 실적 기준이야. 제휴사와 자동 연결된 숫자가 아니야.'), h('div', { class: 'go' }, btn('실적 입력', 'sm ghost', () => go('money'))));
     traffic.replaceChildren(h('h2', null, '최근 30일 조회·클릭'), trafficKpis(ts));
-    const recs = L.recommendations({ posts: S.posts, byPost: qs.by_post, products: S.products, postProducts: S.post_products, today: t });
-    recBox.replaceChildren(h('h2', null, '다음에 할 일 추천'), recList(recs.slice(0, 6)),
-      h('p', { class: 'hint' }, '입력된 실적으로 정한 규칙 기반 추천이야. 근거 숫자를 같이 보여줘.'),
-      h('div', { class: 'go' }, btn('실적으로 다음 주제 추천받기', 'sm', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', count: 6 }))));
-    if (needMetrics && !recs.length) recBox.append(h('p', { class: 'hint' }, `게시한 지 7일 지난 글 ${needMetrics}개에 실적을 넣어줘.`));
+    const recs = homeRecs(t, qs.by_post);
+    recBox.replaceWith(loopPanel(recs, false, needMetrics));
+    const fresh = opsPanel(t, recs.filter((r) => r.group === 'fix').length);
+    ops.replaceWith(fresh); ops = fresh;
+    weekBox.replaceWith(weeklyPanel(L.weeklySummary({ posts: S.posts, postChannels: S.post_channels, searchTerms: S.search_terms, runs: S.runs, statsNow: ws, statsPrev: wp, today: t }), recs));
   }).catch((e) => { if (e.code !== 'auth') { money.replaceChildren(h('h2', null, '이번 달 수익'), h('p', { class: 'hint' }, errText(e))); } });
   return box;
 }
+const AUTO_MAX = L.AUTO_RULES.maxAutoPerRun;
+const homeRecs = (t, byPost) => L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: S.search_terms, postChannels: S.post_channels, today: t });
 // 검색 노출 도우미: 주력 주제 비율·하루 발행·사람 손(내 경험·직접 찍은 사진)·다가올 시즌·쇼핑 커넥트
 // 검색 노출 점검 — 앱의 권장 기준 · 내 기록 · 실측 데이터 없음을 줄마다 구분해서 보여줌 (검색 순위 보장 아님)
 const SEO_TAG = { app: '앱 권장 기준', mine: '내 기록', none: '실측 데이터 없음' };
@@ -558,8 +576,208 @@ function recAction(r) {
   if (a.type === 'post' && a.postId) return h('div', { class: 'go' }, btn('원고 보기', 'sm ghost', () => go('content/post/' + a.postId)));
   if (a.type === 'metrics' && a.postId) return h('div', { class: 'go' }, btn('실적 입력', 'sm ghost', () => metricSheet({ postId: a.postId })));
   if (a.type === 'import') return h('div', { class: 'go' }, btn('실적 넣으러 가기', 'sm ghost', () => go('money')));
-  if (a.type === 'topics') return h('div', { class: 'go' }, btn('비슷한 주제 추천받기', 'sm ghost', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', category: a.category || '', seed_post_id: a.seedPostId, hint: a.keyword ? `"${a.keyword}" 후속 주제` : '', count: 6 })));
+  if (a.type === 'topics') return h('div', { class: 'go' }, btn(a.hint ? '이 검색어로 주제 추천받기' : '비슷한 주제 추천받기', 'sm ghost', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', category: a.category || '', seed_post_id: a.seedPostId, hint: a.hint || (a.keyword ? `"${a.keyword}" 후속 주제` : ''), count: 6 })));
+  if (a.type === 'refresh' && a.postId && M.post[a.postId]) {
+    const pend = (M.jobsBy[a.postId] || []).some((j) => j.kind === 'refresh' && j.status === 'pending');
+    return h('div', { class: 'go' }, pend ? h('span', { class: 'chip' }, '개선안 기다리는 중') : btn('개선안 요청', 'sm ghost', () => refreshSheet(M.post[a.postId], a.focus)), btn('원고 보기', 'sm ghost', () => go('content/post/' + a.postId)));
+  }
   return null;
+}
+
+// ═════════ 운영 시스템 (1.4.0) ═════════
+// 흐름판: 주제 → 원고 → 게시 준비 → 게시 → 다른 채널 → 실적 → 개선 — 지금 막힌 곳과 바로 할 일 하나
+function opsPanel(t, fixCount) {
+  const f = L.opsFunnel({ posts: S.posts, postChannels: S.post_channels, metricPostIds: S.metric_post_ids, topics: S.topics, programs: S.programs, settings: S.settings || {}, fixCount, today: t });
+  const box = h('section', { class: 'panel hi ops' }, h('h2', null, '운영 흐름'));
+  box.append(h('ol', { class: 'flow', 'aria-label': '주제부터 개선까지 흐름' }, f.stages.map((st) => h('li', { class: 'st-' + st.state },
+    h('span', null, st.label), h('b', { class: 'num' }, st.of != null ? `${st.count}/${st.of}` : String(st.count)), st.sub ? h('small', null, st.sub) : null))));
+  const bn = f.bottleneck;
+  box.append(h('div', { class: bn.key === 'ok' ? 'okline' : 'notice' }, h('b', null, bn.key === 'ok' ? bn.title : '지금 막힌 곳: ' + bn.title), h('p', null, bn.reason), opsAction(bn.action)));
+  const bl = f.backlog;
+  if (bl.overdue) {
+    box.append(h('div', { class: 'split' }, h('span', { class: 'small' }, `예정일이 지난 원고 ${bl.overdue}개 — 아직 안 올렸으면 내일부터 빈 날로 다시 잡을 수 있어 (하루 발행 수 그대로, 단계는 그대로)`),
+      btn('날짜 다시 잡기', 'sm ghost', async (ev) => {
+        if (!confirmBox(ev.currentTarget, `${bl.overdue}개를 다시 잡을까?`)) return;
+        const j = await run(ev.currentTarget, () => api('/posts/reschedule-overdue', { method: 'POST', body: {} }));
+        if (!j) return;
+        const m = j.moved || [];
+        toast(m.length ? `${m.length}개를 ${L.fmtDate(m[0].to)}부터 ${L.fmtDate(m[m.length - 1].to)}까지 다시 잡았어.` : '다시 잡을 원고가 없어.', 5000);
+        await load();
+      })));
+  }
+  if (!f.money.joined) box.append(h('div', { class: 'split' }, h('span', { class: 'small' }, `수익: '사용 중'인 수익 모델이 아직 없어${f.money.waiting ? ` (가입 대기 ${f.money.waiting}개)` : ''}. 이대로는 게시해도 수익이 안 잡혀. 가입했으면 상태를 '사용 중'으로 바꿔줘.`),
+    btn('수익 모델 보기', 'sm ghost', () => go('settings/programs'))));
+  return box;
+}
+function opsAction(a) {
+  if (!a) return null;
+  if (a.type === 'go') return h('div', { class: 'go' }, btn(a.label, 'sm', () => go(a.path)));
+  if (a.type === 'post' && a.postId) return h('div', { class: 'go' }, btn(a.label, 'sm', () => go('content/post/' + a.postId)));
+  if (a.type === 'metrics' && a.postId) return h('div', { class: 'go' }, btn(a.label, 'sm', () => metricSheet({ postId: a.postId })));
+  return null;
+}
+// 개선 루프: 실적·유입 검색어·게시 기록으로 고른 다음 할 일을 '고칠 것·더 쓸 것·그만할 것·데이터 먼저'로 묶어서
+function loopPanel(recs, waiting, needMetrics) {
+  const box = panel('개선 루프');
+  box.append(h('p', { class: 'hint' }, '입력한 실적·유입 검색어·게시 기록으로 정한 규칙 기반 추천이야. 근거 숫자를 같이 보여줘.' + (waiting ? ' (실적 불러오는 중…)' : '')));
+  let any = false;
+  for (const g of ['fix', 'more', 'stop', 'data']) {
+    const list = recs.filter((r) => r.group === g);
+    if (!list.length) continue;
+    any = true;
+    box.append(h('h3', null, `${L.REC_GROUPS[g]} ${list.length}`), recList(list.slice(0, 5)));
+  }
+  if (!any) box.append(h('p', { class: 'hint' }, needMetrics ? `게시한 지 7일 지난 글 ${needMetrics}개에 실적을 넣어줘.` : '아직 고를 근거가 없어. 게시하고 실적·유입 검색어를 넣으면 여기서 고칠 글과 다음 글을 골라줘.'));
+  box.append(h('div', { class: 'go' }, btn('실적으로 다음 주제 추천받기', 'sm', (ev) => requestTopics(ev.currentTarget, { mode: 'performance', count: 6 }))));
+  return box;
+}
+// 최근 7일 정리: 원고·게시·다른 채널·검색어는 앱 기록, 조회·클릭·수익은 입력한 실적 (그 전 7일과 비교)
+function weeklyPanel(w, recs) {
+  const box = panel(`최근 7일 정리 (${L.fmtDate(w.range.from)}~${L.fmtDate(w.range.to)})`);
+  const fmt = (r, v) => (v == null ? null : r.money ? L.won(v) : L.fmtNum(v));
+  const cmp = (r) => (r.prev == null ? (r.now == null ? null : '그 전 7일 데이터 없음') : `그 전 7일 ${fmt(r, r.prev)}`);
+  box.append(h('div', { class: 'kpis' }, w.rows.map((r) => kpi(r.label, fmt(r, r.now), [cmp(r), r.sub].filter(Boolean).join(' · ') || null))));
+  if (w.top.length) box.append(h('h3', null, '이번 주 잘 된 글'), h('div', { class: 'list' }, w.top.map((x) => h('button', { type: 'button', class: 'rowbtn', onclick: () => go('content/post/' + x.postId) },
+    h('span', null, M.post[x.postId] ? titleOf(M.post[x.postId]) : '지워진 글'), h('small', null, [x.revenue != null && `발생 ${L.won(x.revenue)}`, x.clicks != null && `클릭 ${L.fmtNum(x.clicks)}`, x.views != null && `조회 ${L.fmtNum(x.views)}`].filter(Boolean).join(' · '))))));
+  const next = (recs || []).filter((r) => r.group === 'fix' || r.group === 'data').slice(0, 2).map((r) => r.title);
+  box.append(h('p', { class: 'hint' }, `자동 작가 실행 ${w.ranAuto}번.${next.length ? ' 다음에 할 것: ' + next.join(' / ') : ''}`));
+  return box;
+}
+
+// 다른 채널에 올리기: 같은 글을 채널에 맞게 바꿔 올린 기록 (앱이 대신 올리지는 않음)
+const VARIANT_OF_CHANNEL = { naver_blog: 'naver_blog', tistory: 'tistory', website: 'website', threads: 'threads', instagram: 'instagram' };
+function spreadPanel(p) {
+  const rows = M.pcBy[p.id] || [];
+  const live = LIVE.includes(p.stage);
+  const others = S.channels.filter((c) => c.active && c.id !== p.channel_id);
+  const box = det('spread:' + p.id, `다른 채널에 올리기 (${rows.length}/${others.length})`, live);
+  const inner = h('div', { class: 'stack', style: 'margin-top:10px' });
+  if (!live) inner.append(h('p', { class: 'hint' }, `먼저 ${chName(p.channel_id)}에 올리고 '게시 완료 기록'을 해줘. 그다음 같은 글을 다른 채널에 맞게 바꿔 올리면 여기서 기록해.`));
+  else {
+    inner.append(h('p', { class: 'hint' }, '같은 글을 채널에 맞게 바꿔 올리면 들어오는 길이 늘어. 앱이 대신 올리지는 않으니, 직접 올린 다음 기록해줘. 실적을 넣을 때 채널을 고르면 채널별로 따로 볼 수 있어.'));
+    const v = p.variants || {};
+    for (const c of others) {
+      const rec = rows.find((x) => x.channel_id === c.id);
+      const vk = VARIANT_OF_CHANNEL[c.id];
+      const hasV = vk && v[vk] != null && v[vk] !== '';
+      inner.append(h('div', { class: 'mrow' },
+        h('div', { class: 'split' }, h('b', null, c.name), h('span', { class: rec ? 'chip v-ok' : 'chip' }, rec ? `올림 ${L.fmtDate(rec.posted_on)}` : '아직')),
+        rec && rec.url ? h('a', { class: 'small', href: rec.url, target: '_blank', rel: 'noopener noreferrer' }, rec.url) : null,
+        rec && rec.note ? h('span', { class: 'small muted' }, rec.note) : null,
+        h('div', { class: 'go' },
+          hasV ? h('button', { type: 'button', class: 'copy', onclick: (ev) => copyPlain(variantCopy(p, vk), ev.currentTarget) }, `${VARIANT_LABEL[vk]} 버전 복사`) : null,
+          btn(rec ? '기록 고치기' : '올렸어 — 기록', 'sm ghost', () => spreadSheet(p, c, rec)),
+          rec ? btn('기록 지우기', 'sm ghost', async (ev) => { if (!confirmBox(ev.currentTarget, '지울까?')) return; const j = await run(ev.currentTarget, () => api('/post-channels/' + rec.id, { method: 'DELETE' }), '지웠어'); if (j) await load(); }) : null)));
+    }
+    if (!Object.keys(VARIANT_LABEL).some((k) => v[k] != null && v[k] !== '')) inner.append(h('p', { class: 'hint' }, "채널별 버전이 아직 없어. 위 '채널별 버전 만들기'로 쓰레드·인스타·티스토리용 글을 먼저 받아도 돼."));
+  }
+  box.append(inner);
+  return box;
+}
+function spreadSheet(p, c, rec) {
+  const url = h('input', { type: 'url', value: rec ? rec.url : '', placeholder: 'https://' });
+  const on = h('input', { type: 'date', value: rec ? rec.posted_on : todayS() });
+  const v = p.variants || {};
+  const vk = h('select', { value: rec ? rec.variant_key : (v[VARIANT_OF_CHANNEL[c.id]] ? VARIANT_OF_CHANNEL[c.id] : '') }, opt('', '고르지 않음'), Object.entries(VARIANT_LABEL).filter(([k]) => v[k] != null && v[k] !== '').map(([k, l]) => opt(k, l)));
+  const note = h('input', { type: 'text', value: rec ? rec.note : '', maxlength: '300', placeholder: '예: 오전 9시에 올림' });
+  openSheet(`${c.name}에 올린 기록`,
+    h('p', { class: 'hint' }, '직접 올린 다음 그 글 주소를 넣어줘 (주소를 모르면 비워도 돼).'),
+    field('올린 글 주소 (https)', url), field('올린 날', on), field('쓴 버전', vk), field('메모 (선택)', note),
+    btn('저장', 'wide', async (ev) => {
+      const u = url.value.trim();
+      if (u && !/^https:\/\/[^\s"'<>]+$/i.test(u)) { toast('주소는 https://로 시작해야 해'); return; }
+      if (!on.value) { toast('올린 날을 넣어줘'); return; }
+      const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/channels`, { method: 'POST', body: { channel_id: c.id, url: u, posted_on: on.value, variant_key: vk.value, note: note.value.trim() } }), '기록했어');
+      if (j) { closeSheet(); await load(); }
+    }));
+}
+
+// 검색 유입 키워드: 블로그 통계의 '유입 검색어'를 붙여넣어서 글마다 저장 (앱이 직접 모으지 않음)
+function searchTermsPanel(p) {
+  const list = M.terms.get(p.id) || [];
+  const rows = (S.search_terms || []).filter((x) => x.post_id === p.id);
+  const box = det('terms:' + p.id, `검색 유입 키워드 (${list.length})`, true);
+  const inner = h('div', { class: 'stack', style: 'margin-top:10px' });
+  inner.append(h('p', { class: 'hint' }, '블로그 통계의 유입 검색어를 복사해서 붙여넣어줘. 실제로 이 글에 들어온 검색어로 제목을 고치고 다음 주제를 골라. 앱이 직접 모으지는 않아.'));
+  if (list.length) {
+    inner.append(h('div', { class: 'list' }, list.slice(0, 20).map((x) => h('div', { class: 'split' }, h('span', null, x.term), h('b', { class: 'num' }, x.views == null ? '데이터 없음' : `${L.fmtNum(x.views)}회`)))));
+    const gaps = L.titleGaps(p, list, 1);
+    if (gaps.length) inner.append(h('p', { class: 'notice' }, `제목·키워드에 없는 검색어: ${gaps.slice(0, 3).map((g) => `'${g.term}'(${L.fmtNum(g.views)}회)`).join(', ')} — 제목이나 소제목에 넣어볼 만해.`),
+      h('div', { class: 'go' }, btn('이 검색어로 개선안 요청', 'sm', () => refreshSheet(p, 'search'))));
+    const periods = new Map();
+    for (const r of rows) { const k = `${r.period_start}~${r.period_end}`; (periods.get(k) || periods.set(k, []).get(k)).push(r); }
+    inner.append(h('div', { class: 'list' }, [...periods.entries()].map(([k, rs]) => h('div', { class: 'split' },
+      h('span', { class: 'small' }, `${k.split('~').map(L.fmtDate).join('~')} · ${rs.length}개${rs[0].source_label ? ' · ' + rs[0].source_label : ''}`),
+      btn('이 기간 지우기', 'sm ghost', async (ev) => {
+        if (!confirmBox(ev.currentTarget, `${rs.length}개를 지울까?`)) return;
+        const ok = await run(ev.currentTarget, async () => { for (const r of rs) await api('/search-terms/' + r.id, { method: 'DELETE' }); return true; }, '지웠어');
+        if (ok) await load();
+      })))));
+  }
+  const ta = h('textarea', { placeholder: '한 줄에 검색어 하나\n예) 원룸 전기요 23\n전기요 전자파 12\n표에서 복사해도 돼', style: 'min-height:90px' });
+  const start = h('input', { type: 'date', value: L.addDays(todayS(), -6) }), end = h('input', { type: 'date', value: todayS() });
+  const label = h('input', { type: 'text', value: p.channel_id === 'naver_blog' ? '네이버 블로그 통계 · 유입 검색어' : '블로그 통계 · 유입 검색어', maxlength: '60' });
+  const preview = h('p', { class: 'hint' });
+  const draw = () => {
+    const r = L.parseSearchTerms(ta.value);
+    preview.textContent = r.items.length ? `읽은 검색어 ${r.items.length}개: ${r.items.slice(0, 4).map((x) => `${x.term}${x.views == null ? '(숫자 없음)' : ' ' + L.fmtNum(x.views)}`).join(', ')}${r.items.length > 4 ? ' …' : ''}${r.skipped.length ? ` · 못 읽은 줄 ${r.skipped.length}개` : ''}`
+      : (ta.value.trim() ? '읽은 검색어가 없어. 한 줄에 "검색어 숫자"로 적어줘.' : '');
+  };
+  ta.addEventListener('input', () => { markDirty(); draw(); });
+  inner.append(field('유입 검색어 붙여넣기', ta), preview, h('div', { class: 'row' }, field('시작일', start), field('종료일', end)), field('어디서 본 숫자야?', label),
+    btn('검색어 저장', 'sm', async (ev) => {
+      const r = L.parseSearchTerms(ta.value);
+      if (!r.items.length) { toast('읽은 검색어가 없어'); return; }
+      if (!start.value) { toast('시작일을 넣어줘'); return; }
+      if (end.value && end.value < start.value) { toast('종료일이 시작일보다 빨라'); return; }
+      const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/search-terms`, { method: 'POST', body: { period_start: start.value, period_end: end.value || start.value, source_label: label.value.trim(), terms: r.items } }));
+      if (j) { toast(`검색어 ${j.saved}개를 저장했어`); dirty = false; await load(); }
+    }));
+  box.append(inner);
+  return box;
+}
+
+// 개선안: 게시한 글을 실적·유입 검색어로 어떻게 고칠지 자동 작가가 써 둔 것 (블로그 글은 사용자가 직접 고침)
+const REFRESH_FOCUS = { all: '전체적으로', title: '제목·소제목', ctr: '링크 클릭 (위치·버튼 문구)', conversion: '구매 (상품 고르기·설명)', search: '실제 유입 검색어 반영' };
+function refreshPanel(p) {
+  const rf = p.refresh || {};
+  const has = Object.keys(rf).some((k) => !k.startsWith('_'));
+  const pend = (M.jobsBy[p.id] || []).find((j) => j.kind === 'refresh' && j.status === 'pending');
+  const box = det('refresh:' + p.id, '개선안', has || !!pend);
+  const inner = h('div', { class: 'stack', style: 'margin-top:10px' });
+  if (pend) inner.append(h('p', { class: 'hint' }, `개선안을 기다리는 중이야. 자동 작가가 다음 실행(${nextRunText()})에 써줘.`));
+  if (has) {
+    inner.append(h('p', { class: 'hint' }, `${rf._updated_at ? L.fmtTime(rf._updated_at) + '에 ' : ''}자동 작가가 쓴 개선안이야. 올라간 글은 앱이 바꾸지 않으니, 마음에 드는 것만 블로그에서 직접 고쳐줘.`));
+    const sec = (title, kids) => (kids && kids.length ? inner.append(h('h3', null, title), ...kids) : null);
+    const asList = (v) => (Array.isArray(v) ? v : v ? [v] : []).map((x) => (typeof x === 'string' ? x : x && typeof x === 'object' ? [x.heading || x.title, x.why || x.text].filter(Boolean).join(' — ') : String(x))).filter(Boolean).slice(0, 10);
+    sec('제목 후보', asList(rf.titles).map((x) => h('div', { class: 'split' }, h('span', null, x), h('button', { type: 'button', class: 'copy', onclick: (ev) => copyPlain(x, ev.currentTarget) }, '복사'))));
+    sec('도입부', rf.intro ? [h('p', { class: 'sns' }, String(rf.intro)), h('div', { class: 'go' }, h('button', { type: 'button', class: 'copy', onclick: (ev) => copyPlain(String(rf.intro), ev.currentTarget) }, '복사'))] : []);
+    sec('소제목', asList(rf.headings).map((x) => h('p', { class: 'small' }, '· ' + x)));
+    sec('더하면 좋은 부분', asList(rf.add_sections).map((x) => h('p', { class: 'small' }, '· ' + x)));
+    sec('링크·버튼', [rf.cta && h('p', { class: 'small' }, '버튼 문구: ' + rf.cta), rf.link_positions && h('p', { class: 'small' }, '위치: ' + rf.link_positions)].filter(Boolean));
+    sec('그대로 둘 것', asList(rf.keep).map((x) => h('p', { class: 'small' }, '· ' + x)));
+    sec('근거', asList(rf.based_on).map((x) => h('p', { class: 'small muted' }, '· ' + x)));
+    if (rf.notes) inner.append(h('p', { class: 'small muted' }, String(rf.notes)));
+    inner.append(h('div', { class: 'go' }, btn('개선안 지우기', 'sm ghost', async (ev) => { if (!confirmBox(ev.currentTarget, '지울까?')) return; await patchPost(p, { refresh: null }, ev.currentTarget, '지웠어'); })));
+  }
+  if (!pend) {
+    const live = LIVE.includes(p.stage);
+    inner.append(btn(has ? '개선안 다시 요청' : '개선안 요청', 'sm', () => refreshSheet(p), { disabled: !live }));
+    inner.append(h('p', { class: 'hint' }, live ? '자동 작가가 이 글의 실적·유입 검색어·다른 채널 기록을 보고 제목·도입부·소제목·링크 위치를 어떻게 고치면 좋을지 써줘. 없는 숫자는 만들지 않아.' : '게시한 글만 개선안을 요청할 수 있어 (실적·검색어를 보고 고쳐).'));
+  }
+  box.append(inner);
+  return box;
+}
+function refreshSheet(p, focus = 'all') {
+  if (!p) return;
+  const sel = h('select', { value: REFRESH_FOCUS[focus] ? focus : 'all' }, Object.entries(REFRESH_FOCUS).map(([k, v]) => opt(k, v)));
+  const note = h('input', { type: 'text', maxlength: '300', placeholder: '예: 제목에 전기세 얘기를 넣고 싶어' });
+  openSheet('개선안 요청', h('p', { class: 'hint' }, `「${titleOf(p)}」 — 자동 작가가 다음 실행(${nextRunText()})에 이 글의 실적·유입 검색어·다른 채널 기록을 보고 고칠 점을 써줘. 글은 바꾸지 않고 개선안만 남겨.`),
+    field('무엇을 고칠까?', sel), field('요청 사항 (선택)', note),
+    btn('요청하기', 'wide', async (ev) => {
+      const j = await run(ev.currentTarget, () => api('/jobs', { method: 'POST', body: { kind: 'refresh', post_id: p.id, focus: sel.value, note: note.value.trim() } }), `개선안을 요청했어. 다음 실행(${nextRunText()})에 써줘.`);
+      if (j) { closeSheet(); await load(); }
+    }));
 }
 
 // ═════════ 콘텐츠 ═════════
@@ -784,12 +1002,15 @@ function viewPost(id) {
     box.append(productsPanel(p));
     box.append(sourcesPanel(p));
     box.append(variantsPanel(p));
+    box.append(spreadPanel(p));
   } else if (!WORK.includes(p.stage)) {
     box.append(panel('원고', h('p', { class: 'hint' }, '아직 본문이 없어.')));
   }
   box.append(settingsPanel(p));
   box.append(publishPanel(p));
   if (LIVE.includes(p.stage) || p.blog_url) box.append(postMetricsPanel(p));
+  if (LIVE.includes(p.stage)) box.append(searchTermsPanel(p));
+  if (p.body && (LIVE.includes(p.stage) || (p.refresh && Object.keys(p.refresh).length))) box.append(refreshPanel(p));
   box.append(jobsPanel(p));
   return box;
 }
@@ -1147,6 +1368,15 @@ function publishPanel(p) {
     h('p', { class: 'hint' }, "날짜를 넣는다고 게시된 걸로 바뀌지 않아. 실제로 올린 뒤 '게시 완료 기록'을 눌러줘.")));
   return box;
 }
+// 채널별 버전 하나를 복사할 글로 (SNS 버전은 맨 앞에 이 글의 고지문)
+function variantCopy(p, k) {
+  const val = (p.variants || {})[k];
+  let text = '';
+  if (typeof val === 'string') text = val;
+  else if (Array.isArray(val)) text = val.map((x, i) => (typeof x === 'string' ? x : x.q ? `Q. ${x.q}\nA. ${x.a}` : `${i + 1}. ${x.title || ''}\n${x.text || ''}`)).join('\n\n');
+  else if (val && typeof val === 'object') text = Object.entries(val).map(([kk, vv]) => `[${kk}] ${vv}`).join('\n\n');
+  return SNS_VARIANTS.includes(k) ? L.withSnsDisclosure(text, p, M.prog) : text;
+}
 function variantsPanel(p) {
   const v = p.variants || {};
   const keys = Object.keys(VARIANT_LABEL).filter((k) => v[k] != null && v[k] !== '');
@@ -1164,7 +1394,8 @@ function variantsPanel(p) {
       text = Object.entries(val).map(([kk, vv]) => `[${kk}] ${vv}`).join('\n\n');
       content = h('div', { class: 'cards-v' }, Object.entries(val).map(([kk, vv]) => h('div', null, h('b', null, { hook: '첫 장면', script: '대본', cta: '마무리' }[kk] || kk), h('br'), String(vv))));
     }
-    const copyText = SNS_VARIANTS.includes(k) ? L.withSnsDisclosure(text, p, M.prog) : text;
+    const copyText = variantCopy(p, k);
+    void text;
     inner.append(h('div', { class: 'stack' }, h('div', { class: 'split' }, h('h3', null, VARIANT_LABEL[k]), h('button', { type: 'button', class: 'copy', onclick: (ev) => copyPlain(copyText, ev.currentTarget) }, '복사')), content));
   }
   if (pend) inner.append(h('p', { class: 'hint' }, `채널별 버전을 만드는 중이야 (다음 실행 ${nextRunText()}).`));
@@ -1203,7 +1434,7 @@ function postMetricsPanel(p) {
   box.append(h('div', { class: 'go' }, btn('실적 입력', 'sm', () => metricSheet({ postId: p.id }))), list);
   const show = (rows) => {
     if (!rows.length) { list.replaceChildren(h('p', { class: 'hint' }, '아직 실적이 없어. 블로그 통계나 제휴사 리포트의 숫자를 넣어줘.')); return; }
-    list.replaceChildren(...[linkSums(p, rows)].filter(Boolean), ...rows.map((m) => metricRow(m, async (ev) => {
+    list.replaceChildren(...[channelSums(p, rows), linkSums(p, rows)].filter(Boolean), ...rows.map((m) => metricRow(m, async (ev) => {
       if (!confirmBox(ev.currentTarget, '지울까?')) return;
       const j = await run(ev.currentTarget, () => api('/metrics/' + m.id, { method: 'DELETE' }), '지웠어');
       if (j) { delete S.postMetrics[p.id]; S.stats = {}; render(true); }
@@ -1212,6 +1443,17 @@ function postMetricsPanel(p) {
   if (S.postMetrics[p.id]) show(S.postMetrics[p.id]);
   else api('/metrics?post_id=' + p.id).then((j) => { S.postMetrics[p.id] = j.metrics; show(j.metrics); }).catch((e) => list.replaceChildren(h('p', { class: 'hint' }, errText(e))));
   return box;
+}
+// 채널별 합계 (1.4.0): 채널을 고르지 않은 줄은 메인 채널로. 채널이 하나뿐이면 안 보여줌
+function channelSums(p, rows) {
+  const by = new Map();
+  for (const m of rows) { const k = m.channel_id || p.channel_id; (by.get(k) || by.set(k, []).get(k)).push(m); }
+  if (by.size < 2) return null;
+  const sumOf = (rs, f) => { const xs = rs.map((m) => m[f]).filter((x) => x != null); return xs.length ? xs.reduce((a, b) => a + Number(b), 0) : null; };
+  return h('div', { class: 'mrow' }, h('b', null, '채널별 합계'),
+    [...by.entries()].map(([k, rs]) => h('div', { class: 'vals' }, h('span', null, chName(k) + (k === p.channel_id ? ' (메인)' : '')),
+      h('span', null, '조회 ', h('b', null, numOrDash(sumOf(rs, 'views')))), h('span', null, '클릭 ', h('b', null, numOrDash(sumOf(rs, 'clicks')))),
+      h('span', null, '발생 ', h('b', null, sumOf(rs, 'revenue_est') == null ? '–' : L.won(sumOf(rs, 'revenue_est')))))));
 }
 // 링크별 합계: 링크를 골라서 넣은 실적만 링크별로 더함 (빈 칸은 더하지 않고 '–')
 function linkSums(p, rows) {
@@ -1243,6 +1485,9 @@ function metricSheet({ postId, linkId } = {}) {
   };
   post.addEventListener('change', drawLinks);
   drawLinks();
+  // 1.4.0: 어느 채널 숫자인지 (다른 채널에 올린 글이면 채널별 실적을 따로 볼 수 있게). 비우면 메인 채널(링크를 고르면 링크의 채널)
+  const chSel = h('select', { 'aria-label': '채널' }, opt('', '메인 채널 (링크를 고르면 링크의 채널)'), S.channels.filter((c) => c.active).map((c) => opt(c.id, c.name)));
+  const chField = field('채널 (선택)', chSel, '다른 채널(쓰레드·인스타·티스토리 등)에서 본 숫자면 골라줘.');
   const start = h('input', { type: 'date', value: t }), end = h('input', { type: 'date', value: t });
   const nums = {};
   const numIn = (k, money) => (nums[k] = h('input', { type: 'text', inputmode: money ? undefined : 'numeric', placeholder: money ? '예: 1,500 (취소면 -500)' : '' }));
@@ -1251,13 +1496,13 @@ function metricSheet({ postId, linkId } = {}) {
   const note = h('input', { type: 'text' });
   openSheet('실적 입력',
     h('p', { class: 'hint' }, '아는 숫자만 넣어줘. 빈 칸은 0이 아니라 "데이터 없음"으로 남아.'),
-    field('글', post), linkField, h('div', { class: 'row' }, field('시작일', start), field('종료일', end)),
+    field('글', post), linkField, chField, h('div', { class: 'row' }, field('시작일', start), field('종료일', end)),
     h('div', { class: 'row' }, field('조회수', numIn('views')), field('링크 클릭', numIn('clicks')), field('구매(인정) 건수', numIn('orders')), field('취소 건수', numIn('cancels')), field('노출 수', numIn('impressions'))),
     h('div', { class: 'row' }, field('발생 수익(원)', numIn('revenue_est', true)), field('확정 수익(원)', numIn('revenue_confirmed', true)), field('지급액(원)', numIn('revenue_paid', true)), field('비용(원)', numIn('cost', true))),
     h('p', { class: 'hint' }, 'AI 이미지 생성 비용은 앱이 따로 셈해. 비용 칸에 또 넣으면 두 번 더해져.'),
     field('수익 모델', prog), field('어디서 본 숫자야?', label), field('메모', note),
     btn('저장', 'wide', async (ev) => {
-      const body = { period_start: start.value, period_end: end.value || start.value, post_id: post.value || undefined, link_id: (post.value && link.value) || undefined, program_id: prog.value || undefined, source_label: label.value.trim(), note: note.value.trim() };
+      const body = { period_start: start.value, period_end: end.value || start.value, post_id: post.value || undefined, link_id: (post.value && link.value) || undefined, channel_id: chSel.value || undefined, program_id: prog.value || undefined, source_label: label.value.trim(), note: note.value.trim() };
       let any = false;
       for (const [k, input] of Object.entries(nums)) {
         const r = L.parseNum(input.value);
@@ -1610,6 +1855,12 @@ function secAuto() {
   const per = h('select', { value: String(s.per_day || 1), onchange: () => { markDirty(); drawPer(); } }, opt('1', '하루 1개'), opt('2', '하루 2개'), opt('3', '하루 3개'));
   drawPer();
   const len = h('select', { value: String(s.len || '2500'), onchange: markDirty }, opt('1500', '보통 (1,500자)'), opt('2500', '길게 (2,500자)'), opt('3500', '아주 길게 (3,500자)'));
+  // 1.4.0: 검수·게시 안 한 원고가 이만큼 쌓이면 자동 작가가 새 자동 글을 멈춤 (0 = 하루 발행 수 × 7)
+  const blHint = h('span', { class: 'hint' });
+  const blim = h('select', { value: String(s.backlog_limit || 0), onchange: () => { markDirty(); drawBl(); } }, opt('0', '자동 (하루 발행 수 × 7)'), ...[3, 5, 7, 10, 14, 21, 30, 60].map((n) => opt(String(n), `${n}개`)));
+  const drawBl = () => { const own = Number(blim.value) || 0; const lim = own || (Number(per.value) || 1) * 7; const b = L.backlogInfo(S.posts, { per_day: Number(per.value) || 1, backlog_limit: own }, todayS()); blHint.textContent = `검수·게시 안 한 원고가 ${lim}개 쌓이면 자동 작가가 새 자동 글을 멈춰 (앱에서 요청한 원고는 계속 써). 지금 ${b.backlog}개${b.full ? ' — 한도가 차서 멈춘 상태야' : ''}.`; };
+  per.addEventListener('change', () => drawBl());
+  drawBl();
   const ch = h('select', { value: s.default_channel || 'naver_blog' }, S.channels.map((c) => opt(c.id, c.name)));
   const pp = h('div');
   const drawPP = () => pp.replaceChildren(programPicker(ch.value, progs, (ids) => { progs = ids; markDirty(); drawPP(); }));
@@ -1622,10 +1873,16 @@ function secAuto() {
     field('주력 주제 낱말 (선택, 쉼표로)', fterms, "글의 키워드나 제목에 이 낱말 중 하나가 있으면 주력 주제 글로 봐. 안 적으면 주력 주제 이름 전체나 그 낱말 두 개 이상이 있어야 해 ('겨울'처럼 하나만 있으면 넓은 낱말일 수 있어서 '판단 어려움'). 카테고리만 같으면 주제 글로 보지 않아."),
     h('datalist', { id: 'focuslist' }, String(s.auto_topics || '').split(',').map((x) => x.trim()).filter(Boolean).map((c) => opt(c, c))),
     h('div', { class: 'row' }, field('하루 발행 개수', per), field('기본 길이', len)), perHint,
+    field('쌓아둘 원고 한도', blim), blHint,
     field('기본 채널', ch), h('p', { class: 'legend' }, '기본 수익 모델'), pp,
     btn('저장', 'sm', async (ev) => {
-      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), focus_terms: fterms.value.trim(), per_day: Number(per.value), len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
-      if (j) { dirty = false; if (j.skipped && j.skipped.includes('focus_terms')) toast('나머지는 저장했어. 주력 주제 낱말은 DB 업데이트(015) 뒤에 저장돼.', 5000); await load(); }
+      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), focus_terms: fterms.value.trim(), per_day: Number(per.value), backlog_limit: Number(blim.value) || 0, len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
+      if (j) {
+        dirty = false;
+        const sk = (j.skipped || []).map((k) => ({ focus_terms: '주력 주제 낱말은 DB 업데이트(015)', backlog_limit: '쌓아둘 원고 한도는 DB 업데이트(016)' }[k])).filter(Boolean);
+        if (sk.length) toast(`나머지는 저장했어. ${sk.join(', ')} 뒤에 저장돼.`, 5000);
+        await load();
+      }
     }),
     h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워 (주력 주제를 정하면 그 안에서만). 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어와.`),
   ];

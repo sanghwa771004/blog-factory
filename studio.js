@@ -1,8 +1,8 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.3.1';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.3.1';
+import * as IMG from './images.js?v=1.4.0';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.4.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
