@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test tests/*.test.js",
     "test:ui": "python3 tests/ui/app_ui_test.py",
-    "test:artifact": "python3 tests/artifact/run_check.py"
+    "test:artifact": "python3 tests/artifact/run_check.py",
+    "test:server": "node --test tests/server/*.test.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.3.7"

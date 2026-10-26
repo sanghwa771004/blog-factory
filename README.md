@@ -49,6 +49,7 @@ npm install                           # 처음 한 번 (DB 테스트용 PGlite)
 npm test                              # 규칙·계산 + DB(마이그레이션·함수) + Claude 안 글공장 계산 테스트 (Node 20+)
 python3 tests/ui/app_ui_test.py /tmp  # 휴대폰 크기 화면 테스트 (Playwright, 모의 서버)
 python3 tests/artifact/run_check.py /tmp  # Claude 안 글공장 화면·흐름 테스트 (모의 Claude·Supabase)
+npm run test:server                   # 서버 코드를 Deno로 띄워서 가짜 DB API로 확인 (DB 015 전·후). deno 필요 (DENO=/경로/deno), 없으면 건너뜀
 ```
 
 실서버 점검 방법은 `tests/live/README.md`에 있어 (진짜 접속 코드 없이 임시 세션으로).

@@ -6,7 +6,7 @@
 - **반영 상태 (2026-10-26)**: 실제 예약 작업에는 **1.3.0** 프롬프트가 들어 있어 (2026-10-26 반영). 이 파일의 **1.3.1은 아직 예약 작업에 넣지 않았어** — 앱 1.3.1을 배포할 때 같이 넣어야 해. 1.3.1 규칙으로 실제 예약 실행을 돌려 본 적은 없어 (검증 안 됨).
 - 1.1.0 → 1.1.1에서 바뀐 것: SNS 버전에 고지문을 직접 쓰지 않음(앱이 복사할 때 공식 고지문을 붙임), 쓰레드 글자 수 420자, 가상 인물 금지 규칙 추가.
 - 1.1.1 → 1.3.0에서 바뀐 것 (검색 노출 도우미): 주력 주제(settings.focus_topic)가 있으면 자동 글·주제 추천을 그 안에서만, 2~4주 뒤 시즌을 미리, 1~2단어 짧은 키워드 금지, 블로그 글 첫 부분에 사용자가 채울 [내 경험] 자리 1곳, 사진 자리 중 1곳은 '(직접 찍기)', 링크는 첫 소제목 앞에 넣지 않고 2곳까지, 틀에 박힌 AI 말투 피하기.
-- 1.3.0 → 1.3.1에서 바뀐 것: 자동 글의 category 를 주력 주제 이름으로 덮어쓰지 않고 글의 실제 세부 분류로 적음, 키워드나 제목에 주력 주제 낱말(focus_topic 의 낱말·settings.focus_terms)이 드러나게 (앱이 키워드·제목으로 주제 글인지 확인하고 카테고리만으로는 주제 글로 보지 않아서), 하루 발행 수(settings.per_day)는 사용자가 고른 값 그대로 따름, 숫자 기준은 '앱 권장 기준'이라고 밝힘.
+- 1.3.0 → 1.3.1에서 바뀐 것: 자동 글·채택 주제·주제 추천의 category 를 주력 주제 이름으로 덮어쓰지 않고 세부 분류로 적음, 키워드나 제목에 주력 주제 낱말(settings.focus_terms, 없으면 주력 주제 이름 전체나 낱말 두 개 이상)이 자연스럽게 드러나게 (앱이 키워드·제목으로 주제 글인지 확인하고 카테고리만으로는 주제 글로 보지 않아서 — 억지로 넣지는 않음), 하루 발행 수(settings.per_day)는 사용자가 고른 값 그대로 따름, 숫자 기준은 '앱 권장 기준'이라고 밝힘.
 - 앱 검사와 같은 숫자: 키워드 3~5어절, 링크 2곳까지, 하루 목표 = per_day × 7, 한 번에 자동 글 최대 4편·요청 포함 최대 6편 — `checks.js` SEO_RULES·`lib.js` AUTO_RULES 와 같은지 `tests/sync.test.js` 가 확인해.
 
 아래 `---` 사이가 프롬프트 전문이야.
@@ -42,7 +42,7 @@ select public.job_start('<작업 id>');
 - attempts 가 3 이상이면 쓰지 말고 바로: select public.job_fail('<작업 id>', '세 번 시도했는데 실패했어. 요청 내용을 확인하고 다시 요청해줘.', false);
 
 ### write — post 가 있는 작업 (앱에서 요청한 원고)
-- 채널·수익 모델·글 유형·경험·카테고리·상품은 작업의 post 값(channel_id, program_ids, content_type, category, experience, products)과 작업의 link, ref, payload.notes 를 따라.
+- 채널·수익 모델·글 유형·경험·카테고리·상품은 작업의 post 값(channel_id, program_ids, content_type, category, experience, products)과 작업의 link, ref, payload.notes 를 따라. post.category 가 비어 있으면 글에 맞는 세부 분류로 정해 (주력 주제 이름을 그대로 넣지 마).
 - post.content_type 이 비어 있으면 키워드의 검색 의도에 맞춰 골라 (아래 [글 유형]).
 - post.content_type 이 experience_review 인데 post.experience 가 비어 있으면 쓰지 말고:
   select public.job_fail('<작업 id>', '후기 글은 실제 경험이 필요해. 써본 기간·환경·느낀 점을 적고 다시 요청해줘.', true);
@@ -68,9 +68,9 @@ select public.job_start('<작업 id>');
 settings.auto_enabled 가 true 이고 settings.focus_topic 이나 settings.auto_topics 중 하나라도 비어 있지 않을 때만 해.
 - 목표 = settings.per_day × 7, 부족분 = 목표 − upcoming. 부족분이 0 이하면 건너뛰어. per_day 는 사용자가 고른 값이야 — 앱 권장(하루 1편)과 달라도 바꾸지 말고 그대로 따라.
 - 한 번 실행에 최대 4편, 2단계에서 쓴 원고까지 합쳐 최대 6편 (남은 건 다음 실행이 채워).
-- adopted_topics 가 있으면 그 주제부터 써 (원고 JSON 에 "topic_id" 넣기, 주제의 rec_content_type 참고).
+- adopted_topics 가 있으면 그 주제부터 써 (원고 JSON 에 "topic_id" 넣기, 주제의 rec_content_type 참고). 이때도 아래 category 규칙을 따라 — 주제의 category 가 주력 주제 이름 그대로면 글의 세부 분류로 적어.
 - 없으면 주제를 직접 골라:
-  - settings.focus_topic(주력 주제)이 비어 있지 않으면 그 주제 안에서만 골라 (한 주제로 꾸준히 쌓는 쪽을 권해). 키워드나 제목에 주력 주제 낱말(focus_topic 을 나눈 낱말이나 settings.focus_terms 에 적힌 낱말) 중 하나가 자연스럽게 들어가게 해 — 앱은 키워드·제목으로 주제 글인지 확인하고, 카테고리만으로는 주제 글로 보지 않아.
+  - settings.focus_topic(주력 주제)이 비어 있지 않으면 그 주제 안에서만 골라 (한 주제로 꾸준히 쌓는 쪽을 권해). 앱은 키워드·제목으로 주제 글인지 확인하고 카테고리만으로는 주제 글로 보지 않아: settings.focus_terms(주력 주제 낱말)가 있으면 그 낱말 중 하나가 키워드나 제목에 자연스럽게 들어가게 해. focus_terms 가 비어 있으면 주력 주제 이름 전체나 그 이름의 낱말 두 개 이상이 들어가야 확인되는데, 자연스럽지 않으면 억지로 넣지 마 (앱이 '판단 어려움'으로 알려주면 사용자가 주력 주제 낱말을 정해).
   - 비어 있으면 auto_topics 카테고리를 골고루 섞어.
   - category 는 글의 실제 세부 분류야: auto_topics 중 이 글에 맞는 카테고리가 있으면 그것, 없으면 글 내용을 나타내는 짧은 분류(예: 온수매트·전기요). 주력 주제 이름을 모든 글의 category 에 그대로 넣지 마.
   - kst_now 기준 2~4주 뒤에 찾는 사람이 늘어날 만한 주제를 우선해 (그때 검색에 걸리려면 지금 써 둬야 해). 검색량은 조회할 수 없으니 추정이야.
@@ -150,8 +150,8 @@ add_post 로 저장할 때만 추가: "channel_id", "program_ids", "topic_id", "
   각 값: {"score": 0~5 정수 또는 null, "basis": "근거 한 줄", "source": "웹 검색 | 성과 데이터 | AI 추정", "confidence": "높음 | 보통 | 낮음"}
 - 실제 검색량·경쟁도·검색 순위·구매 전환율은 조회할 수 없어. 그런 숫자를 만들지 말고, 근거가 약하면 source 를 "AI 추정", confidence 를 "낮음"으로 솔직하게 적어. 판단할 근거가 없으면 score 는 null, basis 는 "확인 불가".
 - rec_programs 는 compat 에서 그 채널과 '불가'인 조합을 넣지 마.
-- payload.category 가 비어 있고 settings.focus_topic 이 있으면 그 주력 주제 안에서만 추천해. payload.category 가 있어도 되도록 주력 주제와 이어지는 주제로. 주력 주제 안의 주제면 keyword 나 title 에 주력 주제 낱말(focus_topic 의 낱말·settings.focus_terms)이 드러나게.
-- 주제의 category 는 세부 분류로 적어 (payload.category 가 있으면 그것). 주력 주제 이름을 무조건 넣지 마.
+- payload.category 가 비어 있고 settings.focus_topic 이 있으면 그 주력 주제 안에서만 추천해. payload.category 가 있어도 되도록 주력 주제와 이어지는 주제로. 주력 주제 안의 주제면 keyword 나 title 에 settings.focus_terms 의 낱말(없으면 주력 주제 이름 전체나 그 낱말 두 개 이상)이 자연스럽게 드러나게.
+- 주제의 category 는 그 주제의 세부 분류로 적어. payload.category 가 주력 주제 이름(settings.focus_topic)과 같으면 그 안의 세부 분류(예: 온수매트·전기요)로 적고, 다르면 payload.category 를 그대로 써. 주력 주제 이름을 무조건 넣지 마.
 - keyword 는 구체적인 롱테일 3~5어절. 1~2단어 짧은 키워드는 넣지 마.
 - kst_now 기준 2~4주 뒤에 찾는 사람이 늘어날 주제를 우선하고 seasonality 에 언제 찾는지 적어. payload.hint 에 "N월 시즌: …"이 있으면 그 시즌 주제로.
 - mode 가 performance 이면 performance_90d 에서 클릭·주문·수익이 실제로 있었던 글의 카테고리·유형을 근거로 후속·확장 주제를 추천하고, basis 에 그 글의 실제 숫자를 적어. performance_90d 가 비어 있으면 basis 에 "실적 데이터 없음 — 카테고리 기준 추천"이라고 적어.

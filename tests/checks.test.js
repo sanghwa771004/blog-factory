@@ -233,17 +233,25 @@ describe('검색 노출 점검 (1.3.0 → 1.3.1) — 앱의 권장 기준이라 
     assert.equal(f.verdict, 'off');
   });
   test('주력 주제 판정: 키워드·제목이 주된 근거, 소제목·본문만 있으면 판단 어려움, 근거를 같이 보여줌', () => {
-    const m = checkPost(base({ keyword: '겨울 원룸 전기요 고르는 법', category: '' }), ctx({ focus: FOCUS }));
+    const m = checkPost(base({ keyword: '겨울 가전 원룸 전기요 고르는 법', category: '' }), ctx({ focus: FOCUS }));
     assert.ok(seo(m).includes('focus_match') && !seo(m).includes('off_focus') && !seo(m).includes('focus_unclear'));
-    assert.match(m.tips.find((t) => t.code === 'focus_match').msg, /근거: 키워드에 '겨울'/);
-    const t = focusFit(base({ keyword: LONG_KW, titles: ['겨울에 쓰는 원룸 전기요 고르는 법'] }), FOCUS);
+    assert.match(m.tips.find((t) => t.code === 'focus_match').msg, /근거: 키워드·제목에 주력 주제 낱말 '겨울', '가전'/);
+    const t = focusFit(base({ keyword: LONG_KW, titles: ['겨울 가전으로 원룸 전기요 고르는 법'] }), FOCUS);
     assert.equal(t.verdict, 'match');
-    assert.ok(t.evidence.some((e) => e.startsWith('제목에')));
+    // 주력 주제 이름의 낱말이 하나뿐이면 (넓은 낱말일 수 있어서) 판단 어려움 — 검토에서 찾은 '낱말 하나로 통과' 문제
+    const one = checkPost(base({ keyword: '겨울 원룸 전기요 고르는 법', category: '' }), ctx({ focus: FOCUS }));
+    assert.ok(seo(one).includes('focus_unclear') && !seo(one).includes('focus_match'));
+    assert.match(one.warnings.find((w) => w.code === 'focus_unclear').msg, /'겨울' 하나뿐/);
+    for (const [kw, focus] of [['겨울 패딩 코디 추천', FOCUS], ['초보 주식 투자 꿀팁', '자취 꿀팁'], ['1인 주식회사 설립', '주식 투자']]) {
+      assert.notEqual(focusFit({ keyword: kw, titles: [kw], body: '본문' }, focus).verdict, 'match', kw + ' / ' + focus);
+    }
+    assert.equal(focusFit({ keyword: '향수 limited edition', titles: ['향수'], body: '본문' }, 'IT 기기').verdict, 'off', "영어 낱말은 낱말 경계로 ('it' ≠ 'limited')");
+    assert.equal(focusFit({ keyword: 'IT 기기 정리', titles: ['x'], body: '본문' }, 'IT 기기').verdict, 'match', '주력 주제 이름 전체');
     // 키워드·제목엔 없고 본문에만 있음 → 판단 어려움 (무조건 통과시키지 않음)
     const body = BODY + '\n겨울에는 전기요를 오래 켜 두니까 가전 안전 표시도 봐 주세요.';
     const u = checkPost(base({ keyword: LONG_KW, category: FOCUS, body }), ctx({ focus: FOCUS }));
     assert.ok(seo(u).includes('focus_unclear'));
-    assert.match(u.warnings.find((x) => x.code === 'focus_unclear').msg, /판단하기 어려워 — 근거: .*본문에 '겨울', '가전'.*키워드·제목에는 주제 낱말이 없음/);
+    assert.match(u.warnings.find((x) => x.code === 'focus_unclear').msg, /판단하기 어려워 — 근거: .*본문에 '겨울', '가전'.*키워드·제목만으로는 확인 안 됨/);
     assert.equal(focusFit(base({ keyword: LONG_KW, body }), FOCUS).label, '판단 어려움');
     // 주력 주제 낱말(설정)을 더하면 키워드로 확인됨
     assert.equal(focusFit(base({ keyword: LONG_KW }), FOCUS, '전기요, 온수매트').verdict, 'match');
@@ -257,15 +265,26 @@ describe('검색 노출 점검 (1.3.0 → 1.3.1) — 앱의 권장 기준이라 
   test("주력 주제 낱말을 적으면 그 낱말로만 '맞음' — 주력 주제 이름의 넓은 낱말('겨울')은 보조 근거로만", () => {
     const T = '히터, 전기요, 온수매트, 가습기';
     const laptop = { keyword: '겨울 노트북 추운 곳에 뒀다 켜기', titles: ['겨울 노트북 바로 켜도 될까'], category: '디지털·전자기기', body: '## 결로\n차가운 노트북을 바로 켜면 안 좋아요.' };
-    assert.equal(focusFit(laptop, FOCUS).verdict, 'match', '낱말을 안 정하면 주력 주제 이름의 낱말로 판정 (넓을 수 있음)');
+    assert.equal(focusFit(laptop, FOCUS).verdict, 'unclear', "'겨울' 하나로는 맞다고 안 함");
     const f = focusFit(laptop, FOCUS, T);
-    assert.equal(f.verdict, 'unclear', '낱말을 정하면 \'겨울\'만으로는 맞다고 안 함');
-    assert.ok(f.evidence.some((e) => e.includes("주력 주제 이름의 낱말 '겨울' (보조 근거)")), f.evidence.join(' / '));
+    assert.equal(f.verdict, 'unclear', '낱말을 정해도 마찬가지');
+    assert.ok(f.evidence.some((e) => e.includes("주력 주제 낱말 '겨울' 하나뿐")), f.evidence.join(' / '));
+    assert.ok(f.evidence.some((e) => e.includes("'주력 주제 낱말'(설정)이 없음")), f.evidence.join(' / '));
     assert.equal(focusFit({ keyword: '원룸 전기히터 전기세', titles: ['원룸 전기히터 전기세 적게 나오는 종류'] }, FOCUS, T).verdict, 'match', "'히터'로 확인");
     assert.equal(focusFit({ keyword: '소금빵 고르는 법', titles: ['소금빵'], body: '버터가 중요해요.' }, FOCUS, T).verdict, 'off');
   });
   test('주력 주제 낱말: 주제를 나눈 낱말 + 설정 낱말, 띄어쓰기가 달라도 찾음', () => {
-    assert.deepEqual(focusTerms(FOCUS, '전기요, 온수매트,  , 히'), ['계절템', '겨울', '가전', '전기요', '온수매트']);
+    assert.deepEqual(focusTerms(FOCUS, '전기요, 온수매트,  , 히'), ['계절템', '겨울', '가전', '전기요', '온수매트', '히']);
+    assert.equal(focusFit({ keyword: '에어컨 전기 요금 아끼는 법', titles: ['x'], body: '본문' }, FOCUS, '전기요').verdict, 'off', "띄어쓰기를 넘어서 찾지 않음 ('전기요' ≠ '전기 요금')");
+    assert.equal(focusFit({ keyword: '원룸 전기히터 고르기', titles: ['x'], body: '본문' }, FOCUS, '히터').verdict, 'match', "낱말 안에서는 찾음 ('전기히터' 안의 '히터')");
+    // 한 글자 주제(책·술·옷)도 판정 — 낱말 그대로일 때만
+    assert.equal(focusFit({ keyword: '겨울에 읽을 책 추천', titles: ['x'], body: '본문' }, '책').verdict, 'match');
+    assert.equal(focusFit({ keyword: '책상 정리', titles: ['x'], body: '본문' }, '책').verdict, 'off');
+    assert.equal(focusFit({ keyword: '술을 줄이는 법', titles: ['x'], body: '본문' }, '건강', '술').verdict, 'match', '한 글자 설정 낱말 + 조사');
+    // 게시 기록만 남긴 글(본문 없음): 카테고리만 맞으면 '밖'이 아니라 판단 어려움
+    const rec = focusFit({ keyword: '지난 글', titles: ['지난 글'], category: FOCUS, body: '' }, FOCUS);
+    assert.equal(rec.verdict, 'unclear');
+    assert.ok(rec.evidence.some((e) => e.includes('본문이 없는 기록')));
     assert.equal(focusFit({ keyword: '전기장판 고르기' }, '겨울', '전기 장판').verdict, 'match');
     assert.equal(focusFit({ keyword: '추가 전기 요금' }, '가전').verdict, 'off', "두 글자 낱말은 띄어쓰기를 넘어서 찾지 않음 ('추가 전기' ≠ '가전')");
   });

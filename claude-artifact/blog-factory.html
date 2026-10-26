@@ -809,6 +809,8 @@ function normalizePost(r, o){
     notes: str(r.notes, 400)
   };
 }
+// 주제·원고의 카테고리: 블로그 주력 주제 이름 그대로면 비움 (글에 맞는 세부 분류로 정하게 — 주력 주제는 키워드·제목의 낱말로 봄)
+function subCategory(c, focus){ const v = str(c, 60); return v && v !== str(focus, 60) ? v : ""; }
 function normalizeTopics(raw, o){
   const arr = Array.isArray(raw) ? raw : (raw && Array.isArray(raw.topics) ? raw.topics : null);
   if (!arr) throw { code: "invalid_json" };
@@ -833,7 +835,7 @@ function normalizeTopics(raw, o){
       scores[f] = { score, basis: str(s && s.basis, 200) || (score == null ? "확인 불가" : ""), source, confidence };
     }
     out.push({
-      title, keyword: str(it.keyword, 120), category: str(it.category, 60) || o.category || "",
+      title, keyword: str(it.keyword, 120), category: subCategory(it.category, o.focus) || subCategory(o.category, o.focus),
       search_intent: str(it.search_intent, 300), audience: str(it.audience, 300), problem: str(it.problem, 300),
       affiliate_fit: str(it.affiliate_fit, 300), product_availability: str(it.product_availability, 300),
       competition: str(it.competition, 300), differentiation: str(it.differentiation, 300),
@@ -951,7 +953,7 @@ function buildWritePrompt(o){
     ct ? `- 글 유형: ${ct} (${CONTENT_TYPES[ct].label})` : `- 글 유형: 정해지지 않음 — 키워드의 검색 의도에 맞게 다음 중 하나를 골라 content_type 에 적어: ${allowed.join(", ")}`,
     sns ? null : `- 분량: 본문 약 ${o.len || "2500"}자`,
     `- 카테고리: ${o.category || "글 내용에 맞는 세부 분류로 정해서 category 에 적어 (블로그 주력 주제 이름을 그대로 쓰지 마)"}`,
-    o.focus ? `- 블로그 주력 주제: ${o.focus}${o.focusTerms ? ` (주제 낱말: ${o.focusTerms})` : ""} — 키워드나 제목에 주력 주제 낱말이 자연스럽게 드러나게 써 (앱은 키워드·제목으로 주제 글인지 확인해)` : null,
+    o.focus ? `- 블로그 주력 주제: ${o.focus}${o.focusTerms ? ` (주제 낱말: ${o.focusTerms})` : ""} — 키워드나 제목에 주력 주제 낱말이 자연스럽게 드러나게 써 (앱은 키워드·제목으로 주제 글인지 확인해${o.focusTerms ? "" : ". 주제 낱말이 없으면 주력 주제 이름 전체나 그 낱말 두 개 이상이 있어야 확인돼 — 억지로 넣지는 마"})` : null,
     o.experience ? `- 작성자의 실제 경험 (이 내용만 1인칭 경험으로 써도 돼):\n${o.experience.slice(0, 3000)}` : "- 작성자의 실제 경험: 없음",
     o.ref ? `- 참고 글 (구성·말투·리듬만 참고하고 문장은 절대 베끼지 마):\n${o.ref.slice(0, 6000)}` : null,
     o.notes ? `- 요청 메모: ${o.notes.slice(0, 1000)}` : null,
@@ -1003,7 +1005,7 @@ function buildTopicPrompt(o){
     `- 오늘(한국 날짜): ${o.today}. 지금부터 2~4주 뒤에 찾는 사람이 늘어날 주제를 우선해 (그때 검색에 걸리려면 미리 써 둬야 해).`,
     `- 카테고리: ${o.category || (o.focus ? `${o.focus} (블로그 주력 주제 — 이 안에서만)` : "제한 없음")}`,
     o.focus && o.category && o.category !== o.focus ? `- 블로그 주력 주제: ${o.focus} (한 주제로 꾸준히 쌓는 쪽을 권해 — 되도록 이 주제와 이어지게)` : null,
-    o.focus ? `- 주력 주제 안의 주제면 keyword 나 title 에 주력 주제 낱말(${[o.focus, o.focusTerms].filter(Boolean).join(", ")})이 드러나게 하고, category 에는 세부 분류를 적어 (주력 주제 이름을 무조건 넣지 마).` : null,
+    o.focus ? `- 주력 주제 안의 주제면 keyword 나 title 에 주력 주제 낱말(${[o.focus, o.focusTerms].filter(Boolean).join(", ")})이 드러나게 하고, category 에는 세부 분류를 적어 (카테고리가 주력 주제 이름과 같으면 그 안의 세부 분류로. 주력 주제 이름을 무조건 넣지 마).` : null,
     `- 추천 개수: ${o.count}개`,
     o.hint ? `- 요청 메모: ${o.hint}` : null,
     `- 주로 올릴 채널: ${o.channel.name}(${o.channel.id})`,
@@ -1765,7 +1767,7 @@ $("#tBtn").onclick = async () => {
     const count = Number($("#tcount").value) || 6;
     const prompt = buildTopicPrompt({ category, count, mode, hint: "", channel: base.channel, programs: base.programs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date, focus: str(cat.settings.focus_topic, 60), focusTerms: str(cat.settings.focus_terms, 300) });
     const raw = await sample.json(prompt, { cache: false, onText: ({ text }) => setTStatus(`고르는 중… ${text.length.toLocaleString()}자`) });
-    const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: base.channel.id, category, hasPerf: mode === "performance" && cat.perf.length > 0 });
+    const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: base.channel.id, category, focus: str(cat.settings.focus_topic, 60), hasPerf: mode === "performance" && cat.perf.length > 0 });
     const now = Date.now();
     topics = items.map((t, i) => ({ ...t, lid: now.toString(36) + i, checked: false, state: "", appId: "", at: now, mode }));
     saveTopics(); renderTopics();
@@ -1835,7 +1837,7 @@ $("#tWrite").onclick = async () => {
     try {
       const ct = typeOkHere(t.rec_content_type, { products: [], experience: false, sns }) ? t.rec_content_type : (sns ? "sns_short" : "");
       const topicId = src === "app" ? t.id : (isUuid(t.appId) ? t.appId : "");
-      const input = { ...base, keyword: t.keyword || t.title, titleHint: t.title || "", contentType: ct, category: t.category || "", topicId, experience: "", ref: "", link: "" };
+      const input = { ...base, keyword: t.keyword || t.title, titleHint: t.title || "", contentType: ct, category: subCategory(t.category, cat.settings.focus_topic), topicId, experience: "", ref: "", link: "" };
       const res = await writeAndSend(input, { offset: 1, signal: batchCtl.signal, origin: "topic" });
       ok++; if (res.sent.ok) sentN++;
       if (src === "local"){ t.state = "done"; t.checked = false; t.sent = res.sent.ok; t.date = res.sent.date || ""; t.err = ""; }
@@ -1985,7 +1987,7 @@ async function doTopicJob(j, signal){
   const hint = [str(pl.hint, 300), pl.keyword ? "기준 글 키워드: " + str(pl.keyword, 100) : ""].filter(Boolean).join(" / ");
   const prompt = buildTopicPrompt({ category, count, mode, hint, channel: ch, programs: progs, channels: activeChannels(), allPrograms: activePrograms(), compat: cat.compat, recent: cat.recent || [], perf: mode === "performance" ? cat.perf : [], today: kstNow().date, focus: str(S.focus_topic, 60), focusTerms: str(S.focus_terms, 300) });
   const raw = await sample.json(prompt, { signal, cache: false });
-  const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: ch.id, category, hasPerf: mode === "performance" && cat.perf.length > 0 });
+  const items = normalizeTopics(raw, { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: ch.id, category, focus: str(S.focus_topic, 60), hasPerf: mode === "performance" && cat.perf.length > 0 });
   try { await sql(`select public.add_topics('${j.id}'::uuid, ${dq(JSON.stringify(items))}::jsonb) as n;`); } catch (e) { throw saveErr(e); }
 }
 async function doReformatJob(j, signal){

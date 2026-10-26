@@ -167,8 +167,8 @@ export function similarity(a, b) {
 // 자동 작가 프롬프트(docs/auto-writer-prompt.md)도 같은 값을 써 — tests/sync.test.js 가 서로 맞는지 확인
 export const SEO_RULES = { minKeywordWords: 3, maxLinks: 2, earlyLinkShare: 0.15, focusShareGoal: 0.7, perDayRecommended: 1 };
 
-// 낱말 나누기: 공백·가운뎃점·쉼표·빗금·괄호로 나누고 2글자 이상만
-const topicWords = (s) => String(s || '').toLowerCase().split(/[\s·,/|&+()]+/).map((w) => w.trim()).filter((w) => w.length >= 2);
+// 낱말 나누기: 공백·가운뎃점·쉼표·빗금·괄호로 나누고 min 글자 이상만
+const topicWords = (s, min = 2) => [...new Set(String(s || '').toLowerCase().split(/[\s·,/|&+()]+/).map((w) => w.trim()).filter((w) => w.length >= min))];
 // 카테고리 이름이 주력 주제와 이어지는지 (같은 말·포함·낱말 앞부분이 같음). 카테고리는 약한 근거라서 이것만으로 주제 일치를 정하지 않아 (focusFit)
 export function focusMatch(category, focus) {
   const f = String(focus || '').trim();
@@ -179,56 +179,84 @@ export function focusMatch(category, focus) {
   const fw = topicWords(f);
   return topicWords(c).some((w) => fw.some((x) => w === x || w.startsWith(x) || x.startsWith(w)));
 }
-// 설정의 '주력 주제 낱말'(쉼표로 구분, 2글자 이상)
-const ownTerms = (extra) => [...new Set(String(extra || '').toLowerCase().split(/[,，、\n]+/).map((w) => w.replace(/\s+/g, ' ').trim()).filter((w) => w.length >= 2))].slice(0, 30);
-// 주력 주제 낱말 전체: 주력 주제를 나눈 낱말 + 설정의 '주력 주제 낱말'
+// 설정의 '주력 주제 낱말'(쉼표로 구분). 한 글자 낱말(책·술·옷)도 받음 — 한 글자는 낱말 그대로일 때만 찾음
+const ownTerms = (extra) => [...new Set(String(extra || '').toLowerCase().split(/[,，、\n]+/).map((w) => w.replace(/\s+/g, ' ').trim()).filter((w) => w.length >= 1))].slice(0, 30);
+// 주력 주제 이름의 낱말 (2글자 이상, 한 글자 주제면 그 글자)
+const baseTerms = (focus) => { const w = topicWords(focus); return w.length ? w : topicWords(focus, 1); };
+// 주력 주제 낱말 전체: 주력 주제 이름의 낱말 + 설정의 '주력 주제 낱말'
 export function focusTerms(focus, extra) {
   const out = [];
-  for (const w of [...topicWords(focus), ...ownTerms(extra)]) if (!out.includes(w)) out.push(w);
+  for (const w of [...baseTerms(focus), ...ownTerms(extra)]) if (!out.includes(w)) out.push(w);
   return out.slice(0, 40);
 }
 const normT = (s) => String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-// 글에 들어 있는 주제 낱말 (띄어쓰기가 달라도 3글자 이상 낱말은 찾음: '전기 장판' ↔ '전기장판')
-function termsIn(text, terms) {
-  const t = normT(text), ns = t.replace(/ /g, '');
-  return terms.filter((w) => { const wn = w.replace(/ /g, ''); return t.includes(w) || (wn.length >= 3 && ns.includes(wn)); });
+const reEsc = (w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const EDGE = '(^|[\\s·,/|()\\[\\]"\'“”‘’!?.:;~-])', EDGE_END = '($|[\\s·,/|()\\[\\]"\'“”‘’!?.:;~-])';
+const JOSA = '(은|는|이|가|을|를|의|에|에서|도|만|과|와|로|으로|용)?';
+// 낱말 찾기 규칙
+//  - 영어·숫자 낱말: 낱말 경계로만 ('it' 이 'limited' 안에서 걸리지 않게)
+//  - 띄어 쓴 여러 낱말('전기 장판'): 띄어쓰기가 달라도 ('전기장판')
+//  - 한 글자 낱말(책·술): 낱말 그대로(+조사)일 때만 ('책상'에서 안 걸리게)
+//  - 그 밖의 한국어 낱말: 한 낱말 안에서만 (띄어쓰기를 넘지 않음 — '전기요'가 '전기 요금'에서 안 걸리게, '히터'는 '전기히터'에서 걸림)
+const reCache = new Map();
+function termRe(w) {
+  if (reCache.has(w)) return reCache.get(w);
+  const parts = w.split(' ').filter(Boolean).map(reEsc);
+  let re;
+  if (/^[a-z0-9][a-z0-9 .+#-]*$/i.test(w)) re = new RegExp(`(^|[^a-z0-9])${parts.join('\\s*')}($|[^a-z0-9])`, 'gi');
+  else if (parts.length > 1) re = new RegExp(parts.join('\\s*'), 'g');
+  else if (w.length === 1) re = new RegExp(`${EDGE}${parts[0]}${JOSA}${EDGE_END}`, 'g');
+  else re = new RegExp(parts[0], 'g');
+  if (reCache.size > 500) reCache.clear();
+  reCache.set(w, re);
+  return re;
 }
-const countIn = (text, w) => { const t = normT(text); let n = 0; for (let i = t.indexOf(w); i !== -1; i = t.indexOf(w, i + w.length)) n++; return n; };
+const countIn = (text, w) => (normT(text).match(termRe(w)) || []).length;
+const termsIn = (text, terms) => terms.filter((w) => countIn(text, w) > 0);
 // 주력 주제와 맞는지 — 외부 AI 없이 낱말로만 봄. 근거를 같이 돌려줌
 //   주된 근거: 키워드·제목 / 약한 근거: 카테고리 / 보조 근거: 소제목·본문
-//   match = 키워드나 제목에 주제 낱말이 있음
-//   unclear(판단 어려움) = 키워드·제목에는 없고 소제목·본문에만 있음
-//   off = 키워드·제목·소제목·본문 어디에도 없음 — 카테고리만 주력 주제로 적은 글도 여기 (카테고리만으로는 통과시키지 않음)
+//   match = 키워드나 제목에 ① 설정의 '주력 주제 낱말', ② 주력 주제 이름 전체, ③ 주력 주제 이름의 낱말 두 개 이상 중 하나가 있음
+//           (주력 주제가 한 낱말이면 그 낱말)
+//   unclear(판단 어려움) = 키워드·제목에 주력 주제 이름의 낱말이 하나뿐('겨울'처럼 넓을 수 있음)이거나, 소제목·본문에만 있거나,
+//                          본문이 없는 기록(게시 기록만 남긴 글)인데 카테고리만 맞음
+//   off = 그 밖 — 본문이 있는 글에서 카테고리만 주력 주제로 적은 글도 여기 (카테고리만으로는 통과시키지 않음)
 //   none = 주력 주제를 안 정함
-//   설정에 '주력 주제 낱말'을 적었으면 그 낱말로만 '맞음'을 정하고, 주력 주제 이름을 나눈 낱말(예: '겨울')은 보조 근거로만 씀
-//   ('겨울 노트북'처럼 넓은 낱말 하나 때문에 다른 주제 글까지 맞다고 하지 않게)
 export const FOCUS_VERDICT = { match: '주력 주제와 맞음', unclear: '판단 어려움', off: '주력 주제 밖', none: '주력 주제 없음' };
 export function focusFit(post, focus, extra = '') {
-  const terms = focusTerms(focus, extra);
-  if (!String(focus || '').trim() || !terms.length) return { verdict: 'none', label: FOCUS_VERDICT.none, evidence: [], terms };
-  const own = ownTerms(extra), base = topicWords(focus);
-  const main = own.length ? own : base;                       // '맞음'을 정하는 낱말
-  const sub = own.length ? base.filter((w) => !own.includes(w)) : []; // 보조 근거로만 쓰는 낱말
+  const f = String(focus || '').trim();
+  const terms = focusTerms(f, extra);
+  if (!f || !terms.length) return { verdict: 'none', label: FOCUS_VERDICT.none, evidence: [], terms };
+  const own = ownTerms(extra), base = baseTerms(f);
+  const main = base.length === 1 ? [...new Set([...own, ...base])] : own;   // 하나만 있어도 '맞음'이 되는 낱말
+  const phrase = base.length > 1 ? base.join(' ') : '';                      // 주력 주제 이름 전체 ('계절템 겨울 가전')
   const p = post || {};
   const title = (Array.isArray(p.titles) ? p.titles : []).find((t) => typeof t === 'string' && t.trim()) || '';
   const lines = String(p.body || '').split('\n');
   const isHead = (l) => /^\s*#{1,4}\s/.test(l);
   const heads = lines.filter(isHead).join(' ');
   const rest = lines.filter((l) => !isHead(l) && !/^\s*\[(이미지|링크|내 경험)/.test(l)).join(' ');
-  const kw = termsIn(p.keyword, main), ti = termsIn(title, main), ca = termsIn(p.category, terms), he = termsIn(heads, terms), bo = termsIn(rest, terms);
-  const kwSub = [...new Set([...termsIn(p.keyword, sub), ...termsIn(title, sub)])];
+  const noBody = !String(p.body || '').trim();
+  const kw = termsIn(p.keyword, main), ti = termsIn(title, main);
+  const whole = phrase && (countIn(p.keyword, phrase) + countIn(title, phrase)) > 0;
+  const baseKT = base.length > 1 ? [...new Set([...termsIn(p.keyword, base), ...termsIn(title, base)])] : [];
+  const ca = termsIn(p.category, terms), he = termsIn(heads, terms), bo = termsIn(rest, terms);
   const q = (ws) => ws.slice(0, 3).map((w) => `'${w}'`).join(', ');
   const evidence = [];
   if (kw.length) evidence.push(`키워드에 ${q(kw)}`);
   if (ti.length) evidence.push(`제목에 ${q(ti)}`);
-  if (kwSub.length) evidence.push(`키워드·제목에 주력 주제 이름의 낱말 ${q(kwSub)} (보조 근거)`);
+  if (whole) evidence.push(`키워드·제목에 주력 주제 이름 '${f}'`);
+  else if (baseKT.length >= 2) evidence.push(`키워드·제목에 주력 주제 낱말 ${q(baseKT)}`);
+  else if (baseKT.length === 1) evidence.push(`키워드·제목에 주력 주제 낱말 ${q(baseKT)} 하나뿐 (넓은 낱말일 수 있어서 보조 근거)`);
   if (ca.length) evidence.push(`카테고리에 ${q(ca)}`);
   if (he.length) evidence.push(`소제목에 ${q(he)}`);
   if (bo.length) evidence.push(`본문에 ${q(bo)} ${bo.reduce((n, w) => n + countIn(rest, w), 0)}번`);
   let verdict = 'off';
-  if (kw.length || ti.length) verdict = 'match';
-  else if (kwSub.length || he.length || bo.length) { verdict = 'unclear'; evidence.push(own.length ? "키워드·제목에 '주력 주제 낱말'(설정)이 없음" : '키워드·제목에는 주제 낱말이 없음'); }
-  else if (ca.length) evidence.push('카테고리만 주력 주제와 같고 키워드·제목·본문에는 주제 낱말이 없음 (카테고리만으로는 주제 글로 보지 않아)');
+  if (kw.length || ti.length || whole || baseKT.length >= 2) verdict = 'match';
+  else if (baseKT.length || he.length || bo.length || (noBody && ca.length)) {
+    verdict = 'unclear';
+    if (noBody && !baseKT.length && !he.length && !bo.length) evidence.push('본문이 없는 기록이라 카테고리만으로는 판단하기 어려움');
+    evidence.push(own.length ? "키워드·제목에 '주력 주제 낱말'(설정)이 없음" : "키워드·제목만으로는 확인 안 됨 — 설정에 '주력 주제 낱말'을 적으면 더 정확해");
+  } else if (ca.length) evidence.push('카테고리만 주력 주제와 같고 키워드·제목·본문에는 주제 낱말이 없음 (카테고리만으로는 주제 글로 보지 않아)');
   else evidence.push('키워드·제목·카테고리·본문 어디에도 주제 낱말이 없음');
   return { verdict, label: FOCUS_VERDICT[verdict], evidence, terms };
 }

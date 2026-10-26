@@ -8,7 +8,7 @@ const html = readFileSync(new URL('../claude-artifact/blog-factory.html', import
 const pure = html.match(/\/\*PURE-START\*\/([\s\S]*?)\/\*PURE-END\*\//)[1];
 const NAMES = ['parseBody', 'quickCheck', 'normalizePost', 'normalizeTopics', 'normalizeVariants', 'sqlRows', 'dq', 'topicScore',
   'buildWritePrompt', 'buildTopicPrompt', 'buildReformatPrompt', 'exportHtml', 'exportPlain', 'threadsShare', 'instagramText',
-  'disclosureFor', 'typeOkHere', 'dbMsg', 'nextRunText', 'EXAMPLE', 'firstChars', 'VAGUE_DISCLOSURE', 'isFakeExperience', 'withSnsDisclosure'];
+  'disclosureFor', 'typeOkHere', 'dbMsg', 'nextRunText', 'EXAMPLE', 'firstChars', 'VAGUE_DISCLOSURE', 'isFakeExperience', 'withSnsDisclosure', 'subCategory'];
 const P = new Function(pure + `\nreturn { ${NAMES.join(', ')} };`)();
 const cat = JSON.parse(readFileSync(new URL('./fixtures/catalog.json', import.meta.url), 'utf8'));
 const prog = Object.fromEntries(cat.programs.map((p) => [p.id, p]));
@@ -83,6 +83,17 @@ test('주제 정리: 안 되는 조합 빼고, 점수·출처·신뢰도를 정�
   assert.equal(nt[0].scores.intent.score, null);
   assert.equal(nt[0].scores.effort.basis, '확인 불가');
   assert.equal(P.topicScore(nt[0], cat.settings.score_weights).total, 80);
+});
+
+test('주제 카테고리가 블로그 주력 주제 이름 그대로면 비움 — 주제 추천 결과·주제로 원고 쓰기 (1.3.1)', () => {
+  assert.equal(P.subCategory('계절템·겨울 가전', '계절템·겨울 가전'), '');
+  assert.equal(P.subCategory('전기요', '계절템·겨울 가전'), '전기요');
+  assert.equal(P.subCategory('', '계절템·겨울 가전'), '');
+  assert.equal(P.subCategory('디지털', ''), '디지털');
+  const o = { channels: cat.channels, programs: cat.programs, compat: cat.compat, channelId: 'naver_blog', category: '겨울 가전', focus: '겨울 가전', hasPerf: false };
+  const nt = P.normalizeTopics([{ title: 'a', category: '겨울 가전' }, { title: 'b', category: '전기요' }, { title: 'c' }], o);
+  assert.deepEqual(nt.map((t) => t.category), ['', '전기요', ''], 'AI가 주력 주제 이름을 카테고리로 돌려줘도 비움');
+  assert.equal(P.normalizeTopics([{ title: 'c' }], { ...o, category: '디지털' })[0].category, '디지털', '요청한 카테고리가 주력 주제와 다르면 그대로');
 });
 
 test('채널별 버전 정리: 고지 줄을 빼고 요청한 것만', () => {

@@ -117,6 +117,7 @@ const ERR = {
   rate_limited: '접속 코드를 여러 번 틀려서 잠시 막혔어. 15분 뒤에 다시 해줘.',
   incompatible: '이 채널에서는 쓸 수 없는 수익 모델이야. 채널이나 수익 모델을 바꿔줘.',
   needs_experience: "'실제 경험 후기'는 내 경험을 적어야 요청할 수 있어. 경험을 적거나 글 유형을 바꿔줘.",
+  db_update_needed: 'DB 업데이트가 아직 안 돼서 이 기능은 쓸 수 없어. 배포를 마저 해줘 (DB 015).',
   too_many_jobs: '기다리는 작업이 30개라 더 넣을 수 없어. 자동 작가가 처리한 뒤에 넣어줘.',
   too_many_jobs_today: '오늘 넣을 수 있는 작업(60개)을 다 썼어. 내일 다시 넣어줘.',
   check_failed: '발행 전 검사에서 고칠 게 남았어.',
@@ -633,13 +634,18 @@ function postList(ps, { showDate, flags } = {}) {
 // ── 새 원고 요청 ──
 const draft = { keyword: '', title: '', category: '', topic_id: '', channel_id: '', program_ids: null, content_type: '', link: '', experience: '', ref: '', notes: '', len: '', products: [] };
 function resetDraft() { Object.assign(draft, { keyword: '', title: '', category: '', topic_id: '', channel_id: '', program_ids: null, content_type: '', link: '', experience: '', ref: '', notes: '', len: '', products: [] }); }
+// 주제의 카테고리를 원고 카테고리로 옮길 때: 주력 주제 이름 그대로면 옮기지 않음 (비워 두면 자동 작가가 글에 맞는 세부 분류로 정함)
+function topicCategory(tp, st) {
+  const c = String((tp && tp.category) || '').trim();
+  return c && c !== String((st && st.focus_topic) || '').trim() ? c : '';
+}
 function viewNew(topicId) {
   const st = S.settings || {};
   if (!draft.channel_id) draft.channel_id = st.default_channel || 'naver_blog';
   if (!draft.program_ids) draft.program_ids = (st.default_programs || []).slice();
   if (topicId && draft.topic_id !== topicId) {
     const tp = S.topics.find((x) => x.id === topicId);
-    if (tp) Object.assign(draft, { topic_id: tp.id, keyword: tp.keyword || tp.title, title: '', category: tp.category || '', content_type: CONTENT_TYPES[tp.rec_content_type] ? tp.rec_content_type : '' });
+    if (tp) Object.assign(draft, { topic_id: tp.id, keyword: tp.keyword || tp.title, title: '', category: topicCategory(tp, st), content_type: CONTENT_TYPES[tp.rec_content_type] ? tp.rec_content_type : '' });
   }
   const box = h('div', { class: 'view' });
   box.append(btn('← 콘텐츠', 'sm ghost back', () => go('content')));
@@ -651,7 +657,7 @@ function viewNew(topicId) {
   const adopted = S.topics.filter((x) => x.status === '채택' || x.status === '후보');
   const topicSel = h('select', { value: draft.topic_id, onchange: (e) => {
     const tp = S.topics.find((x) => x.id === e.target.value);
-    if (tp) Object.assign(draft, { topic_id: tp.id, keyword: tp.keyword || tp.title, category: tp.category || draft.category, content_type: CONTENT_TYPES[tp.rec_content_type] ? tp.rec_content_type : draft.content_type });
+    if (tp) Object.assign(draft, { topic_id: tp.id, keyword: tp.keyword || tp.title, category: topicCategory(tp, st) || draft.category, content_type: CONTENT_TYPES[tp.rec_content_type] ? tp.rec_content_type : draft.content_type });
     else draft.topic_id = '';
     render(true);
   } }, opt('', '고르지 않음'), adopted.map((x) => opt(x.id, `${x.status === '채택' ? '★ ' : ''}${x.title}`)));
@@ -1329,6 +1335,8 @@ function viewTopics() {
   box.append(weightsPanel(w), addTopicPanel());
   return box;
 }
+// 점수 중 실측·내 실적·직접 입력 근거가 하나라도 있는지 (없으면 'AI 추정'으로 표시)
+const realScore = L.realScore; // 계산은 lib.js (테스트 있음)
 function topicCard(t, s) {
   const rec = [t.rec_channels && t.rec_channels.length ? '채널 ' + t.rec_channels.map(chName).join('·') : '', t.rec_programs && t.rec_programs.length ? '수익 ' + t.rec_programs.map(progName).join('·') : '', CONTENT_TYPES[t.rec_content_type] ? CONTENT_TYPES[t.rec_content_type].label : ''].filter(Boolean).join(' · ');
   const setSt = (st) => async (ev) => { const j = await run(ev.currentTarget, () => api('/topics/' + t.id, { method: 'POST', body: { status: st } }), `'${st}'(으)로 바꿨어`); if (j) await load(); };
@@ -1337,9 +1345,9 @@ function topicCard(t, s) {
     h('span', { class: 'bar' }, h('i', { style: `width:${pt.score == null ? 0 : pt.score * 20}%` })),
     h('small', { class: 'muted', style: 'grid-column:1/-1' }, [pt.basis, pt.source, pt.confidence && '신뢰도 ' + pt.confidence].filter(Boolean).join(' · ') || '근거 없음'))));
   return h('section', { class: 'panel' },
-    h('div', { class: 'split' }, h('b', null, t.title), h('span', { class: 'score' }, s.total == null ? '–' : s.total, h('small', null, s.measured ? ' /100' : ' /100 · AI 추정'))),
+    h('div', { class: 'split' }, h('b', null, t.title), h('span', { class: 'score' }, s.total == null ? '–' : s.total, h('small', null, realScore(s) ? ' /100' : ' /100 · AI 추정'))),
     h('p', { class: 'hint' }, [t.keyword && '키워드 ' + t.keyword, t.category].filter(Boolean).join(' · ')),
-    h('p', { class: 'hint' }, `신뢰도: ${s.confidence}${s.measured ? '' : ' · 검색량·경쟁도는 조회하지 않은 추정이야'}`),
+    h('p', { class: 'hint' }, `신뢰도: ${s.confidence}${realScore(s) ? ' · 일부 항목은 실적·직접 확인 근거' : ' · 검색량·경쟁도는 조회하지 않은 추정이야'}`),
     rec ? h('p', { class: 'hint' }, '추천: ' + rec) : null,
     t.basis ? h('p', { class: 'small' }, t.basis) : null,
     (() => {
@@ -1611,13 +1619,13 @@ function secAuto() {
     h('label', { class: 'chk' }, auto, '발행표가 비면 자동 주제로 채우기'),
     field('자동 주제 카테고리 (쉼표로 구분)', topics),
     field('주력 주제 (블로그의 큰 주제 하나)', focus, '정해 두면 자동 작가가 이 주제 안에서만 자동 글을 쓰고, 검사에서 글마다 주제와 맞는지 근거를 보여줘. 비우면 안 씀.'),
-    field('주력 주제 낱말 (선택, 쉼표로)', fterms, "적어 두면 글의 키워드나 제목에 이 낱말이 있어야 주제 글로 봐 ('겨울'처럼 주력 주제 이름의 넓은 낱말은 보조 근거로만). 안 적으면 주력 주제 이름의 낱말로 봐. 카테고리만 같으면 주제 글로 보지 않고, 본문에만 있으면 '판단 어려움'으로 알려줘."),
+    field('주력 주제 낱말 (선택, 쉼표로)', fterms, "글의 키워드나 제목에 이 낱말 중 하나가 있으면 주력 주제 글로 봐. 안 적으면 주력 주제 이름 전체나 그 낱말 두 개 이상이 있어야 해 ('겨울'처럼 하나만 있으면 넓은 낱말일 수 있어서 '판단 어려움'). 카테고리만 같으면 주제 글로 보지 않아."),
     h('datalist', { id: 'focuslist' }, String(s.auto_topics || '').split(',').map((x) => x.trim()).filter(Boolean).map((c) => opt(c, c))),
     h('div', { class: 'row' }, field('하루 발행 개수', per), field('기본 길이', len)), perHint,
     field('기본 채널', ch), h('p', { class: 'legend' }, '기본 수익 모델'), pp,
     btn('저장', 'sm', async (ev) => {
       const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), focus_terms: fterms.value.trim(), per_day: Number(per.value), len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
-      if (j) { dirty = false; await load(); }
+      if (j) { dirty = false; if (j.skipped && j.skipped.includes('focus_terms')) toast('나머지는 저장했어. 주력 주제 낱말은 DB 업데이트(015) 뒤에 저장돼.', 5000); await load(); }
     }),
     h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워 (주력 주제를 정하면 그 안에서만). 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어와.`),
   ];
@@ -1816,7 +1824,7 @@ function secGuide() {
       h('li', null, '제휴 링크는 받은 그대로. 줄이거나 다른 주소로 돌리지 마 (제휴사 규정 위반이 될 수 있어).'),
       h('li', null, '내가 산 건 수익으로 인정 안 될 수 있어 (토스 쉐어링크는 본인·지인 구매 불인정).'))),
     g('이미지 넣기',
-      h('ol', null, h('li', null, "원고 아래 '이미지'에서 사진 자리마다 AI로 만들기·실제 사진 찾기(Pexels)·파일 올리기·보관함에서 고르기 중 하나"),
+      h('ol', null, h('li', null, "원고 아래 '이미지'에서 사진 자리마다 AI로 만들기·실제 사진 찾기(Pexels)·파일 올리기·보관함에서 고르기 중 하나 (파일을 올릴 때는 '이 사진은 어디서 났어?'에서 출처를 골라줘 — 직접 찍은 사진으로 셀지 정해져)"),
         h('li', null, "미리보기에서 자를 곳을 맞추고 '사용 가능'으로 검수"), h('li', null, "'모두 내려받기' → '서식 그대로 복사'로 붙여넣은 뒤, 적힌 파일 이름대로 사진을 넣기"),
         h('li', null, "블로그에 넣었으면 '사용 완료' 표시")),
       h('p', null, 'AI 이미지는 일반 상황 삽화·배경용이야. 실제 상품 모습은 공식 이미지나 직접 찍은 사진으로. 이미지 안 글자는 카드뉴스에서 앱이 직접 그려. AI 이미지 키·한도는 설정 > 이미지.')),

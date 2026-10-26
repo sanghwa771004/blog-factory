@@ -558,6 +558,9 @@ export function topicScore(topic, weights) {
   return { total, coverage, measured, confidence, parts };
 }
 
+// 점수 항목 중 실측·성과 데이터·직접 입력 근거가 하나라도 있으면 true — 없으면 화면이 점수 옆에 'AI 추정'을 붙임 (1.3.1)
+export const realScore = (s) => ((s && s.parts) || []).some((pt) => pt.score != null && /^(실측|성과 데이터|직접 입력)/.test(String(pt.source || '')));
+
 // ───────── 검색 노출 도우미 ─────────
 // 달마다 사람들이 많이 찾기 시작하는 생활 주제 (앱이 정해 둔 달력 — 실제 검색량 숫자가 아님)
 export const SEASON_CALENDAR = {
@@ -590,13 +593,15 @@ export function focusShare(posts, focus, n = 30, fit = null, opts = {}) {
   const list = (posts || []).filter((p) => p && !p.deleted_at && LIVE_STAGES.includes(p.stage) && (!opts.channels || opts.channels.includes(p.channel_id)))
     .sort((a, b) => postedOn(b).localeCompare(postedOn(a)) || String(b.created_at || '').localeCompare(String(a.created_at || '')))
     .slice(0, n);
-  let hit = 0, unclear = 0, off = 0;
+  let hit = 0, unclear = 0, off = 0, none = 0;
   for (const p of list) {
     const r = fitFn(p, focus);
     const v = typeof r === 'boolean' ? (r ? 'match' : 'off') : (r && r.verdict) || 'off';
-    if (v === 'match') hit++; else if (v === 'unclear') unclear++; else off++;
+    if (v === 'match') hit++; else if (v === 'unclear') unclear++; else if (v === 'none') none++; else off++;
   }
-  return { total: list.length, hit, unclear, off, ratio: list.length ? hit / list.length : null, goal: SEO_RULES.focusShareGoal };
+  // 판정할 수 없는 글(none — 주력 주제가 없거나 낱말이 없음)은 비율에서 빼
+  const total = hit + unclear + off;
+  return { total, hit, unclear, off, none, ratio: total ? hit / total : null, goal: SEO_RULES.focusShareGoal };
 }
 // 내 하루 발행 설정(perDay)보다 많이 올렸거나 잡아 둔 날 (지난 7일 ~ 다음 7일, 발행 준비·예약·게시 글)
 export function crowdedDays(posts, today = todayStr(), perDay = 1) {

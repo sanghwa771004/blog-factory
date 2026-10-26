@@ -810,6 +810,9 @@ export function captionHint(img) {
     if (/배경: AI|AI로 만든/.test(String(img.license || '') + ' ' + String(img.attribution_text || ''))) return '※ 배경은 AI로 만든 예시 이미지';
     return String(img.attribution_text || '');
   }
+  // 직접 올린 사진: 고른 출처대로 (직접 촬영·출처 미확인은 캡션 없음). 구체적인 출처 이름은 이미지 검사 '참고'에서 적으라고 알려줌
+  if (img.kind === 'upload' && img.source_type === 'official') return '사진: 제조사·판매처 제공 이미지';
+  if (img.kind === 'upload' && img.source_type === 'external') return '사진: 외부 제공 이미지';
   return '';
 }
 export const altTextFor = (text) => clip(stripOwnMark(text).replace(/\s*(사진|이미지)$/, ''), 120);
@@ -844,7 +847,7 @@ export function imageChecks(post, rows, opts = {}) {
   const slots = parseSlots(post && post.body);
   const byKey = new Map((rows || []).filter((r) => r && r.image).map((r) => [r.slot_key, r.image]));
   const list = (ns) => ns.map((n) => '사진 ' + n).join(', ');
-  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [], unknownSrc = [];
+  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [], unknownSrc = [], credit = [];
   for (const s of slots) {
     const img = byKey.get(s.key);
     if (!img) continue;
@@ -853,6 +856,7 @@ export function imageChecks(post, rows, opts = {}) {
     if (img.kind === 'ai') { ai.push(s.n); if (isOwnPhotoSlot(s.text)) aiOwn.push(s.n); else if (slotRisk(s.text).real) aiReal.push(s.n); }
     if (img.description && descriptionMismatch(s.text, img.description)) mismatch.push(s.n);
     if (originOf(img) === 'unknown') unknownSrc.push(s.n);
+    if (img.kind === 'upload' && (img.source_type === 'official' || img.source_type === 'external')) credit.push(s.n);
   }
   if (unrev.length) W.push({ code: 'image_unreviewed', msg: `아직 검수하지 않은 이미지가 ${unrev.length}곳 있어 (${list(unrev)}).`, fix: "이미지 미리보기에서 확인하고 '사용 가능'으로 바꿔줘." });
   if (rejected.length) W.push({ code: 'image_rejected', msg: `'사용 안 함'으로 표시한 이미지가 연결돼 있어 (${list(rejected)}).`, fix: '다른 이미지로 바꾸거나 연결을 빼줘.' });
@@ -869,6 +873,7 @@ export function imageChecks(post, rows, opts = {}) {
     const own = linkedImgs.filter((i) => originOf(i) === 'own').length;
     if (linkedImgs.length && !own) W.push({ code: 'no_own_photo', msg: '직접 촬영으로 확인한 사진이 하나도 없어 (막지는 않아). AI 이미지·남의 사진만 있으면 다른 글과 같아 보이기 쉬워.', fix: "사진 자리 하나는 휴대폰으로 직접 찍어서 '파일 올리기'로 넣고 출처를 '직접 촬영'으로 골라줘." });
   }
+  if (credit.length) T.push({ code: 'image_credit', msg: `공식·외부 제공 사진이 ${credit.length}곳 있어 (${list(credit)}). 올릴 때 출처(제조사·사이트·사진가)와 이용 조건을 같이 확인해서 적어줘.` });
   if (opts.naver && ai.length) T.push({ code: 'ai_label', msg: `AI 이미지가 ${ai.length}곳 있어. 네이버 글쓰기에서 'AI 활용' 표시를 켜두면 안전해 (2026년 7월 기준 블로그는 자율).` });
   if (slots.length) {
     const linked = slots.filter((s) => byKey.has(s.key)).length;

@@ -688,6 +688,16 @@ describe("'직접 찍기' 자리와 검색 노출 (1.3.0)", () => {
     ];
     for (const [img, o, label] of cases) { assert.equal(originOf(img), o, JSON.stringify(img)); assert.equal(originLabel(img), label, JSON.stringify(img)); }
   });
+  test('복사할 때 캡션도 출처대로: 공식·외부 제공 사진은 출처 줄, 직접 촬영·출처 미확인은 없음 (지어내지 않음)', () => {
+    assert.equal(captionHint({ kind: 'upload', source_type: 'official' }), '사진: 제조사·판매처 제공 이미지');
+    assert.equal(captionHint({ kind: 'upload', source_type: 'external' }), '사진: 외부 제공 이미지');
+    assert.equal(captionHint({ kind: 'upload', source_type: 'own' }), '');
+    assert.equal(captionHint({ kind: 'upload' }), '');
+    const body2 = '## 가\n[이미지: 하나]\n[이미지: 둘]';
+    const [a2, b2] = parseSlots(body2);
+    const r = imageChecks({ body: body2 }, [{ slot_key: a2.key, image: { kind: 'upload', source_type: 'official', review_status: '사용 가능' } }, { slot_key: b2.key, image: { kind: 'upload', source_type: 'own', review_status: '사용 가능' } }]);
+    assert.match(r.tips.find((t) => t.code === 'image_credit').msg, /공식·외부 제공 사진이 1곳 있어 \(사진 1\)/);
+  });
   test("'직접 찍기' 자리에 AI 이미지를 넣으면 따로 알려줌 (실제 상품 자리 경고와 겹치지 않게)", () => {
     const r = imageChecks({ body, content_type: 'how_to' }, [{ slot_key: own.key, image: { kind: 'ai', review_status: '사용 가능', description: '' } }]);
     assert.deepEqual(r.warnings.map((w) => w.code), ['ai_in_own_slot']);

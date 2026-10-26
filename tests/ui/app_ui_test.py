@@ -87,6 +87,7 @@ class Mock:
         self.channels, self.programs, self.compat, self.settings = cat['channels'], cat['programs'], cat['compat'], cat['settings']
         self.calls = []
         self.force_401 = False
+        self.pre015 = False  # True면 서버가 DB 015(주력 주제 낱말·사진 출처 열) 전인 것처럼 답함
         self.seq = 100
         P1, P2, P3, P4, P5, P6, P7 = (uid(i) for i in range(1, 8))
         self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, P6=P6, P7=P7, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
@@ -317,8 +318,11 @@ class Mock:
         if path == 'settings' and method == 'POST' and 'focus_topic' in body:
             # 자동 글쓰기 칸만 저장해 둠 (이미지 설정 같은 다른 설정은 다른 시험에 영향 주지 않게 — 시험 끝에 되돌림)
             for k in ('focus_topic', 'focus_terms', 'per_day'):
-                if k in body:
+                if k in body and not (k == 'focus_terms' and self.pre015):
                     self.settings[k] = body[k]
+            if self.pre015 and 'focus_terms' in body:
+                # 서버처럼: 015 전 DB면 주력 주제 낱말만 빼고 저장하고 알려줌
+                return 200, {'settings': self.settings, 'skipped': ['focus_terms']}
         r = self.handle_images(method, path, query, headers, body)
         if r is not None:
             return r
@@ -503,6 +507,8 @@ class Mock:
                 if 'source_type' in body:
                     if i['kind'] != 'upload' or body['source_type'] not in ('', 'own', 'official', 'external'):
                         return 400, {'error': 'bad_field', 'field': 'source_type'}
+                    if self.pre015:
+                        return 409, {'error': 'db_update_needed', 'migration': '015'}
                     i['source_type'] = body['source_type']
                 for k in ('review_status', 'alt_text', 'description', 'review_note'):
                     if k in body:
@@ -793,6 +799,9 @@ def main():
         def t_topics_settings():
             goto_hash('topics')
             expect(page.get_by_text('원룸 전기요 전기세 비교')).to_be_visible()
+            # 점수 근거가 모두 AI 추정이면 점수 옆에 'AI 추정', 검색량·경쟁도를 조회하지 않았다고 밝힘 (1.3.1)
+            expect(page.locator('#view')).to_contain_text('/100 · AI 추정')
+            expect(page.locator('#view')).to_contain_text('검색량·경쟁도는 조회하지 않은 추정이야')
             no_overflow('주제')
             shot('08-topics')
             goto_hash('settings/programs')
@@ -935,6 +944,30 @@ def main():
             sheet.get_by_role('button', name='닫기').click()
             expect(page.locator('section.studio .slot').nth(1).locator('.chip.o-own')).to_contain_text('직접 촬영')
         check('직접 올리기: 가짜 이미지 거절, 숨은 정보 없이 다시 저장, 권한 확인 필수, 자리 연결, 출처는 직접 확인해야 직접 촬영', t_img_upload)
+
+        # 서버를 DB 015보다 먼저 올렸을 때: 사진 출처 바꾸기는 'DB 업데이트 필요' 안내(고른 값은 되돌림), 설정은 나머지만 저장하고 알려줌
+        def t_pre015():
+            mock.pre015 = True
+            try:
+                card = page.locator('section.studio .slot').nth(1)
+                card.get_by_role('button', name='미리보기·내려받기').click()
+                sheet = page.locator('#sheet')
+                src = sheet.get_by_label('이 사진은 어디서 났어?')
+                expect(src).to_have_value('own')
+                src.select_option('official')
+                expect(page.locator('#toast')).to_contain_text('DB 업데이트가 아직 안 돼서')
+                expect(src).to_have_value('own')
+                sheet.get_by_role('button', name='닫기').click()
+                expect(page.locator('section.studio .slot').nth(1).locator('.chip.o-own')).to_contain_text('직접 촬영')
+                goto_hash('settings/auto')
+                sec = page.locator('#sec-auto')
+                sec.locator('label', has_text='주력 주제 낱말').locator('input').fill('전기요')
+                sec.get_by_role('button', name='저장', exact=True).click()
+                expect(page.locator('#toast')).to_contain_text('주력 주제 낱말은 DB 업데이트(015) 뒤에 저장돼')
+                assert mock.settings.get('focus_terms', '') == '', '015 전에는 주력 주제 낱말이 저장되지 않음'
+            finally:
+                mock.pre015 = False
+        check('DB 015 전 서버: 사진 출처는 DB 업데이트 필요 안내(값 되돌림), 설정은 나머지만 저장하고 알려줌', t_pre015)
 
         def t_img_preview_download():
             open_p8()
@@ -1329,6 +1362,17 @@ def main():
             seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 점검'))
             # 게시한 글은 '전기요 두 가지 비교' 1개뿐 — 키워드·제목에 주제 낱말이 없어서 0개 (카테고리 '겨울 가전'만으로는 안 셈), 초안은 안 셈
             expect(seo).to_contain_text('네이버 블로그 최근 게시한 글 1개 중 주력 주제(겨울 가전) 글 0개 (0%)')
+            # 게시한 글이 없으면 0%가 아니라 '데이터 없음' (초안은 안 셈)
+            p3 = next(p for p in mock.posts if p['id'] == mock.ids['P3'])
+            p3['stage'] = 'ready'
+            page.get_by_role('button', name='새로고침').click()
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 점검'))
+            expect(seo).to_contain_text('네이버 블로그: 주력 주제(겨울 가전) 비율 — 데이터 없음 (게시한 글이 아직 없어. 초안은 안 셈)')
+            expect(seo).not_to_contain_text('(0%)')
+            p3['stage'] = 'published'
+            page.get_by_role('button', name='새로고침').click()
+            seo = page.locator('section.panel', has=page.locator('h2', has_text='검색 노출 점검'))
+            expect(seo).to_contain_text('최근 게시한 글 1개 중')
             expect(seo).to_contain_text('하루 발행 설정 2편 (네가 고른 값 그대로 둬) — 앱 권장은 하루 1편이야')
             expect(page.locator('section.panel', has=page.locator('h2', has_text='자동 작가'))).to_contain_text('목표 14편 (하루 2편 × 7일)')
             # 주력 주제 낱말을 더하면 키워드로 확인됨
@@ -1351,6 +1395,19 @@ def main():
             # 원고 검사: 주력 주제 판정과 근거가 보임 (키워드 '원룸 전기요 고르는 법' → 낱말 '전기요'로 확인)
             goto_hash('content/post/' + mock.ids['P1'])
             expect(page.locator('#view')).to_contain_text("주력 주제(겨울 가전)와 맞아 — 근거: 키워드에 '전기요'")
+            # 주제 → 원고 요청: 주제의 카테고리('겨울 가전')가 주력 주제 이름 그대로면 원고 카테고리로 옮기지 않음 (목록에서 고르기·주제 카드 버튼 두 길 모두)
+            t1 = mock.ids['T1']
+            goto_hash('content/new')
+            view = page.locator('#view')
+            view.locator('input[list=catlist]').fill('')
+            view.locator('label.f', has_text='주제 목록에서 고르기').locator('select').select_option(t1)
+            expect(view.get_by_placeholder('예: 원룸 전기요 고르는 법')).to_have_value('전기요 전기세')
+            expect(view.locator('input[list=catlist]')).to_have_value('')
+            view.locator('label.f', has_text='주제 목록에서 고르기').locator('select').select_option('')
+            goto_hash('content/new/topic/' + t1)
+            view = page.locator('#view')
+            expect(view.get_by_placeholder('예: 원룸 전기요 고르는 법')).to_have_value('전기요 전기세')
+            expect(view.locator('input[list=catlist]')).to_have_value('')
             goto_hash('home')
             no_overflow('홈 검색 노출 점검')
             shot('20-home-seo')

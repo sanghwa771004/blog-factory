@@ -300,22 +300,28 @@ describe('검색 노출 도우미 (1.3.0)', () => {
     const posts = [
       { keyword: '겨울 전기요 고르는 법', created_at: '2026-10-20', stage: 'review' },                       // 초안 — 안 셈
       { keyword: '겨울 온수매트 소음', created_at: '2026-10-19', stage: 'ready', publish_date: '2026-10-21' },  // 발행 준비 — 안 셈
-      { keyword: '겨울 가습기 세척', created_at: '2026-10-18', stage: 'published', published_on: '2026-10-19' },
-      { keyword: '노트북 배터리', created_at: '2026-10-17', stage: 'collecting', published_on: '2026-10-18' },
+      { keyword: '겨울 가전 가습기 세척', created_at: '2026-10-18', stage: 'published', published_on: '2026-10-19', body: '본문' },
+      { keyword: '노트북 배터리', created_at: '2026-10-17', stage: 'collecting', published_on: '2026-10-18', body: '본문' },
       { keyword: '겨울 히터 전기세', created_at: '2026-10-16', stage: 'failed' },
       { keyword: '겨울 결로', created_at: '2026-10-15', stage: 'published', deleted_at: '2026-10-17' },
-      { keyword: '스마트폰 케이스', category: F, created_at: '2026-01-01', stage: 'analyzed', published_on: '2026-01-02' }, // 카테고리만 같음 — 주제 글로 안 셈
+      { keyword: '스마트폰 케이스', category: F, created_at: '2026-01-01', stage: 'analyzed', published_on: '2026-01-02', body: '케이스 이야기' }, // 카테고리만 같음 — 주제 글로 안 셈
     ];
     const r = L.focusShare(posts, F);
     assert.deepEqual([r.total, r.hit, r.unclear, r.off], [3, 1, 0, 2], '게시한 3개 중 1개 (초안 2개·실패·지운 글은 안 셈)');
     assert.equal(r.ratio, 1 / 3);
     assert.equal(r.goal, 0.7);
-    assert.deepEqual(L.focusShare(posts, F, 1), { total: 1, hit: 1, unclear: 0, off: 0, ratio: 1, goal: 0.7 }, '최근 1개만 (게시일 순)');
+    assert.deepEqual(L.focusShare(posts, F, 1), { total: 1, hit: 1, unclear: 0, off: 0, none: 0, ratio: 1, goal: 0.7 }, '최근 1개만 (게시일 순)');
     const m = L.focusShare(posts, F, 30, (p) => /배터리/.test(p.keyword));
     assert.equal(m.hit, 1, '판정 방법을 넘길 수 있음 (true/false 도 됨)');
-    assert.equal(L.focusShare(posts, F, 30, null, { terms: '스마트폰, 가습기' }).hit, 2, '주력 주제 낱말을 더하면 키워드로 확인');
-    const onlyPhone = L.focusShare(posts, F, 30, null, { terms: '스마트폰' });
-    assert.deepEqual([onlyPhone.hit, onlyPhone.unclear], [1, 1], "낱말을 정하면 '겨울'만 있는 글은 판단 어려움");
+    assert.equal(L.focusShare(posts, F, 30, null, { terms: '스마트폰' }).hit, 2, '주력 주제 낱말을 더하면 키워드로 확인');
+    const wide = L.focusShare([{ keyword: '겨울 패딩 코디', stage: 'published', published_on: '2026-10-20', body: '본문' }], F);
+    assert.deepEqual([wide.hit, wide.unclear, wide.ratio], [0, 1, 0], "'겨울' 하나뿐인 글은 판단 어려움 (비율에 안 넣음)");
+    const rec = L.focusShare([{ keyword: '지난 글', category: F, stage: 'published', published_on: '2026-10-20', body: '' }], F);
+    assert.equal(rec.unclear, 1, '본문 없는 게시 기록은 카테고리만 맞으면 판단 어려움');
+    const one = L.focusShare([{ keyword: '책 추천', stage: 'published', published_on: '2026-10-20', body: '본문' }], '책');
+    assert.deepEqual([one.total, one.hit, one.ratio], [1, 1, 1], '한 글자 주제도 판정 (0%로 잘못 나오지 않음)');
+    const none = L.focusShare([{ keyword: 'x', stage: 'published', published_on: '2026-10-20' }], '·');
+    assert.deepEqual([none.total, none.none, none.ratio], [0, 1, null], '판정할 수 없는 글은 비율에서 뺌');
     assert.equal(L.focusShare(posts, F, 30, null, { channels: ['tistory'] }).total, 0, '채널을 나눠서 셀 수 있음 (채널 없는 글은 안 셈)');
   });
   test('회귀: 미발행 원고만 있으면 비율에 안 들어가고 데이터 없음(null) — 0%가 아님', () => {
@@ -376,4 +382,14 @@ describe('검색 노출 도우미 (1.3.0)', () => {
     assert.equal(L.autoPlan({ posts: [], settings: {}, today: t }).perDay, 1, '기본은 하루 1편');
     assert.deepEqual(L.AUTO_RULES, { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 });
   });
+});
+
+test("주제 점수 'AI 추정' 표시: 실측·성과 데이터·직접 입력 근거가 하나라도 있을 때만 떼어 냄 (1.3.1)", () => {
+  const W = { demand: 1, intent: 1, competition: 0, product_info: 0, differentiation: 0, monetization: 0, effort: 0 };
+  assert.equal(L.realScore(L.topicScore({ scores: { demand: { score: 4, source: 'AI 추정' }, intent: { score: 2, source: 'AI 추정' } } }, W)), false);
+  assert.equal(L.realScore(L.topicScore({ scores: { demand: { score: 4, source: '성과 데이터' } } }, W)), true);
+  assert.equal(L.realScore(L.topicScore({ scores: { demand: { score: 4, source: '실측 (블로그 통계)' } } }, W)), true);
+  assert.equal(L.realScore(L.topicScore({ scores: { demand: { score: null, source: '성과 데이터' } } }, W)), false, '점수가 없는 항목은 근거로 안 셈');
+  assert.equal(L.realScore(L.topicScore({}, W)), false);
+  assert.equal(L.realScore(null), false);
 });

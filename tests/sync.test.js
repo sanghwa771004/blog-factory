@@ -42,10 +42,18 @@ test('하루 발행량: 프롬프트의 목표·한 번에 쓰는 수가 앱 계
 test('주제 규칙: 카테고리를 주력 주제로 덮어쓰지 않고, 키워드·제목에 주제 낱말 (앱 판정과 같은 근거)', () => {
   assert.doesNotMatch(PROMPT, /category = focus_topic/);
   assert.match(PROMPT, /주력 주제 이름을 모든 글의 category 에 그대로 넣지 마/);
-  assert.match(PROMPT, /키워드나 제목에 주력 주제 낱말/);
+  assert.match(PROMPT, /settings\.focus_terms\(주력 주제 낱말\)가 있으면 그 낱말 중 하나가 키워드나 제목에 자연스럽게 들어가게/);
   assert.match(PROMPT, /settings\.focus_terms/);
   assert.match(ART, /블로그 주력 주제 이름을 그대로 쓰지 마/);
   assert.match(ART, /키워드나 제목에 주력 주제 낱말이 자연스럽게 드러나게/);
+  // 앱 판정 규칙(checks.js focusFit)과 같은 말: 설정 낱말 하나, 없으면 이름 전체나 낱말 두 개 이상, 억지로 넣지 않음
+  assert.match(PROMPT, /focus_terms 가 비어 있으면 주력 주제 이름 전체나 그 이름의 낱말 두 개 이상/);
+  assert.match(PROMPT, /억지로 넣지 마/);
+  assert.match(ART, /주력 주제 이름 전체나 그 낱말 두 개 이상이 있어야 확인돼/);
+  // 주제 추천·채택 주제·요청 원고도 카테고리를 주력 주제 이름으로 채우지 않음
+  assert.match(PROMPT, /payload\.category 가 주력 주제 이름\(settings\.focus_topic\)과 같으면 그 안의 세부 분류/);
+  assert.match(PROMPT, /post\.category 가 비어 있으면 글에 맞는 세부 분류로 정해/);
+  assert.match(PROMPT, /주제의 category 가 주력 주제 이름 그대로면 글의 세부 분류로/);
 });
 
 test('키워드·링크·경험·사진 규칙이 앱 검사 숫자·표시와 같음', () => {

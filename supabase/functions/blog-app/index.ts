@@ -1031,9 +1031,19 @@ async function patchSettings(c: Ctx) {
     };
   }
   if (!Object.keys(s).length) fail(400, "empty");
-  const { data, error } = await sb.from("settings").update(s).eq("id", 1).select().single();
+  let { data, error } = await sb.from("settings").update(s).eq("id", 1).select().single();
+  // DB에 015(주력 주제 낱말 열)가 아직 없으면 그 칸만 빼고 저장 — 서버를 DB보다 먼저 올려도 다른 설정 저장이 막히지 않게
+  const skipped: string[] = [];
+  if (error && "focus_terms" in s && missingColumn(error, "focus_terms")) {
+    delete s.focus_terms;
+    skipped.push("focus_terms");
+    // 주력 주제 낱말만 보냈으면 저장할 게 없으니 지금 설정만 다시 읽어서 돌려줌 (빈 저장 요청을 보내지 않음)
+    ({ data, error } = Object.keys(s).length
+      ? await sb.from("settings").update(s).eq("id", 1).select().single()
+      : await sb.from("settings").select("*").eq("id", 1).single());
+  }
   if (error) throw error;
-  return json({ settings: data });
+  return json(skipped.length ? { settings: data, skipped } : { settings: data });
 }
 const PROGRAM_TEXT: [string, number][] = [["disclosure_template", 500], ["disclosure_where", 300], ["data_source", 500], ["commission_note", 500], ["unverified", 1000]];
 async function patchProgram(c: Ctx) {
@@ -1558,6 +1568,11 @@ async function uploadImage(c: Ctx) {
   return json({ image: (await withUrls([r.image as J]))[0], slot: r.slot ?? null, reused: !!r.reused });
 }
 const SOURCE_TYPES = ["own", "official", "external"] as const;
+// PostgREST '그런 열 없음' 오류인지 (마이그레이션 전 DB)
+function missingColumn(e: unknown, col: string): boolean {
+  const x = (e ?? {}) as { code?: string; message?: string };
+  return (x.code === "PGRST204" || x.code === "42703") && String(x.message ?? "").includes(col);
+}
 // 빈칸('') = 출처 확인 필요. 그 밖의 값은 버림
 function sourceTypeOf(v: unknown): string {
   const t = typeof v === "string" ? v.trim() : "";
@@ -1609,6 +1624,7 @@ async function patchImage(c: Ctx) {
   }
   if (!Object.keys(p).length) fail(400, "empty");
   const { data, error } = await sb.from("post_images").update(p).eq("id", c.params[0]).is("deleted_at", null).select().maybeSingle();
+  if (error && "source_type" in p && missingColumn(error, "source_type")) fail(409, "db_update_needed", { migration: "015" }); // 015 전 DB
   if (error) throw error;
   if (!data) fail(404, "not_found");
   return json({ image: (await withUrls([data as J]))[0] });
