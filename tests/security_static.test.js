@@ -13,9 +13,10 @@ test('화면 파일에는 키처럼 생긴 글자도, OpenAI·Pexels 직접 호�
   for (const f of CLIENT) {
     const t = read(f);
     assert.ok(!/sk-[A-Za-z0-9_-]{16,}/.test(t), f + ': 키처럼 생긴 글자가 있음');
-    assert.ok(!/api\.openai\.com|api\.pexels\.com/.test(t), f + ': 화면이 OpenAI·Pexels API를 직접 부름');
-    assert.ok(!/OPENAI_API_KEY\s*[:=]\s*['"`][^'"`]+|PEXELS_API_KEY\s*[:=]\s*['"`][^'"`]+/.test(t), f + ': 키 값을 넣는 코드');
-    assert.ok(!/Authorization['"]?\s*:/.test(t), f + ': 화면에서 외부 인증 머리글을 씀');
+    assert.ok(!/api\.openai\.com|api\.pexels\.com|generativelanguage\.googleapis\.com|api\.cloudflare\.com/.test(t), f + ': 화면이 OpenAI·Pexels·Gemini·Cloudflare API를 직접 부름');
+    assert.ok(!/(OPENAI|PEXELS|GEMINI)_API_KEY\s*[:=]\s*['"`][^'"`]+|CF_API_TOKEN\s*[:=]\s*['"`][^'"`]+/.test(t), f + ': 키 값을 넣는 코드');
+    assert.ok(!/AIza[0-9A-Za-z_-]{20,}/.test(t), f + ': Google API 키처럼 생긴 글자가 있음');
+    assert.ok(!/Authorization['"]?\s*:|x-goog-api-key/i.test(t), f + ': 화면에서 외부 인증 머리글을 씀');
   }
 });
 
@@ -23,15 +24,21 @@ test('서버는 키를 환경변수(Supabase Secrets)에서만 읽고, 화면으
   const ts = read('supabase/functions/blog-app/index.ts');
   assert.match(ts, /Deno\.env\.get\("OPENAI_API_KEY"\)/);
   assert.match(ts, /Deno\.env\.get\("PEXELS_API_KEY"\)/);
-  assert.match(ts, /const keysInfo = \(\) => \(\{ openai: !!keyOpenAI\(\), pexels: !!\(Deno\.env\.get\("PEXELS_API_KEY"\) \?\? ""\), cloudflare: !!\(keyCf\(\)\.accountId && keyCf\(\)\.token\) \}\);/);
+  // 1.5.0: Gemini 키(GEMINI_API_KEY)도 같은 방식 — 화면에는 있음/없음만, 키 값은 공급자 호출(keys: providerKeys())에만
+  assert.match(ts, /const keysInfo = \(\) => \(\{ openai: !!keyOpenAI\(\), gemini: !!keyGemini\(\), pexels: !!\(Deno\.env\.get\("PEXELS_API_KEY"\) \?\? ""\), cloudflare: !!\(keyCf\(\)\.accountId && keyCf\(\)\.token\) \}\);/);
+  assert.match(ts, /const providerKeys = \(\) => \(\{ openai: keyOpenAI\(\), gemini: keyGemini\(\), cf: keyCf\(\) \}\);/);
+  assert.match(ts, /Deno\.env\.get\("GEMINI_API_KEY"\)/);
   // Cloudflare 계정 ID·토큰도 Secrets 에서만 읽고, 생성 호출(runGeneration)에만 넘김
   assert.match(ts, /Deno\.env\.get\("CF_ACCOUNT_ID"\)/);
   assert.match(ts, /Deno\.env\.get\("CF_API_TOKEN"\)/);
   const cfUses = [...ts.matchAll(/keyCf\(\)/g)].map((m) => ts.slice(Math.max(0, m.index - 40), m.index + 30));
   for (const u of cfUses) assert.ok(/cloudflare: !!\(keyCf|&& keyCf\(\)\.token|cf: keyCf\(\)/.test(u), 'Cloudflare 키를 다른 곳에 씀: ' + u);
-  // 키 값(keyOpenAI())은 OpenAI 호출(runGeneration)에만 넘김 — json 응답에 그대로 넣는 곳이 없음
-  const uses = [...ts.matchAll(/keyOpenAI\(\)/g)].map((m) => ts.slice(Math.max(0, m.index - 60), m.index + 20));
-  for (const u of uses) assert.ok(/!!keyOpenAI|!keyOpenAI|key: keyOpenAI|=> Deno\.env|const keyOpenAI/.test(u), '키를 다른 곳에 씀: ' + u);
+  // 키 값(keyOpenAI()·keyGemini())은 키 묶음(providerKeys)·있음/없음에만 — json 응답에 그대로 넣는 곳이 없음
+  const uses = [...ts.matchAll(/keyOpenAI\(\)|keyGemini\(\)/g)].map((m) => ts.slice(Math.max(0, m.index - 60), m.index + 20));
+  for (const u of uses) assert.ok(/!!key(OpenAI|Gemini)|providerKeys = \(\) => \(\{ openai: keyOpenAI\(\), gemini|=> Deno\.env|const key(OpenAI|Gemini)|=> \(Deno\.env/.test(u), '키를 다른 곳에 씀: ' + u);
+  const pk = [...ts.matchAll(/providerKeys\(\)/g)].map((m) => ts.slice(Math.max(0, m.index - 10), m.index + 15));
+  assert.ok(pk.length >= 3);
+  for (const u of pk) assert.ok(/keys: providerKeys\(\)/.test(u), '키 묶음을 공급자 호출 말고 다른 곳에 씀: ' + u);
   const svc = read('supabase/functions/blog-app/image_service.js');
   assert.ok(!/Deno\.env/.test(svc), 'image_service 는 키를 직접 읽지 않고 받아서만 씀');
   // 오류 문구에서 키 가리기
@@ -44,7 +51,7 @@ test('화면 보안 정책(CSP): 스크립트는 같은 곳만, 이미지는 Sup
   assert.match(csp, /script-src 'self';/);
   assert.match(csp, /img-src 'self' data: blob: https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co https:\/\/images\.pexels\.com;/);
   assert.match(csp, /connect-src 'self' https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co;/);
-  assert.ok(!/connect-src[^;]*(openai|pexels)/.test(csp), '화면이 OpenAI·Pexels로 직접 연결하지 못하게');
+  assert.ok(!/connect-src[^;]*(openai|pexels|googleapis|cloudflare)/.test(csp), '화면이 OpenAI·Pexels·Gemini·Cloudflare로 직접 연결하지 못하게');
 });
 
 test('이미지 저장소는 비공개 버킷 + 정책 없음 (서버 키로만, 화면은 서명 주소로만)', () => {

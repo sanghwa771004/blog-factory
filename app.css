@@ -245,6 +245,12 @@ img.big{display:block;width:100%;height:auto;max-height:50vh;object-fit:contain;
 @keyframes spin{to{transform:rotate(360deg)}}
 .costbox{display:flex;flex-direction:column;gap:3px;background:var(--bg);border-radius:10px;padding:10px 12px;font-size:14px}
 .costbox b{font-size:18px}
+/* 1.5.0: 참고 사진·수정 이력 줄 (작은 그림 + 설명 + 버튼) */
+.refrow{display:grid;grid-template-columns:72px minmax(0,1fr) auto;gap:8px;align-items:center;min-width:0}
+.refrow .thumb{min-height:0;cursor:default}
+.refrow .thumb img{width:72px;height:72px;max-height:72px;object-fit:cover}
+.refrow .stack{min-width:0}
+.refrow small{overflow-wrap:anywhere}
 pre.prompt{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;background:var(--bg);border-radius:8px;padding:10px;margin:8px 0 0;max-height:260px;overflow:auto}
 .lic{margin:0;padding-left:18px;font-size:13px;color:var(--muted)}
 .lic li{margin-bottom:2px}

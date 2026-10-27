@@ -2,7 +2,7 @@
 // - OpenAI 이미지 생성·편집, 사진 공급자(지금은 Pexels만) 검색·한 장 가져오기, 이미지 내려받기
 // - 저장 흐름(생성 결과 저장·사진 고르기·파일 올리기)은 deps(DB 함수·파일 저장소)를 받아서 실행 → 테스트에서 가짜로 바꿔 끼움
 // 키는 서버 환경변수(Supabase Edge Function Secrets)로만 받음. 화면(app.js)으로는 키가 있는지 여부만 보냄.
-import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf, modelCaps } from './images.js';
+import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf, modelCaps, geminiSizeOf, reviewCaps, REVIEW_CHECKS, PROVIDERS } from './images.js';
 
 export const OPENAI_URL = 'https://api.openai.com/v1';
 export const PEXELS_URL = 'https://api.pexels.com/v1';
@@ -121,19 +121,25 @@ export function classifyOpenAIError(status, body) {
 // OpenAI가 만들기 전에 거절한 오류 → 하루 생성 횟수에 안 셈
 export const NOT_COUNTED = new Set(['openai_key_missing', 'openai_key_invalid', 'openai_org_unverified', 'openai_forbidden', 'model_unavailable',
   'openai_unsupported_option', 'openai_quota', 'openai_spend_limit', 'openai_rate_limited', 'openai_bad_request', 'bad_base_image', 'server_busy_late',
-  'cf_key_missing', 'cf_key_invalid', 'cf_daily_free_used', 'cf_rate_limited', 'cf_bad_request', 'cf_network']);
+  'cf_key_missing', 'cf_key_invalid', 'cf_daily_free_used', 'cf_rate_limited', 'cf_bad_request', 'cf_network',
+  'gemini_key_missing', 'gemini_key_invalid', 'gemini_billing', 'gemini_quota', 'gemini_rate_limited', 'gemini_unsupported_option', 'gemini_bad_request', 'gemini_blocked', 'bad_ref_image',
+  'model_unknown', 'model_retired', 'refs_too_big', 'refs_unsupported', 'ref_small_missing']);
 
 // 한 장 만들기(generate) 또는 고치기(edit). 성공하면 base64 이미지와 사용량을 돌려줌
-export async function openaiImage({ fetchImpl, key, mode = 'generate', model, prompt, size, quality, outputFormat = 'jpeg', compression = 90, image, safetyId, timeoutMs = 115000 }) {
+// 1.5.0: images = 같이 보낼 이미지 [{bytes, mime, role}] (고치기면 첫 장이 고칠 이미지, 그 뒤가 참고 사진).
+//        이미지가 하나라도 있으면 /images/edits 로 image[] 를 여러 개 보냄 (참고 사진으로 새로 만들기도 같은 주소)
+//        inputFidelity: 'high' — 모델이 받으면 참고 사진(진짜 제품)의 모양을 더 지키게 (모델 표의 inputFidelity 가 true 일 때만 보냄)
+export async function openaiImage({ fetchImpl, key, mode = 'generate', model, prompt, size, quality, outputFormat = 'jpeg', compression = 90, image, images, inputFidelity, safetyId, timeoutMs = 115000 }) {
   if (model === TEST_MODEL) {
     return { ok: true, b64: TEST_IMAGE_B64, revisedPrompt: '', outputFormat: 'jpeg', requestId: 'test-model', test: true,
       usage: { input_tokens: 0, input_tokens_details: { text_tokens: 0, image_tokens: 0 }, output_tokens: 0, total_tokens: 0 } };
   }
   if (!key) return { ok: false, code: 'openai_key_missing', message: 'OpenAI API 키가 설정되지 않았어.', billed: 'no' };
+  const list = Array.isArray(images) ? images.filter((x) => x && x.bytes) : image && image.bytes ? [image] : [];
+  if (mode === 'edit' && !list.length) return { ok: false, code: 'bad_base_image', message: '고칠 이미지를 찾지 못했어.', billed: 'no' };
   let res, j = null;
   try {
-    if (mode === 'edit') {
-      if (!image || !image.bytes) return { ok: false, code: 'bad_base_image', message: '고칠 이미지를 찾지 못했어.', billed: 'no' };
+    if (list.length) {
       const form = new FormData();
       form.append('model', model);
       form.append('prompt', prompt);
@@ -142,9 +148,12 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
       form.append('output_format', outputFormat);
       if (outputFormat !== 'png') form.append('output_compression', String(compression));
       form.append('n', '1');
+      if (inputFidelity) form.append('input_fidelity', 'high');
       if (safetyId) form.append('safety_identifier', safetyId);
-      const mime = image.mime || 'image/png';
-      form.append('image[]', new Blob([image.bytes], { type: mime }), 'base.' + (mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]));
+      list.forEach((x, i) => {
+        const mime = x.mime || 'image/png';
+        form.append('image[]', new Blob([x.bytes], { type: mime }), (i === 0 && mode === 'edit' ? 'base' : 'ref' + i) + '.' + (mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1]));
+      });
       ({ res, body: j } = await timed(fetchImpl, OPENAI_URL + '/images/edits', { method: 'POST', headers: { Authorization: 'Bearer ' + key }, body: form }, timeoutMs, jsonOrNull));
     } else {
       const body = { model, prompt, size, quality, output_format: outputFormat, n: 1, moderation: 'auto' };
@@ -166,28 +175,109 @@ export async function openaiImage({ fetchImpl, key, mode = 'generate', model, pr
   return { ok: true, b64: item.b64_json, revisedPrompt: scrub(item.revised_prompt || '', 4000), usage: (j && j.usage) || null, outputFormat: (j && j.output_format) || outputFormat, requestId };
 }
 
+// ───────── Google Gemini API (1.5.0) ─────────
+// generateContent 한 번 = 이미지 한 장. 키는 x-goog-api-key 머리글로만 (주소에 넣지 않음 — 기록에 남지 않게)
+// 받은 답에서 생각 과정용 이미지(thought)는 버리고 마지막 결과 이미지만 씀
+export const GEMINI_URL = 'https://generativelanguage.googleapis.com/v1beta';
+export function classifyGeminiError(status, body) {
+  const e = (body && body.error) || {};
+  const st = String(e.status || '');
+  const msg = scrub(e.message || '');
+  const m = msg.toLowerCase();
+  if (status === 400 && /api key not valid|api_key_invalid/.test(m)) return { code: 'gemini_key_invalid', message: 'Gemini API 키가 맞지 않아. Supabase Secrets의 GEMINI_API_KEY를 확인해줘.', billed: 'no', retryable: false };
+  if (status === 401 || status === 403 || st === 'PERMISSION_DENIED' || st === 'UNAUTHENTICATED') return { code: 'gemini_key_invalid', message: 'Gemini API 키로는 이 모델을 쓸 수 없어. 키와 프로젝트 권한(결제 연결)을 확인해줘. ' + msg, billed: 'no', retryable: false };
+  if (status === 404 || st === 'NOT_FOUND') return { code: 'model_unavailable', message: '이 키에서 쓸 수 없는 Gemini 모델이야. 설정 > 이미지에서 다른 모델을 골라줘.', billed: 'no', retryable: false };
+  if (st === 'FAILED_PRECONDITION' || /billing|free tier|not available in your country|location is not supported/.test(m)) {
+    return { code: 'gemini_billing', message: 'Gemini 이미지 모델은 결제가 연결된 프로젝트(유료 등급)에서만 쓸 수 있어. Google AI Studio에서 결제를 연결해줘. ' + msg, billed: 'no', retryable: false };
+  }
+  // 402: 미리 낸 크레딧(Prepay)을 다 씀 (Gemini 오류 문서 2026-10-27)
+  if (status === 402) return { code: 'gemini_quota', message: 'Gemini 미리 낸 크레딧을 다 썼어. Google AI Studio의 결제를 확인해줘.', billed: 'no', retryable: false };
+  if (status === 429 || st === 'RESOURCE_EXHAUSTED') {
+    return /quota|limit/.test(m) && !/per minute|rate/.test(m)
+      ? { code: 'gemini_quota', message: 'Gemini 사용 한도(할당량)에 닿았어. Google AI Studio의 한도·결제를 확인해줘.', billed: 'no', retryable: false }
+      : { code: 'gemini_rate_limited', message: 'Gemini가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.', billed: 'no', retryable: true };
+  }
+  if (status === 400 && /aspect|image_?size|imageconfig|resolution/.test(m)) return { code: 'gemini_unsupported_option', message: '이 Gemini 모델이 그 비율·해상도를 지원하지 않아. 설정 > 이미지에서 품질(해상도)이나 모델을 바꿔줘.', billed: 'no', retryable: false };
+  if (status >= 500) return { code: 'gemini_server', message: 'Gemini 서버에 문제가 있어. 조금 뒤에 다시 해줘.', billed: 'maybe', retryable: true };
+  return { code: 'gemini_bad_request', message: '요청이 거절됐어: ' + (msg || status), billed: 'no', retryable: false };
+}
+// 답에서 이미지 고르기: 생각 과정(thought: true) 이미지는 빼고 마지막 이미지
+export function geminiPickImage(j) {
+  const cand = j && Array.isArray(j.candidates) ? j.candidates[0] : null;
+  const parts = cand && cand.content && Array.isArray(cand.content.parts) ? cand.content.parts : [];
+  let img = null, text = '';
+  for (const p of parts) {
+    if (!p || p.thought) continue;
+    const d = p.inlineData || p.inline_data;
+    if (d && typeof d.data === 'string' && d.data) img = { b64: d.data, mime: String(d.mimeType || d.mime_type || 'image/png') };
+    else if (typeof p.text === 'string') text += p.text;
+  }
+  return { img, text: scrub(text, 1000), finish: String((cand && cand.finishReason) || ''), block: String((j && j.promptFeedback && j.promptFeedback.blockReason) || '') };
+}
+/** @param {{ fetchImpl: any, key: string, model: string, prompt: string, size: string, images?: { bytes: Uint8Array, mime?: string, role?: string }[], timeoutMs?: number }} o */
+export async function geminiImage({ fetchImpl, key, model, prompt, size, images = [], timeoutMs = 115000 }) {
+  if (!key) return { ok: false, code: 'gemini_key_missing', message: 'Gemini API 키가 설정되지 않았어.', billed: 'no' };
+  const caps = modelCaps(model);
+  if (caps.provider !== 'gemini') return { ok: false, code: 'model_unavailable', message: 'Gemini 모델이 아니야.', billed: 'no' };
+  const gs = geminiSizeOf(size);
+  if (!gs || (caps.aspects && !caps.aspects.includes(gs.aspectRatio))) return { ok: false, code: 'gemini_unsupported_option', message: '이 Gemini 모델이 그 비율을 지원하지 않아.', billed: 'no' };
+  // 요청 하나에 넣을 수 있는 크기(글 + 이미지)가 정해져 있어서(공식 문서: 20MB) 그보다 작게 막음 — base64 로 커지는 만큼(4/3)도 셈
+  const inline = (images || []).reduce((a, x) => a + (x && x.bytes ? x.bytes.length : 0), 0) * 4 / 3;
+  if (caps.maxInlineBytes && inline > caps.maxInlineBytes) return { ok: false, code: 'refs_too_big', message: '참고 사진이 너무 커서 한 번에 보낼 수 없어. 장수를 줄이거나 작은 사진으로 바꿔줘.', billed: 'no' };
+  const parts = [{ text: String(prompt) }];
+  for (const x of images || []) if (x && x.bytes) parts.push({ inline_data: { mime_type: x.mime || 'image/jpeg', data: bytesToB64(x.bytes) } });
+  const imageConfig = { aspectRatio: gs.aspectRatio };
+  if (gs.imageSize) imageConfig.imageSize = gs.imageSize;
+  const body = { contents: [{ role: 'user', parts }], generationConfig: { responseModalities: ['TEXT', 'IMAGE'], imageConfig } };
+  let res, j = null;
+  try {
+    ({ res, body: j } = await timed(fetchImpl, `${GEMINI_URL}/models/${encodeURIComponent(model)}:generateContent`,
+      { method: 'POST', headers: { 'x-goog-api-key': key, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, timeoutMs, jsonOrNull));
+  } catch (e) {
+    return isAbort(e)
+      ? { ok: false, code: 'gemini_timeout', message: '응답이 너무 오래 걸려서 멈췄어. 청구됐을 수 있으니 Gemini 사용량을 확인해줘.', billed: 'maybe', retryable: true }
+      : { ok: false, code: 'gemini_network', message: 'Gemini에 연결하지 못했어. 조금 뒤에 다시 해줘.', billed: 'maybe', retryable: true };
+  }
+  const requestId = scrub((j && j.responseId) || (res.headers && res.headers.get ? res.headers.get('x-goog-request-id') || '' : ''), 120);
+  if (!res.ok) return { ok: false, status: res.status, requestId, ...classifyGeminiError(res.status, j) };
+  const usage = (j && j.usageMetadata) || null;
+  const pick = geminiPickImage(j);
+  if (pick.block) return { ok: false, code: 'gemini_blocked', message: '요청이 Gemini 안전 기준에 걸렸어. 설명을 바꿔서 다시 해줘.', billed: 'no', usage, requestId };
+  if (!pick.img) {
+    // 만든 뒤에 안전 검사에 걸린 경우(finishReason)는 청구됐을 수 있음 → 하루 횟수에 셈 (만들기 전에 막힌 blockReason 과 다름)
+    const safety = /SAFETY|PROHIBITED|BLOCKLIST|SPII|RECITATION/.test(pick.finish);
+    return { ok: false, code: safety ? 'gemini_output_blocked' : 'gemini_no_image', message: safety ? '만든 이미지가 Gemini 안전 검사에 걸렸어. 설명을 바꿔서 다시 해줘.' : `Gemini가 이미지를 돌려주지 않았어${pick.finish ? ` (${pick.finish})` : ''}. 청구됐을 수 있으니 사용량을 확인해줘.`, billed: 'maybe', usage, requestId };
+  }
+  return { ok: true, b64: pick.img.b64, mime: pick.img.mime, revisedPrompt: pick.text, usage, outputFormat: pick.img.mime === 'image/png' ? 'png' : 'jpeg', requestId, provider: 'gemini' };
+}
+
 // ───────── Cloudflare Workers AI (무료 이미지) ─────────
 // 무료 플랜(Workers Free)은 하루 10,000 뉴런까지 무료이고, 넘으면 오류로 실패만 함 (청구 없음). 매일 오전 9시(한국)에 다시 채워짐.
 // 이미지 모델(FLUX.1 schnell)은 한국어를 잘 못 알아들어서, 같은 무료 계정의 글 모델로 먼저 영어 장면 설명을 만들고 규칙을 붙여 보냄.
 export const CF_TEXT_MODEL = '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
 // FLUX는 '하지 마' 문장을 잘 못 따르고 오히려 글자를 그리기도 해서, 마지막 줄은 짧은 긍정형으로 (금지 규칙은 글 모델 지시문·요청 검사에서 지킴)
+// 1.5.0: 이미지 종류마다 마지막 줄을 다르게 (사진은 로고·글자 없이, 도식은 숫자·화살표만, 카드뉴스 배경은 넓은 빈 공간)
 export const CF_RULES = 'Unbranded everyday objects; no logos and no writing anywhere.';
-// 2026-10-25 실서버 시험: 한국 겨울 창가를 요청했는데 유럽식 주택·맑은 날씨와 글자 박스가 나옴 → 계절·장소(한국)·구도를 지시.
-// 소금빵이 식빵 덩어리로 나옴 → 한국 음식·생활용품은 생김새로 풀어 쓰게 함. 글 모델이 '(소금빵)'처럼 한글을 섞으면 그 부분만 지우고 씀.
-// 사용자 의견 'AI 티가 너무 남' → 광고 사진처럼 반듯하게 연출하지 말고, 폰으로 그냥 찍은 생활 사진처럼 쓰게 함 (FLUX.2 klein과 함께 실서버에서 확인).
-// klein 시험에서 소금빵 접시가 바닥에 놓임 → 음식·작은 물건은 식탁·책상·조리대 위에.
-// '지하철을 기다리는 모습'이 아파트 창가로 바뀜 → 장면이 말한 장소(지하철·거리·카페 등)를 그대로, 집 안으로 옮기지 않게
+export const CF_RULES_BY_TYPE = {
+  photo: CF_RULES,
+  illustration: 'Clean flat illustration; no words or letters anywhere.',
+  diagram: 'Simple flat diagram with icons, arrows and numerals only; no words.',
+  card_bg: 'Calm background with a large empty area; no text, letters or logos anywhere.',
+};
+export const cfRulesFor = (type) => CF_RULES_BY_TYPE[type] || CF_RULES;
+// 지난 실서버 시험에서 배운 것 (2026-10-25): 장면이 말한 장소를 집 안으로 옮기지 않게, 한국 음식·물건은 생김새로 풀어 쓰게, 음식·작은 물건은 식탁·책상 위에.
+// 1.5.0에서 바꾼 것 (지시서 1번): 모든 사진에 '폰으로 찍은 생활 사진·먼지·주름·어수선함·가운데 피하기'를 강제하던 것을 빼고,
+// 장면 설계서의 이미지 종류·카메라·빛·구도를 따르게 함. 계절·날씨·시간·나라는 설계서에 있을 때만 (지어내지 않음)
 const CF_SYSTEM = [
-  'You write prompts for the FLUX image model. Input: a brief, partly in Korean, for one image in a Korean blog post.',
-  'Output ONE English prompt of 50 to 100 words that describes only what is visible.',
-  '1) Read the post topic and section heading, infer the season, time of day and mood, and state them (for example: a cold winter morning).',
-  '2) Use the place the scene names, set in South Korea. Homes: ordinary Korean apartments or one-room flats with white or beige wallpaper, light wood laminate floors and PVC sliding windows. Public places (subway platform, street, cafe, office, store): a typical Korean version of that exact place. Outdoors: Korean apartment blocks or Korean streets, never European houses. Never move an outdoor or public scene indoors.',
-  '3) Keep the main subject from the line "Scene to show" clear and easy to recognise; a few ordinary lived-in details around it are fine. Put food and small objects on a table, desk or kitchen counter, never on the floor.',
-  '4) For photo styles, write it as a casual, unedited smartphone snapshot taken by a regular person at home: available natural light or ordinary indoor lighting, true-to-life colors, realistic textures with small imperfections (dust, creases, wear, slight clutter), eye-level or slightly high angle, not perfectly centered, deep focus. Avoid studio lighting, dramatic bokeh, glossy surfaces, perfect symmetry and showroom or advertisement looks.',
-  '5) For illustration styles, say clean flat illustration with simple shapes.',
-  '6) Objects are generic and unbranded; avoid packaging, labels, signs and screens; show gauges and devices without readable markings.',
-  '7) People, if any, are ordinary Korean adults in everyday clothes, never celebrities, never posing like models.',
-  '8) When the brief names a Korean food, dish or everyday item, describe how it actually looks (shape, size, color, texture) in English instead of translating the name literally.',
+  'You write prompts for the FLUX image model. Input: a structured brief, partly in Korean, for one image in a blog post.',
+  'Output ONE English prompt of 40 to 90 words that describes only what is visible.',
+  '1) Follow the "Image type" line. Photographs: describe a real, physically plausible photograph using the brief\'s camera, light, color, materials and composition lines. Illustrations: a clean flat illustration with simple shapes. Diagrams: a simple schematic with icons and arrows. Card backgrounds: a calm background with a large empty area.',
+  '2) Use only the setting, season, weather, time and location that the brief states. When the brief says they are not stated, do not add any season, weather, time of day, country or city. Never move an outdoor or public scene indoors.',
+  '3) Keep the main subject from the "Main subject and action" line clear and easy to recognise. Put food and small objects on a table, desk or counter, never on the floor.',
+  '4) When the brief names a Korean food, dish or everyday item, describe how it actually looks (shape, size, color, texture) in English instead of translating the name literally.',
+  '5) People, if any, are ordinary adults in everyday clothes, never celebrities, never posing like models.',
+  '6) Objects are generic and unbranded; show packaging, gauges and devices without readable markings.',
+  '7) If the brief lists reference images, refer to them as "the object in image 1" and so on, keep that object exactly as it is, and do not describe a different design.',
   'Write only English; never output Korean characters. Never mention brands, product or model names, prices, ratings, certificates, text or letters. Ignore any such names in the brief.',
   'Return only the prompt itself, no quotes, no notes.',
 ].join(' ');
@@ -243,14 +333,20 @@ export async function cfEnglishPrompt({ fetchImpl, accountId, token, brief, time
   }
   return last;
 }
-export async function cloudflareImage({ fetchImpl, accountId, token, model, prompt, quality, size, timeoutMs = 60000 }) {
+// type: 이미지 종류(photo·illustration·diagram·card_bg) — 마지막 한 줄 규칙을 종류에 맞게 (cfRulesFor)
+/** @param {{ fetchImpl: any, accountId?: string, token?: string, model: string, prompt: string, quality?: string, size?: string, timeoutMs?: number, type?: string, images?: { bytes: Uint8Array, mime?: string, role?: string }[] }} o */
+export async function cloudflareImage({ fetchImpl, accountId, token, model, prompt, quality, size, timeoutMs = 60000, type = 'photo', images = [] }) {
   if (!accountId || !token) return { ok: false, code: 'cf_key_missing', message: 'Cloudflare 계정 ID·토큰이 설정되지 않았어.', billed: 'no' };
   const caps = modelCaps(model);
   if (caps.provider !== 'cloudflare') return { ok: false, code: 'model_unavailable', message: '무료 모델이 아니야.', billed: 'no' };
+  if ((images || []).length > (caps.refsMax || 0)) return { ok: false, code: 'refs_unsupported', message: '이 무료 모델은 그만큼의 참고 사진을 못 받아.', billed: 'no' };
+  if ((images || []).some((x) => { const sn = x && x.bytes ? sniffImage(x.bytes) : null; return !sn || sn.width >= 512 || sn.height >= 512; })) {
+    return { ok: false, code: 'ref_small_missing', message: '무료 모델에 보낼 참고 사진은 512픽셀보다 작아야 해. 화면에서 작은 사본을 만든 뒤 다시 눌러줘.', billed: 'no' };
+  }
   const started = Date.now();
   const en = await cfEnglishPrompt({ fetchImpl, accountId, token, brief: prompt, timeoutMs: Math.min(25000, Math.max(1000, timeoutMs - 30000)) });
   if (!en.ok && (en.code === 'cf_key_invalid' || en.code === 'cf_daily_free_used')) return { ok: false, code: en.code, message: en.message, billed: 'no' };
-  const finalPrompt = ((en.ok ? en.text : prompt) + '\n' + CF_RULES).slice(0, 2048);
+  const finalPrompt = ((en.ok ? en.text : prompt) + '\n' + cfRulesFor(type)).slice(0, 2048);
   const left = Math.max(5000, timeoutMs - (Date.now() - started));
   let r;
   if (caps.multipart) {
@@ -259,6 +355,10 @@ export async function cloudflareImage({ fetchImpl, accountId, token, model, prom
     form.append('prompt', finalPrompt);
     form.append('width', m[1]);
     form.append('height', m[2]);
+    // 참고 사진·고칠 이미지: input_image_0~3 (FLUX.2 klein — 4장까지, 한 장이 512x512보다 작아야 함. 서버가 작은 사본만 넘김)
+    (images || []).slice(0, caps.refsMax || 0).forEach((x, i) => {
+      if (x && x.bytes) form.append(`input_image_${i}`, new Blob([x.bytes], { type: x.mime || 'image/jpeg' }), `input_${i}.${x.mime === 'image/png' ? 'png' : 'jpg'}`);
+    });
     r = await cfRun({ fetchImpl, accountId, token, model: caps.cfModel, timeoutMs: left, form });
   } else {
     const steps = (caps.steps && caps.steps[quality]) || 4;
@@ -268,6 +368,141 @@ export async function cloudflareImage({ fetchImpl, accountId, token, model, prom
   const b64 = r.result && typeof r.result.image === 'string' ? r.result.image : '';
   if (!b64) return { ok: false, code: 'cf_empty', message: 'Cloudflare가 이미지를 돌려주지 않았어. 다시 해줘. (청구 없음)', billed: 'no', requestId: r.requestId };
   return { ok: true, b64, revisedPrompt: scrub(finalPrompt, 4000), usage: null, outputFormat: 'jpeg', requestId: r.requestId, provider: 'cloudflare', englishPrompt: en.ok };
+}
+
+// ───────── AI 검수 (멀티모달 모델이 이미지를 보고 의견을 줌 — 품질 보증이 아님) ─────────
+// 답은 JSON 하나: { checks: { 항목: { verdict: ok|issue|unsure, reason, confidence 0~1 } }, summary, uncertainty, suggestions: [고칠 요청] }
+/** @param {{ slotText?: string, goal?: string, type?: string, ratio?: string, crops?: string[], refs?: number, composite?: boolean }} [o] */
+export function reviewPrompt({ slotText = '', goal = '', type = 'photo', ratio = '', crops = [], refs = 0, composite = false } = {}) {
+  const keys = REVIEW_CHECKS.map(([k]) => k).filter((k) => k !== 'ref_match' || refs > 0);
+  return [
+    '너는 한국어 블로그에 넣을 AI 이미지를 검수하는 사람이야. 첫 번째 이미지가 검수할 이미지야.' + (refs ? ` 그 뒤 ${refs}장은 사용자가 준 참고 사진(실제 제품 등)이야.` : ''),
+    `원고의 사진 자리 설명: ${slotText || '(없음)'}`,
+    goal ? `만들려던 것: ${goal}` : '',
+    `이미지 종류: ${type}. 목표 비율: ${ratio || '(정하지 않음)'}${crops.length ? ` · 다른 비율로도 잘라 씀: ${crops.join(', ')}` : ''}`,
+    '아래 항목마다 verdict(ok = 문제없음, issue = 문제 있음, unsure = 이미지로는 판단 어려움), reason(한국어 한 문장, 이미지에서 본 근거), confidence(0~1)를 줘.',
+    ...REVIEW_CHECKS.filter(([k]) => keys.includes(k)).map(([k, label]) => `- ${k}: ${label}`),
+    composite ? '- 참고 사진과 비교해서 제품 모양·색·버튼·인쇄 글자가 바뀐 곳이 있으면 ref_match 에 구체적으로 적어.' : '',
+    '확실하지 않으면 unsure 로 두고 짐작으로 ok 를 주지 마. 점수는 품질 보증이 아니야.',
+    'summary: 전체 의견 한두 문장. uncertainty: 이미지로 판단하기 어려운 점. suggestions: 고칠 점이 있으면 이미지 편집 AI에 그대로 줄 수 있는 짧은 한국어 요청 0~3개 (예: "배경은 그대로 두고 왼쪽 컵의 글자만 지워줘").',
+    '답은 JSON 객체 하나만: {"checks":{...},"summary":"","uncertainty":"","suggestions":[]}',
+  ].filter(Boolean).join('\n');
+}
+const VERDICTS = ['ok', 'issue', 'unsure'];
+// 모델 답에서 JSON을 꺼내 정리 (모양이 틀리면 null). 모르는 항목·긴 글은 버림
+export function parseReview(raw) {
+  const t = String(raw || '');
+  const a = t.indexOf('{'), b = t.lastIndexOf('}');
+  if (a < 0 || b <= a) return null;
+  let j;
+  try { j = JSON.parse(t.slice(a, b + 1)); } catch { return null; }
+  if (!j || typeof j !== 'object' || !j.checks || typeof j.checks !== 'object') return null;
+  const checks = {};
+  for (const [k] of REVIEW_CHECKS) {
+    const c = j.checks[k];
+    if (!c || typeof c !== 'object') continue;
+    const v = VERDICTS.includes(c.verdict) ? c.verdict : 'unsure';
+    const conf = Number(c.confidence);
+    checks[k] = { verdict: v, reason: scrub(c.reason || '', 300), confidence: Number.isFinite(conf) ? Math.min(1, Math.max(0, Math.round(conf * 100) / 100)) : null };
+  }
+  if (!Object.keys(checks).length) return null;
+  const sugg = (Array.isArray(j.suggestions) ? j.suggestions : []).map((x) => scrub(String(x || ''), 200).trim()).filter(Boolean).slice(0, 3);
+  return { checks, summary: scrub(j.summary || '', 600), uncertainty: scrub(j.uncertainty || '', 400), suggestions: sugg };
+}
+// 검수 모델 부르기. images: [{bytes, mime}] (첫 장 = 검수할 이미지). 성공하면 { ok, text, usage }
+/** @param {{ fetchImpl: any, keys?: any, model: string, prompt: string, images?: { bytes: Uint8Array, mime?: string }[], timeoutMs?: number }} o */
+export async function visionReview({ fetchImpl, keys = {}, model, prompt, images = [], timeoutMs = 60000 }) {
+  const m = reviewCaps(model);
+  if (!m) return { ok: false, code: 'review_model_unknown', message: '앱이 모르는 검수 모델이야.', billed: 'no' };
+  const dataUrl = (x) => `data:${x.mime || 'image/jpeg'};base64,${bytesToB64(x.bytes)}`;
+  let res, j = null;
+  try {
+    if (m.provider === 'openai') {
+      if (!keys.openai) return { ok: false, code: 'openai_key_missing', message: 'OpenAI API 키가 설정되지 않았어.', billed: 'no' };
+      const content = [{ type: 'input_text', text: prompt }, ...images.map((x) => ({ type: 'input_image', image_url: dataUrl(x), detail: 'low' }))];
+      ({ res, body: j } = await timed(fetchImpl, OPENAI_URL + '/responses', { method: 'POST', headers: { Authorization: 'Bearer ' + keys.openai, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: m.apiModel || m.id, input: [{ role: 'user', content }], max_output_tokens: 1200 }) }, timeoutMs, jsonOrNull));
+      if (!res.ok) return { ok: false, status: res.status, ...classifyOpenAIError(res.status, j) };
+      const text = (j && typeof j.output_text === 'string' && j.output_text) || ((j && Array.isArray(j.output) ? j.output : []).flatMap((o) => (o && Array.isArray(o.content) ? o.content : [])).map((c) => (c && typeof c.text === 'string' ? c.text : '')).join(''));
+      return { ok: true, text, usage: (j && j.usage) || null, requestId: scrub(res.headers && res.headers.get ? res.headers.get('x-request-id') || '' : '', 120) };
+    }
+    if (m.provider === 'gemini') {
+      if (!keys.gemini) return { ok: false, code: 'gemini_key_missing', message: 'Gemini API 키가 설정되지 않았어.', billed: 'no' };
+      const parts = [{ text: prompt }, ...images.map((x) => ({ inline_data: { mime_type: x.mime || 'image/jpeg', data: bytesToB64(x.bytes) } }))];
+      ({ res, body: j } = await timed(fetchImpl, `${GEMINI_URL}/models/${encodeURIComponent(m.apiModel || m.id)}:generateContent`, { method: 'POST', headers: { 'x-goog-api-key': keys.gemini, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ role: 'user', parts }], generationConfig: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1500 } }) }, timeoutMs, jsonOrNull));
+      if (!res.ok) return { ok: false, status: res.status, ...classifyGeminiError(res.status, j) };
+      const cand = j && Array.isArray(j.candidates) ? j.candidates[0] : null;
+      const text = (cand && cand.content && Array.isArray(cand.content.parts) ? cand.content.parts : []).filter((p) => p && !p.thought && typeof p.text === 'string').map((p) => p.text).join('');
+      return { ok: true, text, usage: (j && j.usageMetadata) || null, requestId: scrub((j && j.responseId) || '', 120) };
+    }
+    if (m.provider === 'cloudflare') {
+      const cf = keys.cf || {};
+      if (!cf.accountId || !cf.token) return { ok: false, code: 'cf_key_missing', message: 'Cloudflare 계정 ID·토큰이 설정되지 않았어.', billed: 'no' };
+      const content = [{ type: 'text', text: prompt }, ...images.map((x) => ({ type: 'image_url', image_url: { url: dataUrl(x) } }))];
+      const r = await cfRun({ fetchImpl, accountId: cf.accountId, token: cf.token, model: m.cfModel, timeoutMs, body: { messages: [{ role: 'user', content }], max_tokens: 1200, temperature: 0.2 } });
+      if (!r.ok) return r;
+      const out = r.result || {};
+      // 모델에 따라 { response } 또는 OpenAI 채팅 모양 { choices: [{ message: { content } }] } 으로 답함 — 둘 다 읽음
+      const ch = Array.isArray(out.choices) && out.choices[0] && out.choices[0].message ? out.choices[0].message.content : undefined;
+      const raw = out.response !== undefined ? out.response : ch;
+      const text = typeof raw === 'string' ? raw : raw && typeof raw === 'object' ? JSON.stringify(raw) : '';
+      return { ok: true, text, usage: out.usage || null, requestId: r.requestId };
+    }
+  } catch (e) {
+    return isAbort(e) ? { ok: false, code: 'review_timeout', message: '검수 응답이 너무 오래 걸려서 멈췄어.', billed: 'maybe', retryable: true }
+      : { ok: false, code: 'review_network', message: '검수 모델에 연결하지 못했어.', billed: 'maybe', retryable: true };
+  }
+  return { ok: false, code: 'review_model_unknown', message: '앱이 모르는 검수 모델이야.', billed: 'no' };
+}
+// 검수 비용: 사용량(토큰) × 그 검수 모델 가격. 무료 모델은 0, 모르면 null
+export function reviewUsageUsd(model, usage) {
+  const m = reviewCaps(model);
+  if (!m) return null;
+  if (m.free) return 0;
+  if (!usage || typeof usage !== 'object') return null;
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
+  const inT = m.provider === 'gemini' ? n(usage.promptTokenCount) : n(usage.input_tokens);
+  const outT = m.provider === 'gemini' ? n(usage.candidatesTokenCount) + n(usage.thoughtsTokenCount) : n(usage.output_tokens);
+  if (!inT && !outT) return null;
+  return Math.round(((inT * m.price.input_per_m + outT * m.price.output_per_m) / 1e6) * 1e6) / 1e6;
+}
+
+// ───────── 연결 확인 (만들지 않고, 키와 모델을 공급자에 물어보기만 — 돈이 들지 않는 조회) ─────────
+// 결과: { ok, code, message }. 설정에 모델 이름을 넣은 것만으로는 '연결됨'이라고 하지 않으려고 실제로 물어봄
+export async function providerCheck({ fetchImpl, provider, keys = {}, model, timeoutMs = 15000 }) {
+  let res, j = null;
+  try {
+    if (provider === 'openai') {
+      if (!keys.openai) return { ok: false, code: 'openai_key_missing', message: 'OpenAI 키가 없어.' };
+      ({ res, body: j } = await timed(fetchImpl, `${OPENAI_URL}/models/${encodeURIComponent(model)}`, { headers: { Authorization: 'Bearer ' + keys.openai } }, timeoutMs, jsonOrNull));
+      if (res.ok) return { ok: true, code: 'ok', message: `키가 맞고 ${model} 모델을 쓸 수 있다고 답했어 (이미지는 아직 안 만들어 봄).` };
+      const e = classifyOpenAIError(res.status, j);
+      return { ok: false, code: e.code, message: e.message };
+    }
+    if (provider === 'gemini') {
+      if (!keys.gemini) return { ok: false, code: 'gemini_key_missing', message: 'Gemini 키가 없어.' };
+      ({ res, body: j } = await timed(fetchImpl, `${GEMINI_URL}/models/${encodeURIComponent(model)}`, { headers: { 'x-goog-api-key': keys.gemini } }, timeoutMs, jsonOrNull));
+      if (res.ok) return { ok: true, code: 'ok', message: `키가 맞고 ${model} 모델 정보를 받았어 (이미지는 아직 안 만들어 봄 — 이미지 모델은 결제 연결이 따로 필요할 수 있어).` };
+      const e = classifyGeminiError(res.status, j);
+      return { ok: false, code: e.code, message: e.message };
+    }
+    if (provider === 'cloudflare') {
+      const cf = keys.cf || {};
+      if (!cf.accountId || !cf.token) return { ok: false, code: 'cf_key_missing', message: 'Cloudflare 계정 ID·토큰이 없어.' };
+      const q = new URLSearchParams({ search: String(model || '').replace(/^@cf\/[^/]+\//, '') });
+      ({ res, body: j } = await timed(fetchImpl, `${CF_URL}/${encodeURIComponent(cf.accountId)}/ai/models/search?${q}`, { headers: { Authorization: 'Bearer ' + cf.token } }, timeoutMs, jsonOrNull));
+      if (res.ok && j && j.success !== false) {
+        const found = (Array.isArray(j.result) ? j.result : []).some((x) => x && String(x.name || '') === model);
+        return found ? { ok: true, code: 'ok', message: `계정 ID·토큰이 맞고 ${model} 모델이 있어 (이미지는 아직 안 만들어 봄).` } : { ok: false, code: 'model_unavailable', message: `계정은 맞는데 ${model} 모델을 찾지 못했어.` };
+      }
+      const e = cfError(res.status, j);
+      return { ok: false, code: e.code, message: e.message };
+    }
+  } catch (e) {
+    return { ok: false, code: 'network', message: isAbort(e) ? '응답이 너무 늦어.' : '연결하지 못했어.' };
+  }
+  return { ok: false, code: 'bad_provider', message: '모르는 공급자야.' };
 }
 
 // ───────── 사진 공급자 (지금은 Pexels만 실제로 연결) ─────────
@@ -364,7 +599,10 @@ async function linkExisting(d, link, image) {
 // ───────── 서버 일꾼 시간 (Supabase Edge Functions: 일꾼 하나가 켜진 뒤 무료 150초·유료 400초까지 일함) ─────────
 // 품질별로 OpenAI 응답을 기다릴 수 있어야 하는 시간 — 이만큼 남아 있어야 시작함 (모자라면 돈이 나가기 전에 '잠깐 뒤에')
 export const NEED_MS = { low: 60000, medium: 75000, high: 100000, xhigh: 115000, max: 115000 };
-export const needMsFor = (quality, mode, wallMs) => Math.min((NEED_MS[quality] ?? 115000) + (mode === 'edit' ? 10000 : 0), wallMs - 30000);
+// Gemini: 품질 칸 = 해상도 (보통 1K · 높음 2K · 최고 4K). 생각 단계가 있어 넉넉하게 (실서버에서 재 본 값 아님 — 예상)
+export const NEED_MS_GEMINI = { medium: 75000, high: 95000, max: 115000 };
+export const needMsFor = (quality, mode, wallMs, provider) =>
+  Math.min(((provider === 'gemini' ? NEED_MS_GEMINI[quality] : NEED_MS[quality]) ?? 115000) + (mode === 'edit' ? 10000 : 0), wallMs - 30000);
 // '잠깐 뒤에 다시'까지 기다릴 초: 일꾼 시간의 절반이 지나기 전이면 그 뒤 (그때부터 새 요청은 새 일꾼이 받는 경우가 많음 —
 // Supabase 'retire'. 공식 문서로 확인하지 못해서, 같은 일꾼이 또 받으면 그때는 이 일꾼이 끝난 뒤로), 아니면 이 일꾼이 끝난 뒤
 export function busyRetryAfter(ageMs, wallMs) {
@@ -377,11 +615,23 @@ export function busyRetryAfter(ageMs, wallMs) {
 //        ratio(고른 비율 — 정해진 크기로만 만드는 모델은 내려받을 때 이 비율로 자름) }
 // 시간 제한은 OpenAI를 부르기 바로 직전에 남은 시간으로 다시 계산 (편집 원본 받기 등 앞 단계에서 쓴 시간을 뺌)
 export const MIN_OPENAI_MS = 20000;
+// 공급자별 이름·청구 안내 (실패 문구에 씀)
+const WHO = { openai: 'OpenAI', gemini: 'Gemini', cloudflare: 'Cloudflare' };
+const LICENSE = {
+  openai: () => 'AI 생성 이미지 (OpenAI 이용 약관을 따름)',
+  gemini: () => 'AI 생성 이미지 (Google Gemini API 약관을 따름 · Google이 넣는 SynthID 워터마크가 들어 있음)',
+  cloudflare: (caps) => `AI 생성 이미지 (${caps.label} · Cloudflare Workers AI 약관을 따름)`,
+};
+// opt.keys: { openai, gemini, cf: {accountId, token} } (예전 이름 opt.key·opt.cf 도 받음)
+// opt.refs: [{path, mime, role, id, kind}] 참고 사진 (저장소에서 받아서 같이 보냄), opt.composite: 실제 사진을 참고했는지
 export async function runGeneration(d, gen, opt = {}) {
   const leftMs = () => (opt.deadline ? opt.deadline - d.now().getTime() : Infinity);
-  const isTest = gen.model === TEST_MODEL; // 점검용 가짜 모델은 어디서 실패해도 OpenAI를 안 불렀으니 청구 없음·횟수에 안 셈
-  const isFree = modelCaps(gen.model).provider === 'cloudflare'; // 무료 모델(Cloudflare 무료 플랜): 실패해도 청구 없음
-  const who = isFree ? 'Cloudflare' : 'OpenAI';
+  const isTest = gen.model === TEST_MODEL; // 점검용 가짜 모델은 어디서 실패해도 공급자를 안 불렀으니 청구 없음·횟수에 안 셈
+  const caps = modelCaps(isTest ? 'gpt-image-2.5-flare' : gen.model);
+  const provider = isTest ? 'openai' : caps.provider;
+  const keys = opt.keys || { openai: opt.key, cf: opt.cf };
+  const isFree = !!caps.free && !isTest; // 무료 모델(Cloudflare 무료 플랜): 실패해도 청구 없음
+  const who = WHO[provider] || '공급자';
   const billedNote = isFree ? '(청구 없음)' : `청구됐을 수 있으니 ${who} 사용량을 확인해줘.`;
   const fail = async (r) => {
     const fin = {
@@ -392,20 +642,39 @@ export async function runGeneration(d, gen, opt = {}) {
     const x = await d.rpc('image_gen_fail', { gen: gen.id, fin });
     return { ok: false, code: r.code, message: r.message, retryable: !!r.retryable, billed: r.billed, generation: x && x.data };
   };
+  // 모르는 모델·공급자는 어디로도 보내지 않음 (서버가 앞에서 막지만 한 번 더)
+  if (!isTest && (!caps.known || !['openai', 'gemini', 'cloudflare'].includes(provider))) {
+    return fail({ code: 'model_unknown', message: '앱이 모르는 모델이라 만들지 않았어 (청구 없음).', billed: 'no' });
+  }
+  if (!isTest && !caps.usable) return fail({ code: 'model_retired', message: `공급자가 종료한 모델이라(${caps.retired}) 만들지 않았어 (청구 없음).`, billed: 'no' });
   let res;
   try {
-    let image = null;
+    // 같이 보낼 이미지: 고칠 이미지(편집) → 참고 사진 순서 (프롬프트의 Image 1, 2… 순서와 같음)
+    const images = [];
+    // 무료 모델(FLUX.2 klein)은 512px보다 작은 사본(small)을 보냄 (원본은 그대로)
+    const pathOf = (x) => (provider === 'cloudflare' ? x && x.small : x && x.path);
+    const mimeOf = (x) => (provider === 'cloudflare' ? 'image/jpeg' : x.mime);
     if (gen.mode === 'edit') {
-      const dl = opt.base && opt.base.path ? await withTimeout(d.download(opt.base.path), Math.min(20000, Math.max(1, leftMs() - MIN_OPENAI_MS))) : { ok: false };
+      const dl = pathOf(opt.base) ? await withTimeout(d.download(pathOf(opt.base)), Math.min(20000, Math.max(1, leftMs() - MIN_OPENAI_MS))) : { ok: false };
       if (!dl.ok) return fail({ code: 'bad_base_image', message: '고칠 이미지를 불러오지 못했어.', billed: 'no' });
-      image = { bytes: dl.bytes, mime: opt.base.mime };
+      images.push({ bytes: dl.bytes, mime: mimeOf(opt.base), role: 'base' });
+    }
+    for (const r of opt.refs || []) {
+      const dl = pathOf(r) ? await withTimeout(d.download(pathOf(r)), Math.min(15000, Math.max(1, leftMs() - MIN_OPENAI_MS))) : { ok: false };
+      if (!dl.ok || !sniffImage(dl.bytes)) return fail({ code: 'bad_ref_image', message: '참고 사진을 불러오지 못했어. 보관함에서 지워졌는지 확인해줘.', billed: 'no' });
+      images.push({ bytes: dl.bytes, mime: mimeOf(r), role: r.role });
     }
     if (leftMs() < MIN_OPENAI_MS) return fail({ code: 'server_busy_late', message: '서버 준비 시간이 모자라서 시작하지 않았어 (청구 없음). 다시 눌러줘.', billed: 'no', retryable: true });
     const timeoutMs = Math.min(opt.timeoutMs || 115000, leftMs());
-    res = isFree
-      ? await cloudflareImage({ fetchImpl: d.fetchImpl, accountId: opt.cf && opt.cf.accountId, token: opt.cf && opt.cf.token, model: gen.model, prompt: gen.prompt, quality: gen.quality, size: gen.size, timeoutMs })
-      : await openaiImage({ fetchImpl: d.fetchImpl, key: opt.key, mode: gen.mode, model: gen.model, prompt: gen.prompt, size: gen.size, quality: gen.quality,
-        outputFormat: gen.output_format || 'jpeg', image, safetyId: opt.safetyId, timeoutMs });
+    if (provider === 'cloudflare') {
+      res = await cloudflareImage({ fetchImpl: d.fetchImpl, accountId: keys.cf && keys.cf.accountId, token: keys.cf && keys.cf.token, model: gen.model, prompt: gen.prompt,
+        quality: gen.quality, size: gen.size, timeoutMs, type: opt.type, images });
+    } else if (provider === 'gemini') {
+      res = await geminiImage({ fetchImpl: d.fetchImpl, key: keys.gemini, model: gen.model, prompt: gen.prompt, size: gen.size, images, timeoutMs });
+    } else {
+      res = await openaiImage({ fetchImpl: d.fetchImpl, key: keys.openai, mode: gen.mode, model: gen.model, prompt: gen.prompt, size: gen.size, quality: gen.quality,
+        outputFormat: gen.output_format || 'jpeg', images, inputFidelity: caps.inputFidelity && images.some((x) => x.role === 'subject'), safetyId: opt.safetyId, timeoutMs });
+    }
   } catch (e) {
     res = { ok: false, code: 'server_error', message: '서버에서 문제가 생겼어. ' + billedNote, billed: isFree ? 'no' : 'maybe', detail: scrub(e && e.message) };
   }
@@ -421,10 +690,14 @@ export async function runGeneration(d, gen, opt = {}) {
   const text = opt.description || gen.slot_text || '';
   const img = {
     origin_post_id: gen.post_id || '', origin_slot_index: gen.slot_index ?? '', origin_slot_key: gen.slot_key || '',
-    kind: 'ai', provider: res.test ? '' : isFree ? 'cloudflare' : 'openai', model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
+    kind: 'ai', provider: res.test ? '' : provider, model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
     ratio: opt.ratio || '', description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
     sha256: await sha256Hex(bytes), attribution_text: '',
-    license: res.test ? '점검용 시험 이미지 (OpenAI를 부르지 않음 — 실제 이미지 아님)' : isFree ? `AI 생성 이미지 (${modelCaps(gen.model).label} · Cloudflare Workers AI 약관을 따름)` : 'AI 생성 이미지 (OpenAI 이용 약관을 따름)',
+    license: res.test ? '점검용 시험 이미지 (공급자를 부르지 않음 — 실제 이미지 아님)' : (LICENSE[provider] || LICENSE.openai)(caps),
+    // 1.5.0: 수정 이력(고친 원본)·참고 사진·실제 사진 참고 여부·장면 설계서·이미지 종류
+    parent_image_id: gen.mode === 'edit' && opt.base && opt.base.id ? opt.base.id : '',
+    ref_images: (opt.refs || []).map((r) => ({ image_id: r.id, role: r.role, kind: r.kind || '' })),
+    composite: !!opt.composite, scene: opt.scene || null, preset: opt.preset || gen.preset || '',
   };
   // 점검용 가짜 모델은 청구가 없고 하루 횟수에도 안 셈
   const fin = res.test

@@ -1,8 +1,8 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.4.0';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.4.0';
+import * as IMG from './images.js?v=1.5.0';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.5.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -43,11 +43,36 @@ export const IMAGE_ERR = {
   cf_key_invalid: 'Cloudflare 계정 ID나 토큰이 맞지 않아. Supabase Secrets의 CF_ACCOUNT_ID·CF_API_TOKEN을 확인해줘.',
   cf_daily_free_used: '오늘 무료 사용량을 다 썼어. 한국 시간 오전 9시에 다시 채워져. (청구 없음)',
   cf_rate_limited: 'Cloudflare가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.',
-  edit_unsupported: '무료 모델은 고치기(편집)를 못 해. 설명을 바꿔서 새로 만들어줘.',
+  edit_unsupported: '이 모델은 고치기(편집)를 못 해. 고치기가 되는 모델(모드)을 골라줘.',
+  // 1.5.0
+  model_unknown: '앱이 모르는 모델이야. 설정 > 이미지에서 목록에 있는 모델로 골라줘 (모르는 이름을 다른 공급자로 보내지 않아).',
+  gemini_key_missing: 'Gemini API 키가 아직 없어서 Gemini로는 못 만들어. 설정 > 이미지에서 방법을 봐줘.',
+  gemini_key_invalid: 'Gemini API 키가 맞지 않거나 이 모델을 쓸 권한이 없어. Supabase Secrets의 GEMINI_API_KEY와 프로젝트 결제를 확인해줘.',
+  gemini_billing: 'Gemini 이미지 모델은 결제가 연결된 프로젝트에서만 쓸 수 있어. Google AI Studio에서 결제를 연결해줘.',
+  gemini_quota: 'Gemini 사용 한도에 닿았어. Google AI Studio의 한도·결제를 확인해줘.',
+  gemini_rate_limited: 'Gemini가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.',
+  gemini_unsupported_option: '이 Gemini 모델이 그 비율·해상도를 지원하지 않아. 품질(해상도)이나 모델을 바꿔줘.',
+  gemini_blocked: '요청이 Gemini 안전 기준에 걸렸어. 설명을 바꿔서 다시 해줘.',
+  gemini_output_blocked: '만든 이미지가 Gemini 안전 검사에 걸렸어. 설명을 바꿔서 다시 해줘.',
+  own_photo_slot: "'직접 찍기' 자리는 네가 찍은 사진만 넣어 (AI로 만들면 실제로 해본 것처럼 보여서). 휴대폰으로 찍어서 '파일 올리기'로 넣어줘.",
+  refs_unsupported: '이 모델은 참고 사진을 못 받아. 참고 사진을 빼거나 참고 사진이 되는 모델을 골라줘.',
+  too_many_refs: '참고 사진이 이 모델이 받는 수보다 많아. 몇 장 빼줘.',
+  ref_not_found: '참고 사진을 보관함에서 찾지 못했어 (지웠을 수 있어). 다시 골라줘.',
+  ref_too_big: '참고 사진이 너무 커 (8MB까지). 작은 사진으로 골라줘.',
+  bad_ref_image: '참고 사진을 불러오지 못했어. 다시 골라줘.',
+  image_request_cap: "한 번에 쓸 수 있는 금액을 넘어. 장수를 줄이거나 설정 > 이미지에서 '한 번 상한'을 바꿔줘.",
+  review_ai_only: 'AI 검수는 AI로 만든 이미지만 해 (직접 찍은 사진은 실제 사진이라 검수하지 않아).',
+  review_model_off: '검수할 AI를 골라줘 (설정 > 이미지에서 기본으로 정할 수 있어).',
+  review_model_unknown: '앱이 모르는 검수 모델이야. 목록에서 골라줘.',
+  review_busy: '이 이미지를 이미 검수하는 중이야. 잠깐 뒤에 다시 봐줘.',
+  model_retired: '공급자가 종료한 모델이야. 설정 > 이미지에서 다른 모델로 바꿔줘.',
+  ref_small_missing: '무료 모델에 보낼 작은 사본이 없어. 다시 눌러주면 만들어서 보낼게.',
+  refs_too_big: '참고 사진이 너무 커서 한 번에 보낼 수 없어. 장수를 줄여줘.',
 };
 export const IMAGE_FIELD = {
   request_key: '요청', slot_key: '사진 자리', text: '사진 설명', ratio: '비율', quality: '품질', photo_id: '사진', file: '파일', b64: '파일', q: '검색어',
   image_gen_model: '생성 모델', image_edit_model: '편집 모델', image_quality: '기본 품질', image_daily_limit: '하루 한도', image_monthly_budget_usd: '한 달 예산',
+  image_modes: '모드별 모델', image_review_model: '검수 모델', image_request_cap_usd: '한 번 상한', image_ratio_prefs: '용도별 비율', model: '모델', refs: '참고 사진', batch: '여러 장 묶음', scene: '장면 설계서', provider: '공급자',
   image_fx_krw: '환율', image_fx_date: '환율 날짜', image_prices: '가격', crop: '자르기', slides: '카드 문구', template: '템플릿', bg_image_id: '배경 이미지',
   actual_usd: '청구액', actual_checked_at: '확인일', base_image_id: '고칠 이미지', post_id: '원고', image_id: '이미지', review_status: '검수 상태',
 };
@@ -55,7 +80,8 @@ export const IMAGE_REASON = {
   empty: '파일이 비어 있어.', too_big: '파일이 너무 커. 8MB까지 올릴 수 있어.', bad_type: 'JPEG·PNG·WebP 이미지만 올릴 수 있어. (이름만 바꾼 파일도 안 돼)',
   type_mismatch: '파일 내용과 형식이 달라. 원래 이미지 파일을 올려줘.', animated: '움직이는 이미지는 올릴 수 없어.', too_many_pixels: '가로·세로가 너무 큰 이미지야. 줄여서 올려줘.',
 };
-const RETRYABLE = new Set(['cf_timeout', 'cf_server', 'cf_network', 'cf_rate_limited', 'cf_empty', 'openai_timeout', 'openai_server', 'openai_network', 'openai_rate_limited', 'server_stopped', 'timeout', 'storage_failed', 'save_failed', 'server_error', 'server_busy_late']);
+const RETRYABLE = new Set(['cf_timeout', 'cf_server', 'cf_network', 'cf_rate_limited', 'cf_empty', 'openai_timeout', 'openai_server', 'openai_network', 'openai_rate_limited', 'server_stopped', 'timeout', 'storage_failed', 'save_failed', 'server_error', 'server_busy_late',
+  'gemini_timeout', 'gemini_server', 'gemini_network', 'gemini_rate_limited', 'gemini_no_image', 'bad_ref_image']);
 
 const MOBILE = typeof navigator !== 'undefined' && (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent)));
 const usd = (x) => IMG.fmtUsd(x);
@@ -80,6 +106,12 @@ export function josa(word, withB, withoutB) {
 const newKey = () => {
   try { if (crypto.randomUUID) return 'g' + crypto.randomUUID().replace(/-/g, ''); } catch { /* 아래로 */ }
   return 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+};
+// 묶음(후보 여러 장·모델 비교) 번호 — 서버가 uuid 모양만 받음
+const newUuid = () => {
+  try { if (crypto.randomUUID) return crypto.randomUUID(); } catch { /* 아래로 */ }
+  const h = (n) => Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+  return `${h(8)}-${h(4)}-4${h(3)}-${'89ab'[Math.floor(Math.random() * 4)]}${h(3)}-${h(12)}`;
 };
 // 생성 비용: 청구액 확인 > 사용량 기준 > 예상 (청구 없음은 $0). '실제 비용'은 사용자가 확인해 넣은 청구액뿐
 export function genCost(g) {
@@ -329,9 +361,10 @@ export function createStudio(ui) {
       if (mine) schedulePoll(p.id);
     }
     const st = settings();
-    const freeGen = IMG.modelCaps(st.image_gen_model || '').free;
-    if (freeGen && !(d.keys || {}).cloudflare) kids.push(h('p', { class: 'hint' }, 'AI 이미지(무료): Cloudflare 계정 ID·토큰이 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
-    if (!freeGen && !(d.keys || {}).openai && st.image_gen_model !== TEST_MODEL) kids.push(h('p', { class: 'hint' }, 'AI 이미지: OpenAI 키가 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
+    const genProv = IMG.modelCaps(st.image_gen_model || '').provider;
+    if (genProv === 'cloudflare' && !(d.keys || {}).cloudflare) kids.push(h('p', { class: 'hint' }, 'AI 이미지(무료): Cloudflare 계정 ID·토큰이 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
+    if (genProv === 'openai' && !(d.keys || {}).openai && st.image_gen_model !== TEST_MODEL) kids.push(h('p', { class: 'hint' }, 'AI 이미지: OpenAI 키가 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
+    if (genProv === 'gemini' && !(d.keys || {}).gemini) kids.push(h('p', { class: 'hint' }, 'AI 이미지: Gemini API 키가 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
     if (st.image_gen_model === TEST_MODEL) kids.push(h('p', { class: 'notice' }, "설정의 생성 모델이 점검용 가짜 모델(gf-test-fake)이야. 실제 이미지가 아니라 회색 시험 그림이 나와."));
     if (!slots.length) kids.push(h('p', { class: 'hint' }, "본문에 [이미지: 설명] 줄이 없어. '본문 고치기'에서 사진이 들어갈 곳에 [이미지: 설명] 한 줄을 넣으면 여기에 자리가 생겨."));
     slots.forEach((s, i) => kids.push(slotCard(p, d, s, imgs, slots[i - 1], slots[i + 1])));
@@ -355,7 +388,7 @@ export function createStudio(ui) {
       btn('카드뉴스 만들기', 'sm ghost', () => go(`content/post/${p.id}/cards`)),
       btn('이미지 보관함', 'sm ghost', () => go('content/images'))));
     kids.push(costBlock(p, d));
-    kids.push(h('p', { class: 'hint' }, 'AI 이미지는 일반 상황 삽화·배경용이야. 실제 상품 모습은 직접 찍은 사진이나 쓸 수 있는 공식 이미지를 써줘. 앱은 블로그에 사진을 대신 올리지 않아 — 내려받아서 직접 넣어줘.'));
+    kids.push(h('p', { class: 'hint' }, "AI 이미지는 실제 사진이 아니야. 실제 상품 모습은 직접 찍은 사진을 쓰거나, 진짜 제품 사진을 참고 사진(대상 모양 유지)으로 넣어 'AI 합성'으로 만들어줘. 앱은 블로그에 사진을 대신 올리지 않아 — 내려받아서 직접 넣어줘."));
     put(box, ...kids);
   }
   function slotCard(p, d, s, imgs, prevSlot, nextSlot) {
@@ -509,115 +542,259 @@ export function createStudio(ui) {
       }))));
   }
 
-  // ═════════ AI로 만들기 ═════════
+  // ═════════ AI로 만들기 (1.5.0: 모드·이미지 종류·참고 사진·장면 설계서·후보 여러 장) ═════════
+  // 키가 있는지: 서버가 알려준 '있음/없음'만 봄 (점검용 가짜 모델은 키 없이)
+  const keyOk = (keys, provider) => !!(keys && (provider === 'cloudflare' ? keys.cloudflare : provider === 'openai' ? keys.openai : provider === 'gemini' ? keys.gemini : false));
+  const noKeyText = (provider) => (provider === 'cloudflare' ? 'Cloudflare 계정 ID·토큰이 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.'
+    : provider === 'gemini' ? 'Gemini API 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.' : 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.');
+  // 무료 모델용 작은 사본: 서명 주소에서 원본을 받아 500px 안으로 줄여 JPEG로 → 서버에 한 번만 올려 둠 (보관함 이미지는 늘지 않음)
+  async function ensureSmall(img) {
+    if (!img || img.ref_small_path) return img;
+    const src = await loadSource(img);
+    const scale = Math.min(1, 500 / Math.max(src.W, src.H));
+    const w = Math.max(1, Math.round(src.W * scale)), hh = Math.max(1, Math.round(src.H * scale));
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = hh;
+    const ctx = cv.getContext('2d');
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, hh);
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(src.el, 0, 0, w, hh);
+    const blob = await canvasToBlob(cv, 'image/jpeg', 0.9);
+    cv.width = 0; cv.height = 0;
+    const fd = new FormData();
+    fd.append('file', blob, 'small.jpg');
+    const j = await api(`/images/${img.id}/small`, { method: 'POST', body: fd });
+    img.ref_small_path = (j && j.image && j.image.ref_small_path) || 'ok';
+    return img;
+  }
+  // 모드 고르기 목록: 설정의 모드 4가지(+ 설정의 기본 모델이 어느 모드와도 다르면 그 모델). 고치기는 고치기가 되는 모델만
+  function modeChoices(st, mode) {
+    const all = IMG.resolveModes(st).filter((m) => mode !== 'edit' || m.caps.edit);
+    const dflt = String((mode === 'edit' ? st.image_edit_model : st.image_gen_model) || '');
+    const out = all.map((m) => ({ ...m }));
+    if (dflt && !out.some((m) => m.model === dflt)) {
+      const caps = IMG.modelCaps(dflt === TEST_MODEL ? 'gpt-image-2.5-flare' : dflt);
+      out.unshift({ id: 'settings', label: mode === 'edit' ? '설정의 편집 모델' : '설정의 생성 모델', model: dflt, quality: st.image_quality || 'medium', caps, paid: !caps.free && dflt !== TEST_MODEL });
+    }
+    // 설정의 모델과 기본 품질이 둘 다 같은 모드 → 모델만 같은 모드 → 첫 모드 (설정을 몰래 다른 모델로 바꾸지 않음)
+    const q0 = String(st.image_quality || '');
+    const pick = out.find((m) => m.model === dflt && m.quality === IMG.normQuality(m.model, q0)) || out.find((m) => m.model === dflt) || out[0];
+    return { list: out, pick: pick ? pick.id : '' };
+  }
   function genSheet(p, s, o = {}) {
     const d = dataOf(p.id) || {};
     const st = settings();
     const base = o.base || null;
     const prev = o.prev || null;
     const mode = base ? 'edit' : 'generate';
-    const model = mode === 'edit' ? st.image_edit_model || 'gpt-image-2.5-sunburst' : st.image_gen_model || 'gpt-image-2.5-flare';
-    const isTest = model === TEST_MODEL;
-    const capsModel = isTest ? 'gpt-image-2.5-flare' : model; // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼 (서버와 같게)
-    const caps = IMG.modelCaps(capsModel);
-    const qualities = IMG.qualitiesFor(capsModel);
-    const keyOk = caps.free ? !!(d.keys && d.keys.cloudflare) : !!(d.keys && d.keys.openai) || isTest;
+    const choices = modeChoices(st, mode);
     const prevLines = prev ? String(prev.user_prompt || '').split('\n') : [];
     const purpose0 = (prev && prev.purpose) || (s.row && s.row.purpose) || IMG.slotPurpose(s.key);
+    const rec = IMG.recommendPreset({ post: p, slot: s, purpose: purpose0 });
     const f = {
-      purpose: IMG.PURPOSES[purpose0] ? purpose0 : 'blog_body', ratio: '', style: (prev && IMG.STYLES[prev.style] && prev.style) || IMG.DEFAULT_STYLE,
-      text: mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
-      quality: IMG.normQuality(capsModel, (prev && prev.quality) || st.image_quality || 'medium'),
+      modeId: (prev && choices.list.find((m) => m.model === prev.model) || {}).id || o.modeId || choices.pick,
+      purpose: IMG.PURPOSES[purpose0] ? purpose0 : 'blog_body', ratio: '',
+      preset: prev && prev.style ? IMG.presetOf(prev.style) : rec.id,
+      text: o.text != null ? o.text : mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
+      quality: '', count: 1, refs: (o.refs || []).slice(), scene: {},
     };
-    if (base) f.ratio = IMG.defaultRatio(base, f.purpose); // 고치기는 원래 이미지의 비율로 (정해진 크기로 만든 이미지면 그때 고른 비율)
+    if (prev && Array.isArray(prev.refs)) for (const r of prev.refs) { const im = (d.images || []).find((x) => x.id === r.image_id); if (im && !f.refs.some((y) => y.image.id === im.id)) f.refs.push({ image: im, role: r.role }); }
+    // 설정의 용도별 기본 비율 (없으면 용도의 첫 비율)
+    const prefRatio = (pu) => { const r = (st.image_ratio_prefs || {})[pu]; return IMG.PURPOSES[pu].ratios.includes(r) ? r : IMG.PURPOSES[pu].ratios[0]; };
+    f.ratio = base ? IMG.defaultRatio(base, f.purpose) : prefRatio(f.purpose);
+    const cur = () => choices.list.find((m) => m.id === f.modeId) || choices.list[0] || { model: '', caps: IMG.modelCaps(''), quality: 'medium' };
+    const modelOf = () => cur().model;
+    const isTest = () => modelOf() === TEST_MODEL;
+    const capsModel = () => (isTest() ? 'gpt-image-2.5-flare' : modelOf()); // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼 (서버와 같게)
+    const caps = () => IMG.modelCaps(capsModel());
+    f.quality = IMG.normQuality(capsModel(), (prev && prev.quality) || cur().quality || st.image_quality || 'medium');
     const prods = ui.productsOf(p.id) || [];
     const brands = prods.map((x) => x.brand).filter(Boolean);
     const hide = prods.flatMap((x) => [x.brand, x.name, x.model]).filter((v) => v && String(v).trim().length >= 2);
-    const purposeSel = h('select', { value: f.purpose }, Object.entries(IMG.PURPOSES).map(([k, v]) => opt(k, v.label)));
+    const modeSel = h('select', { value: f.modeId, name: 'mode' }, choices.list.map((m) => opt(m.id, `${m.label} — ${m.caps.label || m.model}${m.caps.free ? ' (무료)' : m.model === TEST_MODEL ? ' (점검용)' : ' (유료)'}`)));
+    const modeInfo = h('div', { class: 'stack' });
+    const presetSel = h('select', { value: f.preset, name: 'preset' }, Object.entries(IMG.PRESETS).map(([k, v]) => opt(k, `${v.label}${k === rec.id ? ' (추천)' : ''}`)));
+    const presetHint = h('p', { class: 'hint' });
+    const purposeSel = h('select', { value: f.purpose, name: 'purpose' }, Object.entries(IMG.PURPOSES).map(([k, v]) => opt(k, v.label)));
     const ratioSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '비율' });
-    const styleSel = h('select', { value: f.style }, Object.entries(IMG.STYLES).map(([k, v]) => opt(k, v.label)));
-    const textTa = h('textarea', { value: f.text, maxlength: '300', style: 'min-height:70px', placeholder: mode === 'edit' ? '예: 배경을 더 밝게, 식물은 빼줘' : '' });
+    const countSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '몇 장' });
+    const textTa = h('textarea', { value: f.text, maxlength: '300', style: 'min-height:70px', placeholder: mode === 'edit' ? '예: 조명만 더 자연스럽게 / 배경은 그대로 두고 강아지 자세만' : '' });
     const extraTa = h('textarea', { value: f.extra, maxlength: '400', style: 'min-height:56px', placeholder: '예: 밝은 오전 햇살, 위에서 내려다본 구도' });
-    const qualSel = h('select', { value: f.quality }, qualities.map((q) => opt(q, IMG.QUALITY_LABEL[q])));
+    const qualSel = h('select', { name: 'quality' });
     const f0 = { text: f.text, extra: f.extra }; // 처음 채워 둔 값 (이것과 같으면 '적던 내용'이 아님)
     const genericChk = h('input', { type: 'checkbox' });
     const genericText = h('span', null, '');
     const genericRow = h('label', { class: 'chk' }, genericChk, genericText);
     const riskBox = h('div', { class: 'stack' });
+    const refBox = h('div', { class: 'stack' });
+    const sceneBox = h('div', { class: 'stack' });
     const costBox = h('div', { class: 'costbox' });
     const promptPre = h('pre', { class: 'prompt' });
+    const scenePre = h('pre', { class: 'prompt' });
     const msg = h('div');
     // serverEst: 서버가 '예상 비용이 바뀌었어'라며 알려준 값 {usd, key: 모델|크기|품질}. 지금 고른 것과 같을 때만, 화면 계산보다 크면 그걸 보여주고 그걸로 확인을 보냄
     // newModel: 다른 기기에서 설정의 모델을 바꿔서 서버가 다른 모델로 계산한 경우 (창을 다시 열어야 함)
-    let busy = false, lastEst = null, serverEst = null, newModel = '', rk = newKey();
+    let busy = false, lastEst = null, lastTotal = null, serverEst = null, newModel = '', batch = null, results = [];
     const goBtn = btn('만들기', 'wide', () => submit());
     const usage = () => (dataOf(p.id) || {}).usage || null;
+    const refsOut = () => f.refs.map((r) => ({ image_id: r.image.id, role: r.role }));
+    // 장면 설계서 칸 (고칠 수 있는 것만). 빈칸이면 원고·프리셋의 기본값
+    const sceneInputs = {};
+    const sceneField = (k, multi) => {
+      const el = multi ? h('textarea', { style: 'min-height:48px', maxlength: '600' }) : h('input', { type: 'text', maxlength: '300' });
+      el.addEventListener('input', () => { f.scene[k] = multi ? el.value.split('\n').map((x) => x.trim()).filter(Boolean) : el.value; update(); });
+      sceneInputs[k] = el;
+      return field(IMG.SCENE_LABELS[k], el);
+    };
+    const localeSel = h('select', {}, opt('', '원고대로 (한국을 뜻하는 말이 있으면 한국)'), opt('KR', '한국'), opt('none', '정하지 않음'));
+    localeSel.addEventListener('change', () => { f.scene.locale = localeSel.value || undefined; update(); });
+    const fillScene = (sc) => {
+      for (const [k, el] of Object.entries(sceneInputs)) {
+        if (document.activeElement === el) continue;
+        const v = sc[k];
+        el.placeholder = Array.isArray(v) ? v.join('\n') : String(v || '(원고에 없음 — 비워 두면 넣지 않아)');
+        el.value = f.scene[k] == null ? '' : Array.isArray(f.scene[k]) ? f.scene[k].join('\n') : f.scene[k];
+      }
+    };
     const update = () => {
-      f.purpose = purposeSel.value; f.style = styleSel.value; f.text = textTa.value; f.extra = extraTa.value; f.quality = qualSel.value;
+      f.modeId = modeSel.value; f.preset = presetSel.value; f.purpose = purposeSel.value; f.text = textTa.value; f.extra = extraTa.value;
+      const m = cur(), c = caps();
+      const qs = IMG.qualitiesFor(capsModel());
+      if (!qs.includes(f.quality)) f.quality = IMG.normQuality(capsModel(), qualSel.value || m.quality || 'medium');
+      if (qualSel.dataset.model !== capsModel()) { put(qualSel, ...qs.map((q) => opt(q, IMG.qualityLabel(capsModel(), q)))); qualSel.dataset.model = capsModel(); }
+      qualSel.value = f.quality;
       const ratios = IMG.PURPOSES[f.purpose].ratios;
-      if (!ratios.includes(f.ratio)) f.ratio = ratios[0];
+      if (!ratios.includes(f.ratio)) f.ratio = prefRatio(f.purpose);
       put(ratioSeg, ...ratios.map((r) => h('button', { type: 'button', 'aria-pressed': String(r === f.ratio), onclick: () => { f.ratio = r; update(); } }, r)));
-      const size = IMG.sizeFor(f.purpose, f.ratio, capsModel);
-      const prompt = IMG.buildPrompt({ post: p, slot: s, text: clean(f.text), style: f.style, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide });
+      put(countSeg, ...[1, 2, 3].map((n) => h('button', { type: 'button', 'aria-pressed': String(n === f.count), disabled: mode === 'edit' && n > 1, onclick: () => { f.count = n; update(); } }, n === 1 ? '1장' : `${n}장 비교`)));
+      const P = IMG.PRESETS[f.preset];
+      presetHint.textContent = `${P.hint}${f.preset === rec.id ? '' : ` (추천은 '${IMG.PRESETS[rec.id].label}' — ${rec.why})`}`;
+      // 참고 사진: 이 모델이 받는 만큼만
+      const maxRefs = IMG.refsLimit(capsModel(), mode);
+      put(refBox,
+        maxRefs ? h('p', { class: 'hint' }, `참고 사진은 ${maxRefs}장까지 (${c.label}${mode === 'edit' ? ' · 고칠 이미지 포함 ' + c.refsMax + '장' : ''}). 진짜 제품 사진은 '대상 모양 유지'로 넣어 — 그래도 작은 글자·로고는 바뀔 수 있으니 만든 뒤 원본과 비교해줘.`)
+          : h('p', { class: 'hint' }, `${c.label || modelOf() || '이 모델'}은 참고 사진을 못 받아. 진짜 제품 사진을 넣으려면 참고 사진이 되는 모드를 골라줘 (무료 FLUX.2 klein · OpenAI · Gemini).`),
+        maxRefs && c.refSmall ? h('p', { class: 'notice' }, `무료 모델은 참고 사진을 ${c.refSmall}px 안으로 줄인 사본으로 받아 (공식 제한: 512px보다 작게). 작은 글자·로고는 거의 안 남으니 모양을 크게 지켜야 하면 유료 모델이 나아.`) : null,
+        ...f.refs.map((r, i) => {
+          const sel = h('select', { value: r.role, 'aria-label': '참고 사진 역할' }, Object.entries(IMG.REF_ROLES).map(([k, v]) => opt(k, v.label)));
+          sel.addEventListener('change', () => { r.role = sel.value; update(); });
+          return h('div', { class: 'refrow' }, thumb(r.image, null),
+            h('div', { class: 'stack' }, h('small', null, `${IMG.originLabel(r.image)}${r.image.kind !== 'ai' && r.image.kind !== 'card' && r.image.source_type !== 'own' ? ' · 이용 조건 확인 필요' : ''}`), sel,
+              h('span', { class: 'hint' }, IMG.REF_ROLES[r.role].hint)),
+            btn('빼기', 'sm ghost', () => { f.refs.splice(i, 1); update(); }));
+        }),
+        maxRefs && f.refs.length < maxRefs ? h('div', { class: 'go' }, btn('보관함에서 참고 사진 고르기', 'sm ghost', () => refPicker(p, f.refs, () => { form(); update(); })),
+          btn('참고 사진 올리기', 'sm ghost', () => refUpload(p, f.refs, () => { form(); update(); }))) : null,
+        f.refs.length > maxRefs ? h('p', { class: 'badbox' }, `이 모델은 참고 사진을 ${maxRefs}장까지만 받아. ${f.refs.length - maxRefs}장을 빼줘.`) : null);
+      const size = IMG.sizeFor(f.purpose, f.ratio, capsModel(), f.quality);
+      const sc = IMG.buildScene({ post: p, slot: s, text: clean(f.text), preset: f.preset, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide, refs: refsOut(), size: IMG.sizeLabel(size), channel: p.channel_id, overrides: f.scene });
+      fillScene(sc);
+      localeSel.value = f.scene.locale || '';
+      put(sceneBox, ...(sc.notes || []).map((n) => h('p', { class: 'hint' }, '· ' + n)));
+      const prompt = IMG.promptFromScene(sc);
       promptPre.textContent = prompt;
-      const clientEst = isTest ? 0 : IMG.estimateUsd({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices(), model });
+      scenePre.textContent = JSON.stringify(sc, null, 2);
+      const model = modelOf();
+      const clientEst = isTest() ? 0 : IMG.estimateUsd({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices(), model, refs: f.refs.length });
       const sEst = serverEst && serverEst.key === `${model}|${size}|${f.quality}` ? serverEst.usd : null;
       const est = clientEst == null ? null : sEst != null && sEst > clientEst ? sEst : clientEst;
       lastEst = est;
+      lastTotal = est == null ? null : IMG.roundUsd(est * f.count);
       const risks = IMG.promptRisk(f.text + '\n' + f.extra, brands);
       const blocks = IMG.blocksOf(risks);
+      const gate = s.n ? IMG.aiGate(s.text, { text: f.text + ' ' + f.extra, refs: refsOut(), genericOk: genericChk.checked }) : { ok: true };
       const sr = IMG.slotRisk(f.text + ' ' + f.extra);
-      const ownSlot = sr.word === '직접 찍기';
-      genericText.textContent = ownSlot ? ' 직접 찍기 어려워서 이번엔 AI 예시 이미지로 만들게' : ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (AI 예시 이미지 — 실제 구성품·라벨·화면은 직접 찍은 사진으로)';
-      put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)), sr.real ? h('p', { class: 'notice' }, sr.msg) : '', sr.real ? genericRow : '');
+      const own = gate.code === 'own_photo_slot';
+      const realNeeded = !own && s.n && IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${f.text} ${f.extra}`).real && !refsOut().some((r) => r.role === 'subject');
+      genericText.textContent = ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (특정 제품처럼 보이지 않게 — 실제 구성품·라벨·화면은 직접 찍은 사진이나 진짜 제품 사진 참고로)';
+      put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)),
+        own ? h('p', { class: 'badbox' }, gate.msg) : '',
+        !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${f.text} ${f.extra}`).msg || sr.msg) : '',
+        !own && realNeeded ? genericRow : '',
+        gate.composite ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성'으로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼.") : '');
       const u = usage();
       const fx = Number(st.image_fx_krw) || 0;
-      const over = u && est != null && Number(u.month_usd) + est > Number(u.budget_usd) + 1e-9;
-      const limit = u && Number(u.today) >= Number(u.daily_limit);
+      const over = u && lastTotal != null && Number(u.month_usd) + lastTotal > Number(u.budget_usd) + 1e-9;
+      const capOver = u && lastTotal != null && u.request_cap_usd != null && lastTotal > Number(u.request_cap_usd) + 1e-9;
+      const limit = u && Number(u.today) + f.count > Number(u.daily_limit);
+      const prov = IMG.PROVIDERS[c.provider] || null;
+      const keyGood = isTest() || keyOk(d.keys, c.provider);
+      put(modeInfo,
+        h('span', { class: 'hint' }, `${prov ? prov.label : '공급자 모름'} · ${model || '(모델 없음)'}${c.status === 'preview' ? ' · 미리보기(preview) 모델' : ''}${c.deprecated ? ' · 이전 모델' : ''}`),
+        h('span', { class: 'chip ' + (keyGood ? 'v-ok' : 'v-no') }, isTest() ? '점검용 (실제 생성 아님)' : keyGood ? (c.free ? '연결됨 · 무료' : '키 있음') : '키 없음'));
+      const basis = isTest() ? '점검용 가짜 모델 — 비용 없음' : IMG.costBasis({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices(), model, refs: f.refs.length });
       put(costBox,
-        h('span', null, `모델 ${model} · ${size} · 품질 ${IMG.QUALITY_LABEL[f.quality]}`),
-        caps.free ? h('b', { class: 'num' }, '무료 (Cloudflare 무료 플랜 — 하루 약 100장까지, 넘으면 다음 날)')
-          : h('b', { class: 'num' }, est == null ? '예상 비용을 계산하지 못했어' : `예상 ${usd(est)}${fx && est ? ' ≈ ' + L.won(est * fx) : ''}`),
-        caps.free ? h('span', { class: 'hint' }, '무료 모델은 한국어 설명을 영어로 바꿔서 그려 (사람·글자에는 약해). 마음에 안 들면 설명을 구체적으로 적고 다시 만들어줘.') : null,
+        h('span', null, `공급자·모델: ${prov ? prov.label : '?'} · ${model}`),
+        h('span', null, `장수: ${f.count}장${f.count > 1 ? ' (같은 설명으로 후보를 만들어 고르기)' : ''} · 품질 ${IMG.qualityLabel(capsModel(), f.quality)} · 크기 ${IMG.sizeLabel(size)}`),
+        c.free ? h('b', { class: 'num' }, `무료 (${prov ? prov.free_note : ''})`)
+          : h('b', { class: 'num' }, est == null ? '예상 비용을 계산하지 못했어' : f.count > 1 ? `예상 ${usd(est)} × ${f.count}장 = ${usd(lastTotal)}${fx && lastTotal ? ' ≈ ' + L.won(lastTotal * fx) : ''}` : `예상 ${usd(est)}${fx && est ? ' ≈ ' + L.won(est * fx) : ''}`),
+        h('span', { class: 'hint' }, `계산 근거: ${basis}`),
+        c.free ? h('span', { class: 'hint' }, '무료 모델은 한국어 설명을 영어로 바꿔서 그려 (사람·글자에는 약해). 마음에 안 들면 설명을 구체적으로 적고 다시 만들어줘.') : null,
         sEst != null && est === sEst ? h('span', { class: 'notice' }, `서버에서 다시 계산한 예상 비용이 ${usd(sEst)}이야 (설정·가격·원고가 바뀐 것 같아). 확인하고 다시 눌러줘.`) : null,
-        !caps.flexible && !isTest ? h('span', { class: 'hint' }, `이 모델은 정해진 크기(${size})로만 만들어. 만든 이미지를 이 자리에 연결하면 내려받을 때 ${f.ratio}로 잘라 줄게 (미리보기에서 자르는 곳을 고를 수 있어).`) : null,
-        caps.conservative && !isTest && !caps.free ? h('span', { class: 'notice' }, '이 모델은 공식 가격표에서 장당 가격을 확인하지 못해서 예상 비용을 넉넉하게 잡았어. 실제 청구액은 OpenAI 사용량 화면에서 확인해줘.') : null,
-        caps.deprecated ? h('span', { class: 'hint' }, 'OpenAI가 이전 모델(Deprecated)로 표시한 모델이야. 되도록 gpt-image-2.5-flare를 써줘.') : null,
+        !c.flexible && !c.aspect && !isTest() && c.known ? h('span', { class: 'hint' }, `이 모델은 정해진 크기(${IMG.sizeLabel(size)})로만 만들어. 만든 이미지를 이 자리에 연결하면 내려받을 때 ${f.ratio}로 잘라 줄게 (미리보기에서 자르는 곳을 고를 수 있어).`) : null,
+        c.conservative && !isTest() && !c.free ? h('span', { class: 'notice' }, '이 모델은 공식 가격표에서 장당 가격을 확인하지 못해서 예상 비용을 넉넉하게 잡았어. 실제 청구액은 공급자 사용량 화면에서 확인해줘.') : null,
+        c.deprecated ? h('span', { class: 'hint' }, '공급자가 이전 모델(Deprecated)로 표시한 모델이야. 되도록 새 모델을 써줘.') : null,
         h('span', { class: 'hint' }, fx ? `환율 ${L.fmtNum(fx)}원/달러 (${st.image_fx_date || '날짜 없음'}${st.image_fx_source ? ' · ' + st.image_fx_source : ''})` : '환율을 넣으면 원화로도 보여줘 (설정 > 이미지)'),
-        caps.free ? null : h('span', { class: 'hint' }, `예상 비용이야 (가격표 ${(prices().checked_at) || '확인일 없음'} 기준). 실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`),
-        u ? h('span', { class: 'hint' }, usageLine(u)) : null);
+        c.free || isTest() ? null : h('span', { class: 'hint' }, c.provider === 'openai' ? `예상 비용이야 (가격표 ${(prices().checked_at) || '확인일 없음'} 기준). 실제 청구액은 OpenAI 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`
+          : `예상 비용이야 (가격표 ${c.checked || '확인일 없음'} 기준). 실제 청구액은 ${prov ? prov.label : '공급자'} 사용량 화면에서 확인해야 하고 조금 다를 수 있어.`),
+        u ? h('span', { class: 'hint' }, `${usageLine(u)} · 남은 예산 ${usd(Math.max(0, Number(u.budget_usd) - Number(u.month_usd)))}${u.request_cap_usd != null ? ` · 한 번에 ${usd(u.request_cap_usd)}까지` : ''}`) : null);
       let why = '';
       if (newModel) why = `설정의 ${mode === 'edit' ? '편집' : '생성'} 모델이 바뀌었어 (${model} → ${newModel}). 이 창을 닫고 다시 열어줘.`;
-      else if (!keyOk) why = caps.free ? 'Cloudflare 계정 ID·토큰이 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.' : 'OpenAI 키가 없어서 아직 못 만들어. 설정 > 이미지에서 방법을 봐줘.';
-      else if (caps.free && mode === 'edit') why = '무료 모델은 고치기(편집)를 못 해. 설명을 바꿔서 새로 만들어줘.';
+      else if (!model) why = '쓸 모델이 없어. 설정 > 이미지에서 모델을 골라줘.';
+      else if (!isTest() && !c.known) why = `앱이 모르는 모델이라(${model}) 만들 수 없어. 설정 > 이미지에서 목록에 있는 모델로 바꿔줘.`;
+      else if (!keyGood) why = noKeyText(c.provider);
+      else if (mode === 'edit' && !c.edit) why = '이 모델은 고치기(편집)를 못 해. 고치기가 되는 모드를 골라줘.';
+      else if (f.refs.length > maxRefs) why = f.refs.length && !maxRefs ? '이 모델은 참고 사진을 못 받아. 참고 사진을 빼거나 다른 모드를 골라줘.' : `참고 사진이 너무 많아 (${maxRefs}장까지).`;
+      else if (!isTest() && c.provider && !c.usable) why = `공급자가 종료한 모델이야 (${c.retired}). 다른 모드를 골라줘.`;
       else if (!clean(f.text)) why = mode === 'edit' ? '바꿀 내용을 적어줘.' : '사진 설명을 적어줘.';
       else if (blocks.length) why = '빨간 내용을 고쳐야 만들 수 있어.';
-      else if (sr.real && !genericChk.checked) why = ownSlot ? "'직접 찍기' 자리야. 휴대폰으로 찍어서 '파일 올리기'로 넣거나, 그래도 AI로 만들려면 위에 체크해줘." : '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
-      else if (limit) why = '오늘 만들 수 있는 횟수를 다 썼어. (설정 > 이미지에서 하루 한도)';
+      else if (own) why = "'직접 찍기' 자리는 AI로 만들지 않아. 휴대폰으로 찍어서 '파일 올리기'로 넣어줘.";
+      else if (!gate.ok) why = '실제 상품·화면이 보여야 하는 자리야. 진짜 제품 사진을 참고 사진(대상 모양 유지)으로 넣거나, 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.';
+      else if (limit) why = `오늘 만들 수 있는 횟수가 모자라 (${f.count}장 필요). 설정 > 이미지에서 하루 한도를 바꿀 수 있어.`;
       else if (over) why = '이번 달 예산을 넘게 돼서 못 만들어. (설정 > 이미지에서 한 달 예산)';
+      else if (capOver) why = `한 번에 쓸 수 있는 금액(${usd(u.request_cap_usd)})을 넘어. 장수를 줄이거나 설정 > 이미지에서 '한 번 상한'을 바꿔줘.`;
       else if (u && u.running) why = '다른 이미지를 만드는 중이야. 끝나면 다시 해줘.';
-      goBtn.textContent = busy ? '보내는 중…' : est == null ? '만들기' : `예상 ${usd(est)} · ${mode === 'edit' ? '고치기' : '만들기'}`;
+      const verb = mode === 'edit' ? '고치기' : '만들기';
+      goBtn.textContent = busy ? '보내는 중…' : est == null ? verb : f.count > 1 ? `예상 ${usd(lastTotal)} (${f.count}장) · ${verb}` : `예상 ${usd(est)} · ${verb}`;
       goBtn.disabled = !!why || busy || est == null;
       if (!busy) put(msg, why ? h('p', { class: 'hint' }, why) : '');
     };
-    for (const el of [purposeSel, styleSel, qualSel]) el.addEventListener('change', update);
+    // 모드를 바꾸면 그 모드에 정해 둔 품질로 (모드 = 모델 + 품질). 그 뒤에 품질 칸에서 따로 바꿀 수 있음
+    modeSel.addEventListener('change', () => { f.modeId = modeSel.value; f.quality = IMG.normQuality(capsModel(), cur().quality || 'medium'); });
+    for (const el of [modeSel, presetSel, purposeSel]) el.addEventListener('change', () => { serverEst = null; update(); });
+    qualSel.addEventListener('change', () => { f.quality = qualSel.value; update(); });
     for (const el of [textTa, extraTa]) el.addEventListener('input', update);
     genericChk.addEventListener('change', update);
+    const examples = mode === 'edit' ? h('div', { class: 'go' }, ...['조명만 더 자연스럽게 바꿔줘', '배경은 그대로 두고 자세만 바꿔줘', '피사체는 그대로, 카메라 각도를 조금 높여줘', '전체를 다시 만들지 말고 요청한 부분만 고쳐줘'].map((t) =>
+      h('button', { type: 'button', class: 'copy', onclick: () => { textTa.value = textTa.value.trim() ? textTa.value.trim() + ' / ' + t : t; update(); } }, t))) : null;
     const form = () => {
+      const sceneDet = det('gen-scene', '장면 설계서 (고칠 수 있어)', false, 'plain');
+      sceneDet.append(h('p', { class: 'hint' }, '비워 둔 칸은 원고와 이미지 종류의 기본값을 써. 원고에 없는 계절·날씨·장소는 넣지 않아.'), sceneBox,
+        sceneField('subject'), sceneField('setting'), sceneField('time'), field(IMG.SCENE_LABELS.locale, localeSel), sceneField('camera'), sceneField('light'), sceneField('color'),
+        sceneField('materials'), sceneField('composition'), sceneField('must_show', true), sceneField('avoid', true),
+        h('div', { class: 'go' }, btn('기본값으로', 'sm ghost', () => { f.scene = {}; for (const el of Object.values(sceneInputs)) el.value = ''; localeSel.value = ''; update(); })));
+      const promptDet = det('gen-prompt', 'AI에 보낼 내용 보기', false, 'plain');
+      promptDet.append(promptPre, h('p', { class: 'legend' }, '장면 설계서 (JSON)'), scenePre);
+      const refDet = det('gen-refs', `참고 사진 (${f.refs.length})`, f.refs.length > 0, 'plain');
+      refDet.append(refBox);
       openSheet(`${slotName(s)} — AI ${mode === 'edit' ? '이미지 고치기' : '이미지 만들기'}`,
-      s.n ? h('p', { class: 'hint' }, `사진 자리: ${s.text}`) : h('p', { class: 'hint' }, s.label || ''),
-      base ? h('div', { class: 'stack' }, thumb(base, null), h('p', { class: 'hint' }, `이 이미지를 고쳐서 새로 만들어 (원본은 그대로 남아). 모델 ${model}`)) : null,
-      field('어디에 쓸 이미지야?', purposeSel), h('p', { class: 'legend' }, '비율'), ratioSeg,
-      field('스타일', styleSel),
-      field(mode === 'edit' ? '바꿀 내용' : '사진 설명 (고쳐도 돼)', textTa, '글자·로고·가격·인증 마크는 이미지에 넣지 않아. 글자는 카드뉴스에서 따로 얹어.'),
-      field('더 원하는 것 (선택)', extraTa),
-      field('품질', qualSel, '높을수록 비싸고 오래 걸려. 블로그는 보통이면 충분해.'),
-      riskBox,
-      (() => { const dd = det('gen-prompt', 'AI에 보낼 내용 보기', false, 'plain'); dd.append(promptPre); return dd; })(),
-      costBox, msg, goBtn,
-      h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 한 번에 한 장씩, 같은 요청은 한 번만 보내.'));
+        s.n ? h('p', { class: 'hint' }, `사진 자리: ${s.text}`) : h('p', { class: 'hint' }, s.label || ''),
+        base ? h('div', { class: 'stack' }, thumb(base, null), h('p', { class: 'hint' }, '이 이미지를 고쳐서 새로 만들어 (원본은 그대로 남고, 고친 이미지는 수정 이력으로 이어져).')) : null,
+        field('모드', modeSel), modeInfo,
+        field('이미지 종류', presetSel), presetHint,
+        field('어디에 쓸 이미지야?', purposeSel), h('p', { class: 'legend' }, '비율'), ratioSeg,
+        field(mode === 'edit' ? '바꿀 내용' : '사진 설명 (고쳐도 돼)', textTa, mode === 'edit' ? '바꿀 부분만 적어줘. 나머지는 그대로 두라고 같이 보내.' : '글자·로고·가격·인증 마크는 이미지에 넣지 않아. 글자는 카드뉴스에서 따로 얹어.'),
+        examples,
+        field('더 원하는 것 (선택)', extraTa),
+        refDet, sceneDet,
+        field('품질', qualSel, '높을수록 비싸고 오래 걸려. 블로그는 보통이면 충분해.'),
+        mode === 'edit' ? null : h('p', { class: 'legend' }, '몇 장 만들까'), mode === 'edit' ? null : countSeg,
+        riskBox, promptDet,
+        costBox, msg, goBtn,
+        mode === 'edit' ? null : h('div', { class: 'go' }, btn('여러 모델로 비교하기', 'sm ghost', () => compareSheet(p, s, { ...f, refs: f.refs.slice() }))),
+        h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 같은 요청은 한 번만 보내고, 여러 장이면 한 장씩 차례로 만들어.'));
       // 처음 채워 둔 설명·더 원하는 것을 고쳤으면 창 밖을 눌러도 안 닫힘 (안 고쳤으면 그냥 닫힘)
-      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && clean(extraTa.value) === clean(f0.extra));
+      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && clean(extraTa.value) === clean(f0.extra) && !Object.keys(f.scene).length);
     };
     // 창을 닫거나 다른 창을 열면(=만들기 버튼이 화면에서 사라지면) 기다리던 다시 보내기를 멈춤 — 사용자가 누르지 않은 생성이 시작되지 않게
     const alive = () => goBtn.isConnected;
@@ -629,27 +806,62 @@ export function createStudio(ui) {
       }
       return alive();
     };
+    const bodyFor = (rk, i) => ({
+      request_key: rk, post_id: p.id, slot_key: s.key, mode, base_image_id: base ? base.id : undefined, purpose: f.purpose, ratio: f.ratio, preset: f.preset, style: f.preset,
+      text: clean(f.text), extra: clean(f.extra), quality: f.quality, model: modelOf(), refs: refsOut(), scene: Object.keys(f.scene).length ? f.scene : undefined,
+      confirm_usd: lastEst, generic_ok: genericChk.checked || undefined,
+      batch: f.count > 1 ? { id: batch.id, kind: 'candidates', index: i, total: f.count } : undefined,
+      reserve_usd: f.count > 1 && lastEst != null ? IMG.roundUsd(lastEst * (f.count - i)) : undefined,
+    });
     const submit = async () => {
       if (busy) return;
       busy = true; update();
       put(msg, h('p', { class: 'hint' }, '보내는 중…'));
-      const body = { request_key: rk, post_id: p.id, slot_key: s.key, mode, base_image_id: base ? base.id : undefined, purpose: f.purpose, ratio: f.ratio, style: f.style,
-        text: clean(f.text), extra: clean(f.extra), quality: f.quality, confirm_usd: lastEst, generic_ok: genericChk.checked || undefined };
+      batch = f.count > 1 ? { id: newUuid(), keys: Array.from({ length: f.count }, () => newKey()), done: [] } : { id: null, keys: [newKey()], done: [] };
+      results = [];
+      await sendOne(0);
+    };
+    // 무료 모델(FLUX.2 klein)은 참고 사진·고칠 이미지를 512px보다 작은 사본으로 받음 → 없으면 먼저 만들어 올림 (원본은 그대로)
+    const smallNeeded = () => (caps().provider === 'cloudflare' && !isTest() ? [...(base ? [base] : []), ...f.refs.map((r) => r.image)].filter((x) => x && !x.ref_small_path) : []);
+    const makeSmall = async (list) => {
+      for (const im of list) {
+        put(msg, h('p', { class: 'hint' }, '무료 모델에 보낼 작은 사본을 만드는 중… (원본은 그대로)'));
+        await ensureSmall(im);
+      }
+    };
+    // i번째 한 장: 보내기 → (서버가 바쁘면 기다렸다 같은 번호로) → 진행 상황 → 끝나면 다음 장
+    const sendOne = async (i) => {
+      if (i === 0) {
+        try { await makeSmall(smallNeeded()); } catch (e) {
+          busy = false; update();
+          if (e && e.code === 'auth') return;
+          put(msg, h('p', { class: 'badbox' }, '작은 사본을 만들지 못했어: ' + ((e && e.code ? ui.errText(e) : e && e.message) || '이유 모름')));
+          return;
+        }
+      }
+      const body = bodyFor(batch.keys[i], i);
       let j = null;
       for (let attempt = 0; attempt < 4 && !j; attempt++) {
         try { j = await sendGenerate(body); } catch (e) {
           if (e && e.code === 'server_busy' && attempt < 3 && await wait(Number(e.retry_after) || 3)) continue;
+          // 다른 기기에서 고른 사진처럼 사본이 아직 없으면 만들고 한 번 더 (돈 안 나감)
+          if (e && e.code === 'ref_small_missing' && attempt < 3 && alive()) {
+            const ids = new Set(e.ids || []);
+            try { await makeSmall([...(base ? [base] : []), ...f.refs.map((r) => r.image)].filter((x) => x && ids.has(x.id))); continue; } catch { /* 아래 오류 안내로 */ }
+          }
           busy = false;
           if (!e || e.code === 'auth' || !alive()) return;
           if (e.code === 'estimate_changed') {
             // 서버가 계산한 값은 그 모델·크기·품질에만 씀 (품질을 바꾸면 화면 계산으로 돌아감)
             serverEst = { usd: Number(e.est_usd), key: `${e.model}|${e.size}|${e.quality}` };
-            if (e.model && e.model !== model) newModel = String(e.model);
+            if (e.model && e.model !== modelOf()) newModel = String(e.model);
             toast(ui.errText(e), 4000);
             ui.load(); // 다른 기기에서 바꾼 설정·가격을 다시 받음
+            if (i > 0) { showBatch(); return; }
             update();
             return;
           }
+          if (i > 0) { results.push({ error: e }); showBatch(); return; }
           update();
           const again = e.code === 'timeout' || e.code === 'network';
           put(msg, h('p', { class: 'badbox' }, ui.errText(e)), ...((e.risks || []).map((r) => h('p', { class: 'badbox' }, r.msg))),
@@ -657,25 +869,26 @@ export function createStudio(ui) {
           return;
         }
       }
-      busy = false;
-      if (!j) { update(); return; }
-      if (!alive()) {
+      if (!j) { busy = false; update(); return; }
+      if (!alive() && i === 0) {
+        busy = false;
         // 보낸 뒤에 창을 닫았어도 서버는 이미 받아서 만들고 있음 → 이미지 칸에 '만드는 중'이 보이게 새로 받음
         if (j.generation && j.generation.status === '생성 중') toast('창을 닫았지만 서버에서 만드는 중이야. 끝나면 사진 자리에서 볼 수 있어.', 4000);
         refresh(p.id);
         return;
       }
       if (j.duplicate) toast('이미 받은 요청이야. 그 결과를 보여줄게.', 3000);
-      progress(j.generation);
+      progress(j.generation, i);
     };
-    const progress = (gen) => {
+    const progress = (gen, i) => {
       const t0 = Date.now();
       const timer = h('b', { class: 'num' }, '0초');
       let stop = false;
       openSheet(`${slotName(s)} — AI ${mode === 'edit' ? '고치기' : '만들기'}`,
-        h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, '만드는 중… '), timer),
-        h('p', { class: 'hint' }, '보통 20초~1분, 길면 2분까지 걸려. 이 창을 닫아도 서버에서 계속 만들고, 끝나면 사진 자리에서 고를 수 있어.'));
-      ui.setSheetOnClose(() => { stop = true; refresh(p.id); });
+        h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, f.count > 1 ? `${i + 1}/${f.count}장 만드는 중… ` : '만드는 중… '), timer),
+        h('p', { class: 'hint' }, f.count > 1 ? '한 장씩 차례로 만들어. 이 창을 닫으면 지금 만드는 장까지만 서버에서 끝내고, 남은 장은 만들지 않아 (돈도 안 나가).' : '보통 20초~1분, 길면 2분까지 걸려. 이 창을 닫아도 서버에서 계속 만들고, 끝나면 사진 자리에서 고를 수 있어.'),
+        results.length ? h('div', { class: 'grid3' }, results.filter((r) => r.image).map((r) => thumb(r.image, null))) : null);
+      ui.setSheetOnClose(() => { stop = true; busy = false; refresh(p.id); });
       const tick = setInterval(() => { if (!timer.isConnected) { clearInterval(tick); return; } timer.textContent = Math.round((Date.now() - t0) / 1000) + '초'; }, 1000);
       const poll = async () => {
         if (stop) return;
@@ -685,26 +898,49 @@ export function createStudio(ui) {
         const g = r.generation;
         if (g.status === '생성 중') { setTimeout(poll, Date.now() - t0 > 60e3 ? 5000 : 3000); return; }
         clearInterval(tick);
-        rk = newKey(); serverEst = null;
+        serverEst = null;
         if (C[p.id] && C[p.id].data) C[p.id].data.usage = r.usage;
-        if (g.status === '성공' && r.image) showResult(g, r.image); else showFail(g);
+        results.push({ generation: g, image: g.status === '성공' ? r.image : null });
+        if (i + 1 < f.count && g.status === '성공') { await sendOne(i + 1); return; }
+        busy = false;
+        if (f.count > 1) showBatch();
+        else if (g.status === '성공' && r.image) showResult(g, r.image); else showFail(g);
       };
       setTimeout(poll, 2500);
     };
-    const showResult = (g, img) => {
+    const resultCard = (g, img, single) => {
       const c = genCost(g);
-      openSheet(`${slotName(s)} — 다 만들었어`,
+      const secs = g.started_at && g.finished_at ? Math.max(1, Math.round((Date.parse(g.finished_at) - Date.parse(g.started_at)) / 1000)) : null;
+      return h('div', { class: 'slot on' },
         thumb(img, null),
         h('div', { class: 'chips' }, kindChip(img), reviewChip(img)),
-        h('p', { class: 'hint' }, `${g.model} · ${img.width}×${img.height} · 비용 ${usd(c.usd)} (${c.label})`),
-        h('ul', { class: 'lic' }, h('li', null, '이미지 안에 글자·로고·가격이 생기지 않았는지'), h('li', null, '실제 상품 사진처럼 보이지 않는지 (이건 예시 삽화야)'), h('li', null, '사진 자리 설명과 맞는지')),
+        h('p', { class: 'hint' }, `${g.model} · ${img.width}×${img.height} · 품질 ${IMG.qualityLabel(g.model, g.quality)}${secs ? ` · ${secs}초` : ''} · 비용 ${usd(c.usd)} (${c.label})`),
+        btn(single ? `이 이미지 쓰기 → ${slotName(s)}에 연결` : `이걸로 쓰기 → ${slotName(s)}`, single ? 'wide' : 'sm', async (ev) => { const j = await linkTo(p, s, img, ev.currentTarget, IMG.PURPOSES[g.purpose] ? { purpose: g.purpose } : null); if (j) closeSheet(); }),
+        h('div', { class: 'go' },
+          btn('AI 검수 (참고용)', 'sm ghost', () => reviewSheet(p, img, { back: () => (single ? showResult(g, img) : showBatch()), slot: s })),
+          IMG.modelCaps(g.model).edit || IMG.resolveModes(settings()).some((m) => m.caps.edit) ? btn('고치기', 'sm ghost', () => genSheet(p, s, { base: img })) : null));
+    };
+    const showResult = (g, img) => {
+      openSheet(`${slotName(s)} — 다 만들었어`,
+        resultCard(g, img, true),
+        h('ul', { class: 'lic' }, h('li', null, '이미지 안에 글자·로고·가격이 생기지 않았는지'), h('li', null, img.composite ? '참고한 제품 사진과 모양·글자·버튼이 같은지 (다르면 쓰지 마)' : '실제 상품 사진처럼 보이지 않는지 (이건 AI 예시 이미지야)'), h('li', null, '사진 자리 설명과 맞는지')),
         h('p', { class: 'hint' }, "쓰기 전에 위를 확인해줘. 미리보기에서 '사용 가능'으로 바꾸면 검수 완료야."),
-        btn(`이 이미지 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => { const j = await linkTo(p, s, img, ev.currentTarget, IMG.PURPOSES[g.purpose] ? { purpose: g.purpose } : null); if (j) closeSheet(); }),
+        h('div', { class: 'go' }, btn('다시 만들기', 'sm ghost', () => { busy = false; form(); update(); }), btn('보관함에만 두고 닫기', 'sm ghost', closeSheet)));
+      ui.setSheetOnClose(() => refresh(p.id));
+    };
+    const showBatch = () => {
+      const ok = results.filter((r) => r.image);
+      const failed = results.filter((r) => !r.image);
+      openSheet(`${slotName(s)} — 후보 ${ok.length}장`,
+        ok.length ? h('p', { class: 'hint' }, '같은 설명으로 만든 후보야. 마음에 드는 걸 골라서 연결해 (안 고른 건 보관함에 남아). 앱이 대신 고르지 않아.') : null,
+        ...ok.map((r) => resultCard(r.generation, r.image, false)),
+        ...failed.map((r) => h('p', { class: 'badbox' }, r.generation ? `못 만든 장: ${r.generation.error_message || '이유 없음'}` : ui.errText(r.error))),
+        results.length < f.count ? h('p', { class: 'notice' }, `${f.count}장 중 ${results.length}장에서 멈췄어 (남은 장은 만들지 않았고 돈도 안 나갔어).`) : null,
         h('div', { class: 'go' }, btn('다시 만들기', 'sm ghost', () => { busy = false; form(); update(); }), btn('보관함에만 두고 닫기', 'sm ghost', closeSheet)));
       ui.setSheetOnClose(() => refresh(p.id));
     };
     const showFail = (g) => {
-      const billed = g.cost_status === '청구 없음' ? '청구되지 않았을 거야.' : "청구됐을 수 있어. OpenAI 사용량 화면에서 확인하고, 이 글의 '이미지 생성 비용'에서 청구액을 넣어줘.";
+      const billed = g.cost_status === '청구 없음' ? '청구되지 않았을 거야.' : "청구됐을 수 있어. 공급자 사용량 화면에서 확인하고, 이 글의 '이미지 생성 비용'에서 청구액을 넣어줘.";
       openSheet(`${slotName(s)} — 못 만들었어`,
         h('p', { class: 'badbox' }, g.error_message || '이유가 기록되지 않았어.'),
         h('p', { class: 'hint' }, billed),
@@ -714,6 +950,280 @@ export function createStudio(ui) {
     };
     form();
     update();
+  }
+
+  // ═════════ 참고 사진 고르기·올리기 (1.5.0) ═════════
+  // 실제 사진(직접 올림·Pexels)은 '대상 모양 유지'로, AI 이미지는 '구도·스타일 참고'로 먼저 고름 (바꿀 수 있음)
+  const defaultRole = (img) => (img.kind === 'upload' || img.kind === 'stock' ? 'subject' : 'style');
+  function refPicker(p, refs, back) {
+    const d = dataOf(p.id) || {};
+    const taken = new Set(refs.map((r) => r.image.id));
+    const mine = (d.images || []).filter((i) => !i.deleted_at && i.kind !== 'card' && !taken.has(i.id));
+    let tab = mine.length ? 'mine' : 'all', all = [], next = null, lseq = 0;
+    const seg = h('div', { class: 'seg', role: 'group' });
+    const box = h('div', { class: 'stack' });
+    const choose = (img) => { refs.push({ image: img, role: defaultRole(img) }); back(); };
+    const grid = (list) => (list.length ? h('div', { class: 'grid3' }, list.map((i) => pickThumb(i, () => choose(i)))) : h('p', { class: 'hint' }, '고를 이미지가 없어. 참고 사진 올리기로 넣어줘.'));
+    const loadAll = async (more, button) => {
+      const my = ++lseq;
+      if (button) button.disabled = true;
+      if (!more) put(box, h('p', { class: 'hint' }, '불러오는 중…'));
+      try {
+        const j = await api('/images' + (more && next ? '?before=' + encodeURIComponent(next) : ''));
+        if (my !== lseq || tab !== 'all') return;
+        all = (more ? all.concat(j.images) : j.images).filter((i) => i.kind !== 'card' && !taken.has(i.id)); next = j.next;
+        put(box, grid(all), next ? btn('더 보기', 'sm ghost', (ev) => loadAll(true, ev.currentTarget)) : null);
+      } catch (e) { if (my === lseq && e && e.code !== 'auth') put(box, h('p', { class: 'hint' }, ui.errText(e))); }
+    };
+    const draw = () => {
+      put(seg, ...[['mine', `이 글 이미지 ${mine.length}`], ['all', '보관함 전체']].map(([k, l]) => h('button', { type: 'button', 'aria-pressed': String(k === tab), onclick: () => { tab = k; draw(); } }, l)));
+      if (tab === 'mine') { lseq++; put(box, grid(mine)); } else loadAll(false);
+    };
+    openSheet('참고 사진 고르기',
+      h('p', { class: 'hint' }, "진짜 제품 사진은 고른 뒤 역할을 '대상 모양 유지'로 둬. 다른 사람 사진·공식 이미지는 이용 조건을 먼저 확인해줘."),
+      seg, box, h('div', { class: 'go' }, btn('돌아가기', 'sm ghost', back)));
+    draw();
+  }
+  function refUpload(p, refs, back) {
+    const input = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', 'aria-label': '참고 사진 파일' });
+    const pickLabel = h('span', null, '사진 고르기');
+    const picker = h('label', { class: 'btn sm filebtn' }, pickLabel, input);
+    const preview = h('div', { class: 'stack' });
+    const rights = h('input', { type: 'checkbox' });
+    const srcSel = sourceSelect('own');
+    const desc = h('input', { type: 'text', value: '', maxlength: '300', placeholder: '예: 우리 집 제습기 정면' });
+    let ready = null, prevUrl = null;
+    const goBtn = btn('올리고 참고 사진으로 쓰기', 'wide', () => send(), { disabled: true });
+    const dropUrl = () => { if (prevUrl) { URL.revokeObjectURL(prevUrl); prevUrl = null; } };
+    input.addEventListener('change', async () => {
+      ready = null; goBtn.disabled = true; dropUrl();
+      const file = input.files && input.files[0];
+      if (!file) return;
+      pickLabel.textContent = '다른 사진 고르기';
+      put(preview, h('p', { class: 'hint' }, '확인하는 중…'));
+      try { ready = await prepareUpload(file); } catch (e) { put(preview, h('p', { class: 'badbox' }, (e && e.message) || '이 파일은 올릴 수 없어.')); return; }
+      prevUrl = URL.createObjectURL(ready.blob);
+      put(preview, h('img', { class: 'big', src: prevUrl, alt: '참고 사진 미리보기' }), h('span', { class: 'hint' }, `${ready.w}×${ready.h} · ${fmtBytes(ready.blob.size)} · 숨은 정보(촬영 위치 등)는 빼고 올려`));
+      goBtn.disabled = false;
+    });
+    const send = async () => {
+      if (!ready) return;
+      if (!rights.checked) { toast(IMAGE_ERR.rights_required); return; }
+      const fd = new FormData();
+      fd.append('meta', JSON.stringify({ post_id: p.id, purpose: 'general', rights: true, description: desc.value.trim() || '참고 사진', link: false, source_type: srcSel.value }));
+      fd.append('file', ready.blob, ready.name);
+      const j = await run(goBtn, () => api('/images/upload', { method: 'POST', body: fd }).catch((e) => { throw e && e.code === 'too_large' ? { code: 'bad_image', reason: 'too_big' } : e; }));
+      if (j && j.image) { dropUrl(); refs.push({ image: j.image, role: 'subject' }); toast(j.reused ? '같은 사진이 보관함에 있어서 그걸 참고 사진으로 넣었어' : '참고 사진으로 넣었어'); back(); }
+    };
+    openSheet('참고 사진 올리기',
+      h('p', { class: 'hint' }, '진짜 제품 사진(직접 찍은 사진이 제일 좋아)을 올리면 AI가 그 모양을 유지하려고 해. 보관함에도 남아 (이 사진 자체는 원고 자리에 연결하지 않아).'),
+      h('div', { class: 'go' }, picker), preview,
+      field('이 사진은 어디서 났어?', srcSel, '공식·외부 사진을 참고하면 그 사진의 이용 조건을 따라야 해.'),
+      h('label', { class: 'chk' }, rights, '내가 찍었거나 쓸 권한이 있는 사진이야'),
+      field('사진 설명', desc), goBtn, h('div', { class: 'go' }, btn('돌아가기', 'sm ghost', () => { dropUrl(); back(); })));
+    ui.setSheetOnClose(dropUrl);
+  }
+
+  // ═════════ AI 검수 (참고용 — 품질 보증 아님) ═════════
+  const VERDICT = { ok: ['괜찮아', 'v-ok'], issue: ['확인 필요', 'v-no'], unsure: ['판단 어려움', 'v-unk'] };
+  function reviewView(r, img, p, s) {
+    if (!r) return null;
+    if (r.status === '실패') return h('p', { class: 'badbox' }, `AI 검수를 못 했어: ${r.error_message || r.error_code || '이유 없음'}`);
+    const checks = (r.scores && r.scores.checks) || {};
+    return h('div', { class: 'stack' },
+      h('p', { class: 'notice' }, `AI(${r.model}) 의견이야 — 품질을 보장하는 점수가 아니고 틀릴 수 있어. 쓸지 말지는 네가 정해.`),
+      r.summary ? h('p', null, r.summary) : null,
+      h('ul', { class: 'lic' }, ...IMG.REVIEW_CHECKS.filter(([k]) => checks[k]).map(([k, label]) => {
+        const c = checks[k];
+        const v = VERDICT[c.verdict] || VERDICT.unsure;
+        return h('li', null, h('span', { class: 'chip ' + v[1] }, v[0]), ` ${label}`, c.reason ? h('small', null, ` — ${c.reason}`) : null,
+          c.confidence != null ? h('small', { class: 'hint' }, ` (확신 ${Math.round(Number(c.confidence) * 100)}%)`) : null);
+      })),
+      r.uncertainty ? h('p', { class: 'hint' }, `불확실한 점: ${r.uncertainty}`) : null,
+      (r.suggestions || []).length ? h('div', { class: 'stack' }, h('p', { class: 'legend' }, 'AI가 제안한 고칠 점'),
+        ...r.suggestions.map((t) => h('div', { class: 'go' }, h('span', null, t),
+          img.kind === 'ai' && s ? btn('이걸로 고치기', 'sm ghost', () => genSheet(p, s, { base: img, text: t })) : null))) : null,
+      h('p', { class: 'hint' }, `비용 ${usd(r.cost_status === '청구 없음' ? 0 : r.usage_usd ?? r.est_usd)} (${r.cost_status})`));
+  }
+  function reviewSheet(p, img, o = {}) {
+    const st = settings();
+    const keys = (dataOf(p.id) || {}).keys || {};
+    const opts = IMG.REVIEW_MODELS.map((m) => ({ ...m, ok: keyOk(keys, m.provider) }));
+    const pick0 = opts.find((m) => m.id === st.image_review_model && m.ok) || opts.find((m) => m.ok && m.free) || opts.find((m) => m.ok) || opts[0];
+    const sel = h('select', { value: pick0 ? pick0.id : '' }, opts.map((m) => opt(m.id, `${m.label}${m.free ? ' (무료)' : ' (유료)'}${m.ok ? '' : ' — 키 없음'}`)));
+    const costLine = h('p', { class: 'hint' });
+    const out = h('div', { class: 'stack' });
+    const goB = btn('AI 검수 받기', 'wide', () => go());
+    const nImgs = 1 + ((img.ref_images || []).length || 0);
+    const upd = () => {
+      const m = opts.find((x) => x.id === sel.value);
+      const est = m ? IMG.estimateReviewUsd(m.id, nImgs) : null;
+      costLine.textContent = m ? (m.free ? `무료 (${IMG.PROVIDERS[m.provider].free_note}) · 이미지 ${nImgs}장을 보내` : `예상 ${usd(est)} · 이미지 ${nImgs}장 + 짧은 답 (근거: ${IMG.reviewBasis(m.id, nImgs)}) — 이미지 비용(예산)에 같이 셈`) : '';
+      goB.disabled = !m || !m.ok || est == null;
+      goB.dataset.est = est == null ? '' : String(est);
+    };
+    sel.addEventListener('change', upd);
+    const go = async () => {
+      const j = await run(goB, () => api(`/images/${img.id}/review`, { method: 'POST', body: { model: sel.value, confirm_usd: Number(goB.dataset.est), post_id: p.id, slot_key: o.slot ? o.slot.key : undefined }, timeout: 90000 }));
+      if (j && j.review) { put(out, reviewView(j.review, img, p, o.slot)); refresh(p.id); }
+    };
+    openSheet('AI 검수 (참고용)',
+      thumb(img, null),
+      h('p', { class: 'hint' }, '원고의 사진 자리와 맞는지, 이상한 물체·글자·로고, 사람·동물 형태, 물리적으로 이상한 곳, 구도·조명, 잘랐을 때 잘리는지, 실제 제품으로 오해할 만한지를 봐줘.'),
+      field('검수할 AI', sel), costLine, goB, out,
+      h('p', { class: 'hint' }, '앱이 대신 고르거나 지우지 않아. 원본은 그대로 남아.'),
+      o.back ? h('div', { class: 'go' }, btn('돌아가기', 'sm ghost', o.back)) : null);
+    upd();
+    api('/images/' + img.id).then((j) => { const last = (j.reviews || []).find((r) => r.kind === 'ai_review'); if (last && !out.childNodes.length) put(out, h('p', { class: 'legend' }, '지난 AI 검수'), reviewView(last, img, p, o.slot)); }).catch(() => {});
+  }
+
+  // ═════════ 모델 비교 (같은 설명·비율·참고 사진으로) ═════════
+  function compareSheet(p, s, f0) {
+    const d = dataOf(p.id) || {};
+    const st = settings();
+    const keys = d.keys || {};
+    const modes = IMG.resolveModes(st);
+    // 처음에는 키가 있는 모드 중 모델이 서로 다른 것 두 개를 고름 (같은 모델을 품질만 바꿔 비교하지 않게 — 바꿀 수 있음)
+    const picks = new Set();
+    for (const m of modes) {
+      if (picks.size >= 2) break;
+      if (keyOk(keys, m.caps.provider) && ![...picks].some((id) => modes.find((x) => x.id === id).model === m.model)) picks.add(m.id);
+    }
+    const list = h('div', { class: 'stack' });
+    const costBox = h('div', { class: 'costbox' });
+    const msg = h('div');
+    const goB = btn('비교 만들기', 'wide', () => start());
+    let rows = [], busy = false;
+    const prods = ui.productsOf(p.id) || [];
+    const hide = prods.flatMap((x) => [x.brand, x.name, x.model]).filter((v) => v && String(v).trim().length >= 2);
+    const refsOut = () => (f0.refs || []).map((r) => ({ image_id: r.image.id, role: r.role }));
+    const plan = () => modes.filter((m) => picks.has(m.id)).map((m) => {
+      const q = IMG.normQuality(m.model, m.quality);
+      const size = IMG.sizeFor(f0.purpose, f0.ratio, m.model, q);
+      const sc = IMG.buildScene({ post: p, slot: s, text: clean(f0.text), preset: f0.preset, purpose: f0.purpose, ratio: f0.ratio, extra: clean(f0.extra), hide, refs: refsOut(), size: IMG.sizeLabel(size), channel: p.channel_id, overrides: f0.scene });
+      const est = IMG.estimateUsd({ quality: q, size, promptTokens: IMG.estimateTokens(IMG.promptFromScene(sc)), prices: prices(), model: m.model, refs: refsOut().length });
+      return { m, q, size, est, ok: keyOk(keys, m.caps.provider), refsOk: refsOut().length <= (m.caps.refsMax || 0) };
+    });
+    const update = () => {
+      put(list, ...modes.map((m) => {
+        const c = h('input', { type: 'checkbox' });
+        c.checked = picks.has(m.id);
+        c.disabled = !keyOk(keys, m.caps.provider) || (!picks.has(m.id) && picks.size >= 3);
+        c.addEventListener('change', () => { if (c.checked) picks.add(m.id); else picks.delete(m.id); update(); });
+        return h('label', { class: 'chk' }, c, ` ${m.label} — ${m.caps.label} (${IMG.PROVIDERS[m.caps.provider] ? IMG.PROVIDERS[m.caps.provider].label : '?'})${keyOk(keys, m.caps.provider) ? '' : ' · 키 없음'}`);
+      }));
+      rows = plan();
+      const total = rows.reduce((a, r) => a + (r.est == null ? NaN : r.est), 0);
+      const u = (dataOf(p.id) || {}).usage || null;
+      put(costBox, ...rows.map((r) => h('span', null, `${r.m.caps.label}: ${IMG.qualityLabel(r.m.model, r.q)} · ${IMG.sizeLabel(r.size)} · ${r.m.caps.free ? '무료' : r.est == null ? '계산 못 함' : '예상 ' + usd(r.est)}${r.refsOk ? '' : ' · 참고 사진을 못 받는 모델(빼고 비교 안 됨)'}`)),
+        h('b', { class: 'num' }, Number.isFinite(total) ? `합계 예상 ${usd(IMG.roundUsd(total))}` : '합계를 계산하지 못했어'),
+        u ? h('span', { class: 'hint' }, `${usageLine(u)} · 남은 예산 ${usd(Math.max(0, Number(u.budget_usd) - Number(u.month_usd)))}`) : null,
+        h('span', { class: 'hint' }, '같은 설명·비율·참고 사진으로 한 번씩 만들어. 한두 번 비교로 어느 모델이 늘 낫다고 단정할 수는 없어.'));
+      let why = '';
+      if (rows.length < 2) why = '비교할 모드를 2~3개 골라줘 (키가 있는 것만).';
+      else if (rows.some((r) => !r.refsOk)) why = '참고 사진을 못 받는 모델이 있어. 그 모델을 빼거나 참고 사진을 빼고 비교해줘.';
+      else if (!Number.isFinite(total)) why = '예상 비용을 계산하지 못한 모델이 있어.';
+      else if (u && Number(u.today) + rows.length > Number(u.daily_limit)) why = '오늘 만들 수 있는 횟수가 모자라.';
+      else if (u && Number(u.month_usd) + total > Number(u.budget_usd) + 1e-9) why = '이번 달 예산을 넘게 돼.';
+      else if (u && u.request_cap_usd != null && total > Number(u.request_cap_usd) + 1e-9) why = `한 번에 쓸 수 있는 금액(${usd(u.request_cap_usd)})을 넘어.`;
+      goB.disabled = !!why || busy;
+      goB.textContent = busy ? '만드는 중…' : Number.isFinite(total) ? `예상 ${usd(IMG.roundUsd(total))} (${rows.length}장) · 비교 만들기` : '비교 만들기';
+      if (!busy) put(msg, why ? h('p', { class: 'hint' }, why) : '');
+    };
+    const results = [];
+    const batchId = newUuid();
+    const start = async () => {
+      if (busy) return;
+      busy = true; update();
+      const todo = rows.slice();
+      // 무료 모델(FLUX.2 klein)이 들어 있으면 참고 사진의 작은 사본을 먼저 만들어 올림 (원본은 그대로, 돈 안 나감)
+      if (todo.some((r) => r.m.caps.provider === 'cloudflare') && (f0.refs || []).length) {
+        put(msg, h('p', { class: 'hint' }, '무료 모델에 보낼 작은 사본을 만드는 중… (원본은 그대로)'));
+        try { for (const r of f0.refs) await ensureSmall(r.image); } catch (e) {
+          busy = false; update();
+          if (!e || e.code !== 'auth') put(msg, h('p', { class: 'badbox' }, '작은 사본을 만들지 못했어: ' + ((e && e.code ? ui.errText(e) : e && e.message) || '이유 모름')));
+          return;
+        }
+      }
+      for (let i = 0; i < todo.length; i++) {
+        if (!goB.isConnected && i > 0) break;
+        const r = todo[i];
+        const reserve = IMG.roundUsd(todo.slice(i).reduce((a, x) => a + (x.est || 0), 0));
+        const body = { request_key: newKey(), post_id: p.id, slot_key: s.key, mode: 'generate', purpose: f0.purpose, ratio: f0.ratio, preset: f0.preset, style: f0.preset,
+          text: clean(f0.text), extra: clean(f0.extra), quality: r.q, model: r.m.model, refs: refsOut(), scene: Object.keys(f0.scene || {}).length ? f0.scene : undefined,
+          confirm_usd: r.est, generic_ok: f0.genericOk || undefined, batch: { id: batchId, kind: 'compare', index: i, total: todo.length }, reserve_usd: reserve };
+        put(msg, h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, `${i + 1}/${todo.length} ${r.m.caps.label} 만드는 중…`)));
+        let j = null;
+        try { j = await sendGenerate(body); } catch (e) { results.push({ m: r.m, error: e }); continue; }
+        let g = j.generation, img = null;
+        for (let t = 0; t < 80 && g.status === '생성 중'; t++) {
+          await sleep(t < 20 ? 3000 : 5000);
+          try { const x = await api('/images/generations/' + g.id); g = x.generation; img = x.image; if (C[p.id] && C[p.id].data) C[p.id].data.usage = x.usage; } catch (e) { if (e && e.code === 'auth') return; }
+        }
+        results.push({ m: r.m, generation: g, image: img });
+      }
+      busy = false;
+      showResults();
+    };
+    const evalBox = (img, g) => {
+      const sc = {};
+      let pref = false;
+      const segs = IMG.EVAL_CRITERIA.map(([k, label, inv]) => {
+        const seg = h('div', { class: 'seg', role: 'group', 'aria-label': label });
+        const draw = () => put(seg, ...[[3, inv ? '거의 없음' : '좋음'], [2, '보통'], [1, inv ? '많이 남' : '아쉬움']].map(([v, l]) =>
+          h('button', { type: 'button', 'aria-pressed': String(sc[k] === v), onclick: () => { sc[k] = sc[k] === v ? undefined : v; draw(); } }, l)));
+        draw();
+        return h('div', { class: 'stack' }, h('small', null, label), seg);
+      });
+      const prefChk = h('input', { type: 'checkbox' });
+      prefChk.addEventListener('change', () => { pref = prefChk.checked; });
+      const save = btn('내 평가 저장', 'sm', async (ev) => {
+        const b = ev.currentTarget; // await 뒤에는 ev.currentTarget 이 비어 있어서 먼저 잡아 둠
+        const j = await run(b, () => api(`/images/${img.id}/evaluate`, { method: 'POST', body: { scores: sc, preferred: pref, batch_id: batchId } }), '평가를 저장했어 (AI 평가와 따로 남아)');
+        if (j) b.textContent = '저장했어';
+      });
+      return h('div', { class: 'stack' }, h('p', { class: 'legend' }, '내 평가 (AI 평가와 따로 저장)'), ...segs, h('label', { class: 'chk' }, prefChk, ' 이 비교에서 제일 나아'), save);
+    };
+    const showResults = () => {
+      openSheet(`${slotName(s)} — 모델 비교`,
+        h('p', { class: 'hint' }, '같은 설명·비율·참고 사진으로 만든 결과야. 마음에 드는 걸 연결하고, 평가를 남기면 나중에 모델을 고를 때 참고할 수 있어 (앱이 대신 고르지 않아).'),
+        ...results.map((r) => {
+          if (!r.image) return h('div', { class: 'slot' }, h('b', null, r.m.caps.label), h('p', { class: 'badbox' }, r.generation ? r.generation.error_message || '못 만들었어' : ui.errText(r.error)));
+          const g = r.generation, c = genCost(g);
+          const secs = g.started_at && g.finished_at ? Math.max(1, Math.round((Date.parse(g.finished_at) - Date.parse(g.started_at)) / 1000)) : null;
+          return h('div', { class: 'slot on' }, h('b', null, `${r.m.label} — ${r.m.caps.label}`), thumb(r.image, null),
+            h('p', { class: 'hint' }, `${g.model} · 품질 ${IMG.qualityLabel(g.model, g.quality)} · ${r.image.width}×${r.image.height}${secs ? ` · ${secs}초` : ''} · 비용 ${usd(c.usd)} (${c.label})`),
+            h('div', { class: 'go' }, btn(`이걸로 쓰기 → ${slotName(s)}`, 'sm', async (ev) => { const j = await linkTo(p, s, r.image, ev.currentTarget, IMG.PURPOSES[g.purpose] ? { purpose: g.purpose } : null); if (j) toast('연결했어'); }),
+              btn('AI 평가 (참고용)', 'sm ghost', () => reviewSheet(p, r.image, { back: showResults, slot: s }))),
+            evalBox(r.image, g));
+        }),
+        h('div', { class: 'go' }, btn('닫기', 'sm ghost', closeSheet)));
+      ui.setSheetOnClose(() => refresh(p.id));
+    };
+    openSheet(`${slotName(s)} — 여러 모델로 비교`,
+      h('p', { class: 'hint' }, `설명: ${clean(f0.text) || s.text} · ${IMG.PRESETS[f0.preset].label} · ${f0.ratio}${(f0.refs || []).length ? ` · 참고 사진 ${(f0.refs || []).length}장` : ''}`),
+      h('p', { class: 'legend' }, '비교할 모드 (2~3개)'), list, costBox, msg, goB,
+      h('div', { class: 'go' }, btn('돌아가기', 'sm ghost', () => genSheet(p, s, { modeId: f0.modeId, refs: f0.refs, text: f0.text }))));
+    update();
+  }
+
+  // ═════════ 수정 이력 ═════════
+  function lineageBox(img) {
+    const box = h('div', { class: 'stack' }, h('p', { class: 'hint' }, '수정 이력 불러오는 중…'));
+    api(`/images/${img.id}/lineage`).then((j) => {
+      const items = j.items || [];
+      if (items.length <= 1) { put(box, h('p', { class: 'hint' }, '고친 기록이 없어 (이 이미지가 원본이야).')); return; }
+      put(box, h('p', { class: 'hint' }, '원본은 지우거나 덮어쓰지 않아. 고칠 때마다 새 이미지로 이어져.'),
+        ...items.map((x) => {
+          const c = x.cost ? genCost({ ...x.cost, est_usd: x.cost.est_usd }) : null;
+          return h('div', { class: 'refrow', style: `margin-left:${Math.min(4, x.level) * 12}px` },
+            x.url ? thumb({ url: x.url, alt_text: x.description }, null) : h('span', { class: 'hint' }, x.deleted ? '(지운 이미지)' : ''),
+            h('div', { class: 'stack' }, h('small', null, `${x.level === 0 ? '원본' : `${x.level}번째 고침`}${x.id === img.id ? ' · 지금 보는 이미지' : ''}`),
+              h('small', { class: 'hint' }, `${x.provider || x.kind} · ${x.model || ''}${c ? ` · ${usd(c.usd)} (${c.label})` : ''} · ${L.fmtTime(x.created_at)}`),
+              x.user_prompt ? h('small', null, x.user_prompt) : null));
+        }));
+    }).catch((e) => put(box, h('p', { class: 'hint' }, ui.errText(e))));
+    return box;
   }
 
   // ═════════ 실제 사진 찾기 (Pexels) ═════════
@@ -984,18 +1494,31 @@ export function createStudio(ui) {
     info.push(h('div', { class: 'chips' }, kindChip(img), reviewChip(img)));
     if (img.kind === 'ai') {
       const c = genCost(g);
-      info.push(h('p', { class: 'hint' }, `AI 생성 · ${img.model}${g ? ' · ' + g.size + ' · 품질 ' + (IMG.QUALITY_LABEL[g.quality] || g.quality) : ''}${c ? ` · 비용 ${usd(c.usd)} (${c.label})` : ''}`));
-      info.push(h('ul', { class: 'lic' }, h('li', null, '글자·로고·가격이 생기지 않았는지'), h('li', null, '실제 상품 사진처럼 보이지 않는지 (예시 삽화야)'), h('li', null, '사진 자리 설명과 맞는지')));
+      info.push(h('p', { class: 'hint' }, `${img.composite ? 'AI 합성 (실제 사진 참고)' : 'AI 생성'} · ${img.model}${g ? ' · ' + IMG.sizeLabel(g.size) + ' · 품질 ' + IMG.qualityLabel(g.model, g.quality) : ''}${c ? ` · 비용 ${usd(c.usd)} (${c.label})` : ''}`));
+      info.push(h('ul', { class: 'lic' }, h('li', null, '글자·로고·가격이 생기지 않았는지'),
+        h('li', null, img.composite ? '참고한 제품 사진과 모양·글자·버튼이 같은지 (다르면 쓰지 마)' : '실제 상품 사진처럼 보이지 않는지 (AI 예시 이미지야)'), h('li', null, '사진 자리 설명과 맞는지')));
+      info.push(h('div', { class: 'go' }, btn('AI 검수 (참고용)', 'sm ghost', () => reviewSheet(p, img, { back: () => previewSheet(p, s), slot: s })),
+        btn('고치기 (부분 수정)', 'sm ghost', () => genSheet(p, s, { base: img }))));
+      const hist = det('img-hist:' + img.id, '수정 이력', false, 'plain');
+      let histLoaded = false;
+      hist.addEventListener('toggle', () => { if (hist.open && !histLoaded) { histLoaded = true; hist.append(lineageBox(img)); } });
+      info.push(hist);
       const dd = det('img-prompt:' + img.id, 'AI에 보낸 내용(프롬프트) 보기', false, 'plain');
       dd.append(h('pre', { class: 'prompt' }, img.prompt || ''));
+      if (img.scene) dd.append(h('p', { class: 'legend' }, '장면 설계서'), h('pre', { class: 'prompt' }, JSON.stringify(img.scene, null, 2)));
       info.push(dd);
-      info.push(h('p', { class: 'hint' }, "블로그에 올릴 때 '※ AI로 만든 예시 이미지'를 사진 아래에 같이 넣어줘 (복사할 때 자동으로 들어가)."));
+      info.push(h('p', { class: 'hint' }, `블로그에 올릴 때 '${IMG.captionHint(img)}'를 사진 아래에 같이 넣어줘 (복사할 때 자동으로 들어가).`));
     } else if (img.kind === 'stock') {
       info.push(h('p', null, 'Photo by ', img.author_url ? h('a', { href: img.author_url, target: '_blank', rel: 'noopener noreferrer' }, img.author_name || '사진가') : (img.author_name || '사진가'),
         ' on ', img.source_url ? h('a', { href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels') : 'Pexels'));
       info.push(h('p', { class: 'hint' }, `라이선스: ${img.license}`), h('div', { class: 'go' }, h('span', { class: 'sns' }, img.attribution_text), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(img.attribution_text, ev.currentTarget) }, '출처 문구 복사')));
     } else if (img.kind === 'upload') info.push(h('p', { class: 'hint' }, '직접 올린 사진 · 쓸 권한이 있다고 확인함'), sourcePicker(img, () => { refresh(p.id); }));
     else info.push(h('p', { class: 'hint' }, `카드뉴스에서 만든 이미지${img.license && img.license.includes('배경') ? ' · ' + img.license.replace(/^카드뉴스 \(앱에서 직접 만듦\)\s*·\s*/, '') : ''}`));
+    // 실제 사진은 AI로 고치지 않음 — 대신 참고 사진으로 넣어 새로 만들면 'AI 합성'으로 따로 표시됨
+    if (img.kind === 'upload' || img.kind === 'stock') {
+      info.push(h('div', { class: 'go' }, btn('이 사진을 참고해서 AI로 새로 만들기', 'sm ghost', () => genSheet(p, s, { refs: [{ image: img, role: 'subject' }] }))),
+        h('p', { class: 'hint' }, "원본 사진은 그대로 두고, 이 사진의 대상 모양을 참고한 새 이미지를 만들어 ('AI 합성' 표시). '직접 찍기' 자리에는 못 써."));
+    }
     info.push(h('p', { class: 'hint' }, `원본 ${img.width}×${img.height} · ${fmtBytes(img.bytes)} · ${L.fmtTime(img.created_at)}${img.used_posts > 1 ? ` · 다른 원고 ${img.used_posts - 1}곳에서도 사용 중` : ''}`));
     const altSaved = () => alt.value.trim() === String(img.alt_text || '').trim();
     openSheet(`${slotName(s)} 미리보기`,
@@ -1324,6 +1847,19 @@ export function createStudio(ui) {
       h('p', { class: 'legend' }, inUse ? `쓰는 곳 ${inUse}곳` : '쓰는 곳 없음'),
       used.length ? h('ul', { class: 'lic' }, used) : null,
       (j.decks || []).length ? h('p', { class: 'hint' }, `카드뉴스 배경으로 ${(j.decks || []).length}곳에서 사용 중`) : null,
+      // 1.5.0: AI 검수·내 평가 기록과 수정 이력 (AI 이미지)
+      img.kind === 'ai' ? (() => {
+        const rv = (j.reviews || []);
+        const ai = rv.find((r) => r.kind === 'ai_review');
+        const me = rv.find((r) => r.kind === 'user_eval');
+        const box = det('lib-review:' + img.id, `검수·평가 기록 (${rv.length})`, false, 'plain');
+        box.append(ai ? reviewView(ai, img, null, null) : h('p', { class: 'hint' }, 'AI 검수 기록 없음'),
+          me ? h('p', { class: 'hint' }, `내 평가: ${IMG.EVAL_CRITERIA.filter(([k]) => me.scores && me.scores[k]).map(([k, l]) => `${l} ${me.scores[k]}/3`).join(' · ') || '점수 없음'}${me.preferred ? ' · 비교에서 제일 나음' : ''}`) : null);
+        const hist = det('lib-hist:' + img.id, '수정 이력', false, 'plain');
+        let loaded = false;
+        hist.addEventListener('toggle', () => { if (hist.open && !loaded) { loaded = true; hist.append(lineageBox(img)); } });
+        return h('div', { class: 'stack' }, box, hist);
+      })() : null,
       h('div', { class: 'go' }, dl,
         btn('지우기', 'sm danger', async (ev) => {
           if (inUse) { toast(IMAGE_ERR.image_in_use, 4000); return; }
@@ -1340,81 +1876,191 @@ export function createStudio(ui) {
     const st = settings();
     const pr = st.image_prices || {};
     const status = h('div', { class: 'stack' }, h('p', { class: 'hint' }, '연결 상태 확인 중…'));
-    api('/images/config').then((j) => {
-      put(status, 
-        h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, 'Cloudflare (무료 AI 이미지)'), h('small', null, 'Supabase Secrets: CF_ACCOUNT_ID · CF_API_TOKEN')), h('span', { class: 'badge ' + (j.keys.cloudflare ? 'v-ok' : 'v-no') }, j.keys.cloudflare ? '연결됨' : '없음')),
-        h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, 'OpenAI (유료 AI 이미지 · 고치기)'), h('small', null, 'Supabase Secrets: OPENAI_API_KEY')), h('span', { class: 'badge ' + (j.keys.openai ? 'v-ok' : 'v-no') }, j.keys.openai ? '키 연결됨' : '키 없음')),
+    const PROV_ROWS = [
+      ['cloudflare', 'Cloudflare (무료 AI 이미지)', 'Supabase Secrets: CF_ACCOUNT_ID · CF_API_TOKEN'],
+      ['openai', 'OpenAI (유료 AI 이미지 · 고치기 · 참고 사진)', 'Supabase Secrets: OPENAI_API_KEY'],
+      ['gemini', 'Google Gemini (유료 AI 이미지 · 고치기 · 참고 사진)', 'Supabase Secrets: GEMINI_API_KEY'],
+    ];
+    // 공급자마다: 키 있음(서버 Secrets) · 연결 확인(키·모델을 실제로 물어본 결과) · 마지막으로 실제로 만든 때 — 따로 보여줌
+    const provRow = (id, title, env, j) => {
+      const ps = (j.provider_status || {})[id] || {};
+      const hasKey = !!(j.keys || {})[id];
+      const chk = ps.check;
+      const line = h('small', { class: 'hint' }, [
+        chk ? `연결 확인: ${chk.ok ? '됨' : '안 됨'} (${L.fmtTime(chk.checked_at)}${chk.ok ? '' : ' · ' + (chk.message || chk.code)})` : '연결 확인: 아직 안 함',
+        ps.last_success ? `실제 생성 성공: ${L.fmtTime(ps.last_success.at)} (${ps.last_success.model})` : '실제 생성 성공 기록 없음',
+        ps.last_failure ? `마지막 실패: ${L.fmtTime(ps.last_failure.at)} (${ps.last_failure.code})` : '',
+      ].filter(Boolean).join(' · '));
+      const badge = hasKey ? (chk && chk.ok ? '키 연결됨 · 확인됨' : '키 연결됨 · 확인 전') : '키 없음';
+      return h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, title), h('small', null, env), line),
+        h('div', { class: 'stack' }, h('span', { class: 'badge ' + (hasKey ? (chk && chk.ok ? 'v-ok' : 'v-unk') : 'v-no') }, badge),
+          hasKey ? btn('연결 확인', 'sm ghost', async (ev) => {
+            const r = await run(ev.currentTarget, () => api('/images/providers/check', { method: 'POST', body: { provider: id } }));
+            if (r && r.check) { toast(r.check.ok ? '연결 확인됨 (이미지는 만들지 않았어)' : '연결 안 됨: ' + r.check.message, 5000); loadStatus(); }
+          }) : null));
+    };
+    const loadStatus = () => api('/images/config').then((j) => {
+      put(status,
+        ...PROV_ROWS.map(([id, title, env]) => provRow(id, title, env, j)),
         ...j.providers.map((x) => h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${x.label} (실제 사진 검색)`), h('small', null, 'Supabase Secrets: PEXELS_API_KEY')), h('span', { class: 'badge ' + (x.connected ? 'v-ok' : 'v-no') }, x.connected ? '키 연결됨' : '키 없음'))),
+        h('p', { class: 'hint' }, "'키 연결됨'은 서버에 키가 있다는 뜻이야. '연결 확인'은 이미지를 만들지 않고 키·모델을 공급자에 물어본 결과고(돈 안 듦), 실제로 만들어 본 기록은 따로 보여줘."),
         h('p', { class: 'hint' }, `${usageLine(j.usage)} · 보관함 ${L.fmtNum(j.usage.image_count || 0)}장 · ${fmtBytes(Number(j.usage.storage_bytes || 0))} (멈추는 선 ${fmtBytes(j.storage_limit)})`),
-        j.settings.image_gen_model === j.test_model || j.settings.image_edit_model === j.test_model ? h('p', { class: 'notice' }, '점검용 가짜 모델(gf-test-fake)로 돼 있어. 실제로 쓰려면 모델 이름을 gpt-image-2.5-flare / gpt-image-2.5-sunburst 로 바꿔줘.') : null);
+        j.settings.image_gen_model === j.test_model || j.settings.image_edit_model === j.test_model ? h('p', { class: 'notice' }, '점검용 가짜 모델(gf-test-fake)로 돼 있어. 실제로 쓰려면 아래에서 모델을 골라줘.') : null);
     }).catch((e) => put(status, h('p', { class: 'hint' }, ui.errText(e))));
+    loadStatus();
     const inp = (v, attrs = {}) => h('input', { type: 'text', value: v ?? '', oninput: ui.markDirty, ...attrs });
+    // 모델 고르기: 앱이 아는 모델만 (모르는 이름은 저장 못 함 — 1.5.0). 지금 값이 목록에 없으면 표시만 해서 바꾸게
+    const modelSel = (value, { editOnly = false } = {}) => {
+      const list = IMG.KNOWN_MODELS.filter((m) => !editOnly || IMG.modelCaps(m).edit);
+      const opts = list.map((m) => { const c = IMG.modelCaps(m); return opt(m, `${m} — ${IMG.PROVIDERS[c.provider].label}${c.free ? ' · 무료' : ''}${c.status === 'preview' ? ' · 미리보기' : ''}${c.deprecated ? ' · 이전 모델' : ''}`); });
+      if (value === TEST_MODEL) opts.unshift(opt(TEST_MODEL, `${TEST_MODEL} — 점검용 (실제 생성 아님)`));
+      else if (value && !list.includes(value)) {
+        const c = IMG.modelCaps(value);
+        opts.unshift(opt(value, c.known && !c.usable ? `${value} — 공급자가 종료한 모델 (${c.retired}, 바꿔줘)` : c.known ? `${value} — 여기서 못 쓰는 모델 (바꿔줘)` : `${value} — 앱이 모르는 모델 (바꿔줘)`));
+      }
+      const el = h('select', { value: value || list[0], onchange: ui.markDirty }, opts);
+      el.value = value || list[0];
+      return el;
+    };
     const f = {
-      gen: inp(st.image_gen_model || IMG.FREE_MODEL, { autocapitalize: 'off', spellcheck: 'false' }),
-      edit: inp(st.image_edit_model || 'gpt-image-2.5-sunburst', { autocapitalize: 'off', spellcheck: 'false' }),
+      gen: modelSel(st.image_gen_model || IMG.FREE_MODEL),
+      edit: modelSel(st.image_edit_model || 'gpt-image-2.5-sunburst', { editOnly: true }),
       quality: h('select', { value: st.image_quality || 'medium', onchange: ui.markDirty }, IMG.QUALITIES.map((q) => opt(q, IMG.QUALITY_LABEL[q]))),
       daily: inp(st.image_daily_limit ?? 5, { inputmode: 'numeric' }),
       budget: inp(st.image_monthly_budget_usd ?? 2, { inputmode: 'decimal' }),
+      cap: inp(st.image_request_cap_usd ?? 1, { inputmode: 'decimal' }),
       fx: inp(st.image_fx_krw ?? '', { inputmode: 'decimal', placeholder: '예: 1385' }),
       fxDate: h('input', { type: 'date', value: st.image_fx_date || '', oninput: ui.markDirty }),
       fxSrc: inp(st.image_fx_source || '', { placeholder: '예: 하나은행 매매기준율' }),
       pOut: inp(pr.image_output_per_m ?? 30, { inputmode: 'decimal' }), pIn: inp(pr.image_input_per_m ?? 8, { inputmode: 'decimal' }), pText: inp(pr.text_input_per_m ?? 5, { inputmode: 'decimal' }),
       pAt: h('input', { type: 'date', value: pr.checked_at || '', oninput: ui.markDirty }), pSrc: h('input', { type: 'url', value: pr.source || 'https://developers.openai.com/api/docs/pricing', oninput: ui.markDirty }),
+      review: h('select', { value: st.image_review_model || '', onchange: ui.markDirty }, opt('', '끔 (검수할 때마다 고름)'), ...IMG.REVIEW_MODELS.map((m) => opt(m.id, `${m.label}${m.free ? ' · 무료' : ' · 유료'}`))),
     };
+    f.review.value = st.image_review_model || '';
+    // 모드 4가지: 모드마다 모델·품질 (화면은 고른 모드의 실제 모델을 늘 보여줌)
+    const modes = IMG.resolveModes(st);
+    const modeRows = modes.map((m) => {
+      const ms = modelSel(m.model);
+      const qs = h('select', { onchange: ui.markDirty });
+      const info = h('small', { class: 'hint' });
+      const draw = () => {
+        const c = IMG.modelCaps(ms.value);
+        const cur = qs.value || m.quality;
+        put(qs, ...IMG.qualitiesFor(ms.value).map((q) => opt(q, IMG.qualityLabel(ms.value, q))));
+        qs.value = IMG.normQuality(ms.value, cur);
+        const size = IMG.sizeFor('blog_body', '4:3', ms.value, qs.value);
+        const est = IMG.estimateUsd({ quality: qs.value, size, promptTokens: 900, prices: pr, model: ms.value });
+        info.textContent = `${IMG.PROVIDERS[c.provider] ? IMG.PROVIDERS[c.provider].label : '?'} · ${c.free ? '무료' : est == null ? '가격 계산 못 함' : `블로그 본문 4:3 한 장 예상 약 ${usd(est)}`} · 참고 사진 ${c.refsMax ? c.refsMax + '장까지' : '못 받음'} · 고치기 ${c.edit ? '됨' : '안 됨'}`;
+      };
+      ms.addEventListener('change', () => { qs.value = ''; draw(); });
+      qs.addEventListener('change', draw);
+      draw();
+      return { m, ms, qs, el: h('div', { class: 'stack' }, h('b', null, m.label), h('div', { class: 'row' }, field('모델', ms), field('품질', qs)), info) };
+    });
+    // 용도별 기본 비율
+    const ratioSel = Object.entries(IMG.PURPOSES).filter(([, v]) => v.ratios.length > 1).map(([k, v]) => {
+      const cur = (st.image_ratio_prefs || {})[k];
+      const el = h('select', { onchange: ui.markDirty }, v.ratios.map((r) => opt(r, r)));
+      el.value = v.ratios.includes(cur) ? cur : v.ratios[0];
+      return [k, v, el];
+    });
+    // Gemini 가격 (모델 표 값으로 시작, 바뀌면 고침)
+    const gp = (fid) => {
+      const c = IMG.modelCaps(fid);
+      const g = IMG.geminiPrices(c, pr);
+      const row = { fid, c, per: {}, text: inp(g.text_input_per_m, { inputmode: 'decimal' }), imgIn: inp(g.image_input_per_image, { inputmode: 'decimal' }),
+        at: h('input', { type: 'date', value: (pr[fid] && pr[fid].checked_at) || c.checked || '', oninput: ui.markDirty }) };
+      for (const k of Object.keys(g.per_image)) row.per[k] = inp(g.per_image[k], { inputmode: 'decimal' });
+      return row;
+    };
+    const gRows = IMG.GEMINI_PRICE_IDS.map(gp);
     const num = (el, min, max, label) => { const v = Number(String(el.value).replace(/[,\s$원]/g, '')); if (!Number.isFinite(v) || v < min || v > max) { toast(`${label}: ${min}~${max} 사이 숫자를 넣어줘`); el.focus(); return null; } return v; };
     const guide = det('img-key-guide', '키 받는 방법·넣는 곳 (처음 한 번)', false, '');
     guide.append(h('ol', { class: 'steps' },
       h('li', null, '무료 AI 이미지(Cloudflare): dash.cloudflare.com 에 무료로 가입해 (플랜은 Free 그대로 — 카드 등록 안 해도 돼).'),
       h('li', null, '왼쪽 메뉴 AI → Workers AI → Use REST API → Create a Workers AI API Token → Create API Token → Copy API Token 으로 토큰을 복사해 (한 번만 보여줘). 같은 화면의 Get Account ID 에서 계정 ID도 복사해.'),
-      h('li', null, 'Supabase Secrets 에 CF_ACCOUNT_ID(계정 ID), CF_API_TOKEN(토큰) 이름으로 넣어. 무료 플랜은 하루 10,000 뉴런(이 앱 기준 약 100장)까지고, 넘으면 실패만 하고 돈은 안 나가 (매일 오전 9시에 다시 채워짐).'),
+      h('li', null, 'Supabase Secrets 에 CF_ACCOUNT_ID(계정 ID), CF_API_TOKEN(토큰) 이름으로 넣어. 무료 플랜은 하루 10,000 뉴런까지고, 넘으면 실패만 하고 돈은 안 나가 (매일 오전 9시에 다시 채워짐).'),
       h('li', null, '(선택) OpenAI: platform.openai.com 에 로그인 → API keys → Create new secret key. 결제(Billing)에 크레딧이 있어야 하고, GPT Image 모델은 조직 인증(Organization Verification)이 필요할 수 있어.'),
       h('li', null, 'OpenAI 쪽 안전장치: OpenAI 설정 → Limits → Spend 에서 한 달 한도를 넣고 Enforce a hard limit 를 켜두면, 앱 한도와 별개로 그 금액에서 막혀.'),
+      h('li', null, '(선택) Gemini: aistudio.google.com 에 로그인 → Get API key → Create API key. 이미지 모델은 결제가 연결된 프로젝트에서만 쓸 수 있어 (Google AI Studio의 결제 설정). 키를 Supabase Secrets 에 GEMINI_API_KEY 이름으로 넣어.'),
       h('li', null, 'Pexels: 지금(2026-10-22 확인)은 새 키 발급이 멈춰 있어. 다시 열리면 pexels.com/api → Get Started 로 받아 (무료, 시간당 200번·월 20,000번). 그 전까지는 직접 올리기를 써.'),
-      h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 CF_ACCOUNT_ID, CF_API_TOKEN (그리고 쓰면 OPENAI_API_KEY, PEXELS_API_KEY) 이름으로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
-      h('li', null, '이 화면을 다시 열어 "키 연결됨"이 보이면 끝. 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).')),
+      h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 이름대로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
+      h('li', null, "이 화면을 다시 열어 '키 연결됨'이 보이면 '연결 확인'을 눌러 봐 (이미지를 만들지 않아서 돈이 안 들어). 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).")),
       h('div', { class: 'go' }, h('a', { class: 'copy', href: 'https://supabase.com/dashboard/project/oxewhsqmdkiasckvnyua/functions/secrets', target: '_blank', rel: 'noopener noreferrer' }, 'Supabase Secrets 열기 ↗'),
         h('a', { class: 'copy', href: 'https://dash.cloudflare.com/profile/api-tokens', target: '_blank', rel: 'noopener noreferrer' }, 'Cloudflare 토큰 ↗'),
         h('a', { class: 'copy', href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI 키 ↗'),
+        h('a', { class: 'copy', href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener noreferrer' }, 'Gemini 키 ↗'),
         h('a', { class: 'copy', href: 'https://www.pexels.com/api/', target: '_blank', rel: 'noopener noreferrer' }, 'Pexels API ↗')));
+    const cmp = h('div', { class: 'stack' });
+    const cmpDet = det('img-compare-stats', '모델 비교 기록 (내 평가만)', false, '');
+    cmpDet.append(cmp);
+    let cmpLoaded = false;
+    cmpDet.addEventListener('toggle', () => {
+      if (!cmpDet.open || cmpLoaded) return;
+      cmpLoaded = true;
+      put(cmp, h('p', { class: 'hint' }, '불러오는 중…'));
+      api('/images/compare-stats').then((j) => {
+        if (!j.models.length) { put(cmp, h('p', { class: 'hint' }, "아직 비교 기록이 없어. 'AI로 만들기 > 여러 모델로 비교하기'에서 같은 설명으로 비교하고 평가를 남겨줘.")); return; }
+        put(cmp, h('p', { class: 'hint' }, `같은 입력으로 비교한 ${j.batches}번 중 내가 평가한 것만 셈 (AI 평가는 안 섞음). 비교가 적으면 어느 모델이 늘 낫다고 단정할 수 없어.`),
+          ...j.models.map((m) => h('p', null, `${m.model}: 평가 ${m.rated}장 · '제일 나음' ${m.preferred}번${m.avg.usable != null ? ` · 게시용 평균 ${m.avg.usable}/3` : ''}${m.avg.ai_look != null ? ` · AI 티(3=거의 없음) ${m.avg.ai_look}/3` : ''}`)));
+      }).catch((e) => put(cmp, h('p', { class: 'hint' }, ui.errText(e))));
+    });
     return [
       status, guide,
-      h('h3', null, '모델'), field('생성 모델', f.gen), field('편집 모델 (고쳐서 만들기)', f.edit),
-      h('p', { class: 'hint' }, '계정에서 이 모델을 못 쓰면 다른 이미지 모델 이름으로 바꿔줘. 앱이 아는 모델 (OpenAI 문서, 2026-10-22 확인):'),
+      h('h3', null, '기본 모델'), field('생성 모델', f.gen), field('편집 모델 (고쳐서 만들기)', f.edit),
+      h('p', { class: 'hint' }, `앱이 아는 모델만 고를 수 있어 (모르는 이름은 다른 공급자로 보내지 않고 막아). 가격·옵션 확인: OpenAI ${IMG.PROVIDERS.openai.checked} · Gemini ${IMG.PROVIDERS.gemini.checked} · Cloudflare ${IMG.PROVIDERS.cloudflare.checked}.`),
       h('div', { class: 'go' }, btn(`무료 모델로 (${IMG.FREE_MODEL})`, 'sm', () => { f.gen.value = IMG.FREE_MODEL; ui.markDirty(); toast('생성 모델을 무료 모델로 바꿨어. 저장을 눌러줘.'); })),
-      h('ul', { class: 'lic' },
-        h('li', null, 'cf-flux-2-klein-4b — 무료 기본 (Cloudflare Workers AI · FLUX.2 [klein] 4B). 고른 비율 그대로 만들어 (긴 변 1024). 사진이 더 자연스러워. 품질은 하나(보통). 무료 플랜이면 하루 약 60장'),
-        h('li', null, 'cf-flux-1-schnell — 무료 (FLUX.1 schnell, 예전 기본). 1024×1024로 만들고 내려받을 때 비율대로 잘라. 품질 = 그리는 단계(낮음 4·보통 6·높음 8). 더 많이(하루 약 80장) 만들 수 있지만 AI 티가 더 나'),
-        h('li', null, '무료 모델 둘 다: 한국어 설명은 같은 무료 계정의 글 모델이 영어로 바꿔서 보내고, 폰으로 찍은 생활 사진처럼 그리게 해. 고치기(편집)는 못 해. 글자·사람 손은 약해'),
-        h('li', null, 'gpt-image-2.5-flare · gpt-image-2.5-sunburst — 유료(OpenAI). 원하는 비율 그대로, 품질 5단계, 가격은 아래 가격표'),
-        h('li', null, 'gpt-image-2 — 원하는 비율 그대로, 품질 3단계. 장당 가격을 확인 못 해서 예상 비용을 넉넉히 잡아'),
-        h('li', null, 'gpt-image-1.5 · gpt-image-1 · gpt-image-1-mini — 이전 모델(Deprecated). 정해진 크기 3가지로 만들고 내려받을 때 잘라, 품질 3단계, 모델 페이지의 장당 가격으로 계산'),
-        h('li', null, '그 밖의 이름 — 정해진 크기 3가지·품질 3단계로 보내고, 예상 비용은 넉넉히 잡고 사용량 계산은 안 해 (청구액은 직접 확인)')),
-      field('기본 품질', f.quality, '보통(medium) 1024×1024 한 장 예상 약 $0.013, 높음은 약 $0.05 (2.5 모델, 2026-10-22 가격표 기준). 모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내.'),
+      field('기본 품질', f.quality, '모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내. Gemini는 품질 칸이 해상도야 (보통 1K · 높음 2K · 최고 4K).'),
+      h('h3', null, '모드 (AI로 만들기에서 고름)'),
+      h('p', { class: 'hint' }, '만들 때마다 모드를 고르고, 고른 모드의 실제 모델 이름·예상 비용을 보여준 뒤에만 만들어. 무료 모드에서 유료 모델로 저절로 바뀌지 않아.'),
+      ...modeRows.map((r) => r.el),
+      h('h3', null, 'AI 검수'), field('기본 검수 모델', f.review, '만든 이미지를 AI가 보고 의견을 줘 (품질 보증 아님). 유료 모델은 검수 비용도 이미지 예산에 같이 셈.'),
       h('h3', null, '비용 한도'),
       h('div', { class: 'row' }, field('하루 생성 한도 (번)', f.daily, '0~100. 0이면 AI 생성을 막아. 무료 모델은 Cloudflare 무료 한도(하루 약 70~100장)가 실제 상한이야.'), field('한 달 예산 (달러)', f.budget, '넘게 되면 새 생성을 멈춰.')),
-      h('p', { class: 'hint' }, '예산은 실제 청구액 > 사용량 기준 > 예상 순으로 더해서 셈해. 청구됐는지 모르는 실패도 예상 비용으로 셈해서 넉넉하게 막아.'),
+      field('한 번 상한 (달러)', f.cap, '한 번 누를 때(후보 여러 장·모델 비교 포함) 예상 비용이 이걸 넘으면 안 만들어. 0~20.'),
+      h('p', { class: 'hint' }, '예산은 실제 청구액 > 사용량 기준 > 예상 순으로 더해서 셈해 (AI 검수 비용 포함). 청구됐는지 모르는 실패도 예상 비용으로 셈해서 넉넉하게 막아.'),
+      h('h3', null, '용도별 기본 비율'),
+      h('div', { class: 'row' }, ...ratioSel.map(([, v, el]) => field(v.label, el))),
       h('h3', null, '환율 (원화로 볼 때)'),
       h('div', { class: 'row' }, field('원/달러', f.fx), field('기준 날짜', f.fxDate)), field('기준 (어디 환율)', f.fxSrc),
       h('p', { class: 'hint' }, '앱이 환율을 가져오지 않아. 확인한 환율과 날짜·출처를 넣으면, 그 뒤 생성 기록은 그 환율로 원화를 계산해.'),
       h('h3', null, 'OpenAI 가격 (100만 토큰당 달러 · gpt-image-2.5 모델)'),
       h('div', { class: 'row' }, field('이미지 출력', f.pOut), field('이미지 입력', f.pIn), field('텍스트 입력', f.pText)),
       h('div', { class: 'row' }, field('확인한 날', f.pAt), field('가격표 주소', f.pSrc)),
+      ...gRows.map((g) => h('div', { class: 'stack' }, h('h3', null, `Gemini 가격 (${g.c.label})`),
+        h('div', { class: 'row' }, ...Object.entries(g.per).map(([k, el]) => field(`장당 달러${k ? ' · ' + k : ''}`, el)), field('텍스트 입력 (100만 토큰당)', g.text), field('넣는 이미지 (장당)', g.imgIn)),
+        field('확인한 날', g.at))),
+      cmpDet,
       btn('저장', 'sm', async (ev) => {
         const daily = num(f.daily, 0, 100, '하루 한도'); if (daily == null) return;
         const budget = num(f.budget, 0, 500, '한 달 예산'); if (budget == null) return;
+        const cap = num(f.cap, 0, 20, '한 번 상한'); if (cap == null) return;
         let fx = null;
         if (String(f.fx.value).trim()) { fx = num(f.fx, 100, 10000, '환율'); if (fx == null) return; }
         const pOut = num(f.pOut, 0, 1000, '이미지 출력 가격'); if (pOut == null) return;
         const pIn = num(f.pIn, 0, 1000, '이미지 입력 가격'); if (pIn == null) return;
         const pText = num(f.pText, 0, 1000, '텍스트 입력 가격'); if (pText == null) return;
         if (f.pSrc.value.trim() && !L.safeUrl(f.pSrc.value)) { toast('가격표 주소는 https://로 시작해야 해'); return; }
+        const prices = { image_output_per_m: pOut, image_input_per_m: pIn, text_input_per_m: pText, checked_at: f.pAt.value || null, source: f.pSrc.value.trim() };
+        for (const g of gRows) {
+          const per = {};
+          for (const [k, el] of Object.entries(g.per)) { const v = num(el, 0, 10, 'Gemini 장당 가격'); if (v == null) return; per[k] = v; }
+          const t = num(g.text, 0, 1000, 'Gemini 텍스트 입력 가격'); if (t == null) return;
+          const ii = num(g.imgIn, 0, 10, 'Gemini 넣는 이미지 가격'); if (ii == null) return;
+          const base = IMG.geminiPrices(g.c, {});
+          prices[g.fid] = { per_image: per, text_input_per_m: t, image_input_per_image: ii, image_output_per_m: base.image_output_per_m, text_output_per_m: base.text_output_per_m,
+            checked_at: g.at.value || null, source: IMG.PROVIDERS.gemini.source };
+        }
         const body = {
-          image_gen_model: f.gen.value.trim(), image_edit_model: f.edit.value.trim(), image_quality: f.quality.value, image_daily_limit: Math.round(daily), image_monthly_budget_usd: budget,
+          image_gen_model: f.gen.value, image_edit_model: f.edit.value, image_quality: f.quality.value, image_daily_limit: Math.round(daily), image_monthly_budget_usd: budget,
+          image_request_cap_usd: cap, image_review_model: f.review.value,
+          image_modes: Object.fromEntries(modeRows.map((r) => [r.m.id, { model: r.ms.value, quality: r.qs.value }])),
+          image_ratio_prefs: Object.fromEntries(ratioSel.map(([k, , el]) => [k, el.value])),
           image_fx_krw: fx, image_fx_date: f.fxDate.value || null, image_fx_source: f.fxSrc.value.trim(),
-          image_prices: { image_output_per_m: pOut, image_input_per_m: pIn, text_input_per_m: pText, checked_at: f.pAt.value || null, source: f.pSrc.value.trim() },
+          image_prices: prices,
         };
         const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body }), '저장했어');
-        if (j) { ui.clearDirty(); for (const k in C) C[k].at = 0; await ui.load(); }
+        if (j) { ui.clearDirty(); for (const k in C) C[k].at = 0; await ui.load(); if (j.skipped && j.skipped.length) toast('DB 업데이트(017) 전이라 모드·검수·한 번 상한·비율은 저장하지 못했어', 5000); }
       }),
     ];
   }
@@ -1463,7 +2109,7 @@ export function createStudio(ui) {
       const im = r && r.image_id ? r.post_images : null;
       if (!im || im.review_status === '사용 안 함') return null; // '사용 안 함'은 내려받지 않으니 글에도 안 넣음
       const purpose = (r.purpose && IMG.PURPOSES[r.purpose]) ? r.purpose : 'blog_body';
-      return { fileName: IMG.fileNameFor(p, s.n, purpose, outExt(im)), caption: IMG.captionHint({ kind: im.kind, provider: im.provider, author_name: im.author_name, license: im.license, attribution_text: im.attribution_text }) };
+      return { fileName: IMG.fileNameFor(p, s.n, purpose, outExt(im)), caption: IMG.captionHint({ kind: im.kind, provider: im.provider, author_name: im.author_name, license: im.license, attribution_text: im.attribution_text, source_type: im.source_type, composite: im.composite }) };
     });
   }
   // 원고 목록에 붙이는 '사진 연결 수'

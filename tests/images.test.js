@@ -281,37 +281,47 @@ describe('용도·비율·크기', () => {
 describe('프롬프트', () => {
   const post = { titles: ['원룸 전기히터 고르는 법'], keyword: '원룸 전기히터' };
   const slot = parseSlots(BODY)[0];
+  // 1.5.0: 프롬프트 모양을 장면 설계서 순서로 바꿈 ('Scene to show' → 'Main subject and action', 글자 규칙은 용도별 'Text and logos') — 확인하는 내용은 같음
   test('원고 제목·소제목·주변 문장·사진 자리 설명·스타일·용도와 지울 수 없는 규칙이 들어감', () => {
     const p = buildPrompt({ post, slot, style: 'life_photo', purpose: 'blog_body' });
     assert.match(p, /원룸 전기히터 고르는 법/);
     assert.match(p, /고르는 기준/);
     assert.match(p, /원룸에서는 크기가 먼저예요/);
-    assert.match(p, /Scene to show \(Korean\): 원룸 책상 옆에 놓인 소형 히터 전경/);
+    assert.match(p, /Main subject and action \(Korean\): 원룸 책상 옆에 놓인 소형 히터 전경/);
     assert.match(p, /aspect ratio 4:3/);
     for (const r of PROMPT_RULES) assert.ok(p.includes(r), '규칙 빠짐: ' + r);
-    assert.match(p, /No text of any kind/);
+    assert.match(p, /Text and logos: Do not add captions, watermarks/);
   });
   test('사용자가 고친 설명·추가 요청·편집 모드', () => {
     const p = buildPrompt({ post, slot, text: '창가에 둔 히터', extra: '파란 톤으로', purpose: 'ig_story', mode: 'edit' });
-    assert.match(p, /Change to make \(Korean\): 창가에 둔 히터/);
+    assert.match(p, /Requested change \(Korean\): 창가에 둔 히터/);
     assert.match(p, /파란 톤으로/);
     assert.match(p, /9:16/);
     assert.match(p, /^Edit the provided image/);
   });
+  // 1.5.0: 설계서 칸(카메라·빛·구도 등)이 늘어서 전체 길이 기준을 올림 — 사용자가 넣은 긴 입력이 잘리는지는 그대로 확인
   test('긴 입력은 잘림', () => {
     const p = buildPrompt({ post, slot, text: '가'.repeat(2000), extra: '나'.repeat(2000) });
-    assert.ok(p.length < 2600);
+    assert.ok(p.length < 4000, String(p.length));
+    assert.ok(!p.includes('가'.repeat(301)) && !p.includes('나'.repeat(401)), '설명 300자·추가 요청 400자에서 자름');
   });
 });
 
-describe('모델마다 되는 크기·품질·가격 (OpenAI 문서 2026-10-22)', () => {
+describe('모델마다 되는 크기·품질·가격 (OpenAI 문서 2026-10-22, 2026-10-27 다시 확인)', () => {
   test('2.5 계열: 원하는 비율 그대로, 품질 5단계 / 이전 모델: 표준 크기 세 가지, 품질 3단계', () => {
     assert.equal(modelCaps('gpt-image-2.5-flare').flexible, true);
     assert.equal(modelCaps('gpt-image-2.5-sunburst-2026-09-08').flexible, true);
     assert.deepEqual(qualitiesFor('gpt-image-2.5-flare'), QUALITIES);
     assert.deepEqual(qualitiesFor('gpt-image-1.5'), ['low', 'medium', 'high']);
     assert.equal(modelCaps('gpt-image-2').flexible, true);
-    assert.equal(modelCaps('gpt-image-2').conservative, true, '가격을 확인 못 한 모델');
+    // 1.5.0에서 바꿈: 2026-10-27 가격 페이지에서 gpt-image-2 가 2.5와 같은 토큰 가격으로 나와 있어서 '가격 모름(넉넉히)'에서 설정 가격표로 옮김
+    assert.equal(modelCaps('gpt-image-2').conservative, false, '가격 페이지에서 확인한 모델');
+    assert.equal(modelCaps('gpt-image-2').settingsPrices, true);
+    assert.deepEqual(qualitiesFor('gpt-image-2'), ['low', 'medium', 'high'], 'xhigh·max 는 2.5 계열만');
+    // 종료·종료 예정 (OpenAI 지원 종료 페이지 2026-10-27)
+    assert.deepEqual([modelCaps('gpt-image-1').retired, modelCaps('gpt-image-1').usable], ['2026-10-23', false]);
+    assert.deepEqual([modelCaps('gpt-image-1.5').shutdown, modelCaps('gpt-image-1.5').usable], ['2026-12-01', true]);
+    assert.equal(modelCaps('gpt-image-1-mini').shutdown, '2026-12-01');
     for (const m of ['gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini', 'my-new-model']) assert.equal(modelCaps(m).flexible, false, m);
     assert.equal(modelCaps('gpt-image-1-mini').id, 'gpt-image-1-mini', '1-mini 를 1로 잘못 읽지 않음');
     assert.equal(sizeFor('blog_cover', '16:9', 'gpt-image-2.5-flare'), '1536x864');
@@ -323,13 +333,16 @@ describe('모델마다 되는 크기·품질·가격 (OpenAI 문서 2026-10-22)'
     assert.equal(normQuality('gpt-image-1.5', 'max'), 'high');
     assert.equal(normQuality('gpt-image-2.5-flare', 'max'), 'max');
   });
-  test('예상 비용: 1.5는 모델 페이지 장당 가격, 모르는 모델은 넉넉히(gpt-image-1 값), 사용량 비용은 그 모델 가격으로', () => {
+  test('예상 비용: 1.5는 모델 페이지 장당 가격, 2는 2.5와 같은 토큰 가격, 모르는 모델은 계산 안 함, 사용량 비용은 그 모델 가격으로', () => {
     const e15 = estimateUsd({ quality: 'medium', size: '1024x1024', promptTokens: 0, model: 'gpt-image-1.5' });
     assert.equal(e15, 0.034, 'gpt-image-1.5 medium 1024² = $0.034 (2.5 계산이면 약 $0.013 → 2.6배 낮게 잡을 뻔)');
     assert.equal(estimateUsd({ quality: 'high', size: '1536x1024', promptTokens: 0, model: 'gpt-image-1' }), 0.25);
     assert.equal(estimateUsd({ quality: 'xhigh', size: '1024x1024', model: 'gpt-image-1.5' }), null, '못 받는 품질은 계산 안 함');
     assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', model: 'gpt-image-1.5' }), null, '못 받는 크기');
-    assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0, model: 'gpt-image-2' }), 0.063, '가격 모르는 모델은 넉넉히');
+    // 1.5.0에서 바꿈: 예전에는 가격을 모른다고 보고 gpt-image-1 값($0.063)으로 넉넉히 잡았는데, 2026-10-27 가격 페이지 기준 2.5와 같은 토큰 가격
+    // → 1280x960 보통 = 출력 349토큰 × $30/100만 = $0.01047 (토큰 수는 GPT Image 2 계산기 값)
+    assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0, model: 'gpt-image-2' }), 0.01047);
+    assert.equal(estimateUsd({ quality: 'medium', size: '1024x1024', promptTokens: 0, model: 'my-new-model' }), null, '모르는 모델은 계산하지 않음 (서버도 만들기 전에 거절)');
     assert.equal(estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0, model: 'gpt-image-2.5-flare' }), estimateUsd({ quality: 'medium', size: '1280x960', promptTokens: 0 }));
     const u = { input_tokens_details: { text_tokens: 100, image_tokens: 0 }, output_tokens: 1000 };
     assert.equal(usageUsd(u, null, 'gpt-image-1.5'), 0.0325, '100×$5 + 1000×$32 (100만 토큰당)');
@@ -345,7 +358,7 @@ describe('맥락 글 정리 (AI에 보내기 전)', () => {
     assert.match(t, /무선청소기 보관법/);
     const p = buildPrompt({ post: { titles: ['다이슨 V12 무선청소기 보관법'] }, slot: { text: '보관하는 모습', heading: '다이슨 정리', before: '이 히터는 39,000원이고 KC 인증을 받았어요.', after: '' }, text: '보관하는 모습', hide: ['다이슨'] });
     assert.ok(!/다이슨|39,000|KC/.test(p), p);
-    assert.ok(PROMPT_RULES.some((r) => /packaging, component layouts, labels/.test(r)), '구성품·라벨 그리지 말라는 규칙');
+    assert.match(p, /Avoid packaging labels, manuals and readable device screens/, '참고 사진이 없으면 구성품·라벨·화면을 그리지 말라는 규칙');
   });
 });
 
@@ -642,7 +655,7 @@ describe("'직접 찍기' 자리와 검색 노출 (1.3.0)", () => {
     assert.equal(searchSuggestions({ keyword: '원룸 결로' }, own)[0], '내 방 창틀에 맺힌 물방울');
     assert.equal(altTextFor(own.text), '내 방 창틀에 맺힌 물방울');
     const pr = buildPrompt({ post: { keyword: '원룸 결로' }, slot: own });
-    assert.ok(pr.includes('Scene to show (Korean): 내 방 창틀에 맺힌 물방울'), pr);
+    assert.ok(pr.includes('Main subject and action (Korean): 내 방 창틀에 맺힌 물방울'), pr);
     assert.ok(!pr.includes('직접 찍기'));
   });
   test("검색 채널이면: 직접 촬영으로 확인한 사진이 없으면 경고, 네이버 블로그면 AI 이미지에 'AI 활용' 표시 안내", () => {

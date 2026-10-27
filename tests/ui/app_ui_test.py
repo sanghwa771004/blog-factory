@@ -69,9 +69,32 @@ FX_IMG = {'4x3': ('/tests/fixtures/img/photo-4x3.jpg', 1280, 960), '16x9': ('/te
 RATIO_SIZE = {'16:9': '1536x864', '4:3': '1280x960', '1:1': '1024x1024', '4:5': '1024x1280', '9:16': '864x1536'}
 
 
-def size_for(model, ratio):
-    """서버의 sizeFor 처럼: gpt-image-2·2.5는 비율 그대로, 그 밖의 모델은 표준 크기 세 가지 중 방향이 같은 것"""
+KLEIN_SIZE = {'16:9': '1024x576', '4:3': '1024x768', '1:1': '1024x1024', '4:5': '816x1024', '9:16': '576x1024'}
+GEMINI_RES = {'medium': '1K', 'high': '2K', 'max': '4K'}
+# 1.5.0 모델 등록표 (images.js 와 같은 것만): 공급자, 종료된 모델
+PROVIDER_OF = {'cf-flux-2-klein-4b': 'cloudflare', 'cf-flux-1-schnell': 'cloudflare', 'gpt-image-2.5-flare': 'openai', 'gpt-image-2.5-sunburst': 'openai',
+               'gpt-image-2': 'openai', 'gpt-image-1.5': 'openai', 'gpt-image-1-mini': 'openai', 'gpt-image-1': 'openai',
+               'gemini-3-pro-image': 'gemini', 'gemini-nano-banana-2.1': 'gemini', 'gf-test-fake': 'openai'}
+RETIRED = {'gpt-image-1': '2026-10-23'}
+KEY_MISSING = {'openai': 'openai_key_missing', 'gemini': 'gemini_key_missing', 'cloudflare': 'cf_key_missing'}
+# AI 검수 모델 (images.js REVIEW_MODELS 와 같은 계산)
+REVIEW = {'cf-gemma-4-26b': ('cloudflare', None), 'gemini-3.5-flash-lite': ('gemini', (0.3, 2.5, 1120)), 'gpt-5.6-luna': ('openai', (0.2, 1.2, 308))}
+
+
+def review_est(model, n):
+    prov, pr = REVIEW[model]
+    if not pr:
+        return 0
+    return round(((max(1, n) * pr[2] + 900) * pr[0] + 1000 * pr[1]) / 1e6, 6)
+
+
+def size_for(model, ratio, quality='medium'):
+    """서버의 sizeFor 처럼: gpt-image-2·2.5는 비율 그대로, klein은 비율별 크기, Gemini는 '비율@해상도', 그 밖의 모델은 표준 크기 세 가지 중 방향이 같은 것"""
     s = RATIO_SIZE.get(ratio or '', '1280x960')
+    if PROVIDER_OF.get(model) == 'gemini':
+        return f"{ratio or '4:3'}@{GEMINI_RES.get(quality, '1K')}"
+    if model == 'cf-flux-2-klein-4b':
+        return KLEIN_SIZE.get(ratio or '', '1024x768')
     if str(model).startswith('gpt-image-2') or model == 'gf-test-fake':
         return s
     w, h = (int(x) for x in s.split('x'))
@@ -159,7 +182,8 @@ class Mock:
         self.imports = []
         self.ids['P8'] = uid(8)
         # 이미지 스튜디오 가짜 상태
-        self.keys = {'openai': True, 'pexels': True}
+        self.keys = {'openai': True, 'pexels': True, 'gemini': False, 'cloudflare': False}
+        self.reviews, self.evals, self.checks, self.small_uploads = [], [], {}, []  # 1.5.0 AI 검수·내 평가·연결 확인·작은 사본
         self.server_secret = SECRET_MARK
         self.images, self.slots, self.gens, self.decks, self.polls = [], [], [], {}, {}
         self.min_est = None   # 서버 쪽 예상 비용이 더 크다고 답하게 (estimate_changed 시험)
@@ -252,6 +276,13 @@ class Mock:
                 'month_usd': round(sum(0 if g['cost_status'] == '청구 없음' else (g.get('actual_usd') or g.get('usage_usd') or g['est_usd']) for g in self.gens), 6),
                 'budget_usd': self.settings['image_monthly_budget_usd'], 'running': {'id': running['id'], 'post_id': running['post_id'], 'slot_key': running['slot_key'], 'started_at': NOW} if running else None,
                 'storage_bytes': sum(i['bytes'] for i in live), 'image_count': len(live), 'pexels_hour': 0, 'pexels_month': 0}
+
+    def provider_status(self):
+        out = {}
+        for p in ('cloudflare', 'openai', 'gemini'):
+            ok = next((g for g in self.gens if g.get('provider', 'openai') == p and g['status'] == '성공' and g['model'] != 'gf-test-fake'), None)
+            out[p] = {'key': bool(self.keys.get(p)), 'check': self.checks.get(p), 'last_success': {'model': ok['model'], 'at': NOW} if ok else None, 'last_failure': None}
+        return out
 
     def image_costs(self, post_id=None):
         gs = [g for g in self.gens if post_id is None or g['post_id'] == post_id]
@@ -516,11 +547,113 @@ class Mock:
             self.decks[m.group(1)] = {'post_id': m.group(1), 'updated_at': NOW, **{k: body.get(k) for k in ('template', 'ratio', 'slides', 'ad_label', 'bg_image_id')}}
             return 200, {'deck': self.decks[m.group(1)]}
         if path == 'images/config':
-            return 200, {'keys': self.keys, 'providers': self.post_images(self.ids['P8'])['providers'], 'settings': self.settings, 'usage': self.usage(),
-                         'test_model': 'gf-test-fake', 'sign_seconds': 3600, 'storage_limit': 900 * 1024 * 1024}
+            return 200, {'keys': self.keys, 'providers': self.post_images(self.ids['P8'])['providers'], 'provider_status': self.provider_status(), 'settings': self.settings,
+                         'usage': self.usage(), 'test_model': 'gf-test-fake', 'sign_seconds': 3600, 'storage_limit': 900 * 1024 * 1024}
+        if path == 'images/providers/check' and method == 'POST':
+            prov = body.get('provider')
+            if prov not in KEY_MISSING:
+                return 400, {'error': 'bad_field', 'field': 'provider'}
+            ok = bool(self.keys.get(prov))
+            model = {'cloudflare': '@cf/black-forest-labs/flux-2-klein-4b', 'openai': 'gpt-image-2.5-flare', 'gemini': 'gemini-3-pro-image'}[prov]
+            self.checks[prov] = {'provider': prov, 'model': model, 'ok': ok, 'code': 'ok' if ok else KEY_MISSING[prov],
+                                 'message': f'키가 맞고 {model} 모델을 쓸 수 있다고 답했어 (이미지는 아직 안 만들어 봄).' if ok else '키가 없어.', 'checked_at': NOW}
+            return 200, {'check': self.checks[prov]}
+        if path == 'images/compare-stats' and method == 'GET':
+            cmp_batches = {g['batch']['id'] for g in self.gens if g.get('batch') and g['batch'].get('kind') == 'compare'}
+            by = {}
+            for e in self.evals:
+                if e.get('batch_id') not in cmp_batches:
+                    continue
+                x = by.setdefault(e['model'], {'model': e['model'], 'rated': 0, 'preferred': 0, 'sums': {}, 'n': {}})
+                x['rated'] += 1
+                x['preferred'] += 1 if e.get('preferred') else 0
+                for k, v in (e.get('scores') or {}).items():
+                    x['sums'][k] = x['sums'].get(k, 0) + v
+                    x['n'][k] = x['n'].get(k, 0) + 1
+            models = [{'model': x['model'], 'rated': x['rated'], 'preferred': x['preferred'], 'avg': {k: round(x['sums'][k] / x['n'][k], 2) for k in x['sums']}} for x in by.values()]
+            return 200, {'batches': len({e['batch_id'] for e in self.evals if e.get('batch_id') in cmp_batches}), 'models': models}
+        m = re.fullmatch(r'images/([0-9a-f-]{36})/small', path)
+        if m and method == 'POST':
+            i = self.img(m.group(1))
+            if not i:
+                return 404, {'error': 'not_found'}
+            from PIL import Image
+            try:
+                w, h = Image.open(io.BytesIO(body.get('file_bytes') or b'')).size
+            except Exception:  # noqa: BLE001
+                return 400, {'error': 'bad_image', 'reason': 'bad_type'}
+            if not (0 < w < 512 and 0 < h < 512):  # 서버처럼: 512px보다 작아야 함
+                return 400, {'error': 'bad_field', 'field': 'file'}
+            i['ref_small_path'] = f"small/2026/10/{i['id']}.jpg"
+            self.small_uploads.append({'id': i['id'], 'w': w, 'h': h})
+            return 200, {'image': {'id': i['id'], 'ref_small_path': i['ref_small_path']}}
+        m = re.fullmatch(r'images/([0-9a-f-]{36})/review', path)
+        if m and method == 'POST':
+            i = self.img(m.group(1))
+            if not i:
+                return 404, {'error': 'not_found'}
+            if i['kind'] != 'ai':
+                return 400, {'error': 'review_ai_only'}
+            model = body.get('model') or self.settings.get('image_review_model') or ''
+            if model not in REVIEW:
+                return 400, {'error': 'review_model_unknown' if model else 'review_model_off'}
+            prov = REVIEW[model][0]
+            if not self.keys.get(prov):
+                return 503, {'error': KEY_MISSING[prov]}
+            est = review_est(model, 1 + min(3, len(i.get('ref_images') or [])))
+            seen = body.get('confirm_usd')
+            if not isinstance(seen, (int, float)) or seen + max(0.0005, est * 0.02) < est:
+                return 409, {'error': 'estimate_changed', 'est_usd': est, 'model': model}
+            free = REVIEW[model][1] is None
+            r = {'id': self.new_id(), 'kind': 'ai_review', 'image_id': i['id'], 'provider': prov, 'model': model, 'status': '완료', 'created_at': NOW,
+                 'scores': {'checks': {'match': {'verdict': 'ok', 'reason': '원고의 사진 자리와 맞아', 'confidence': 0.8},
+                                       'artifacts': {'verdict': 'issue', 'reason': '왼쪽 아래에 글자 같은 무늬가 있어', 'confidence': 0.6},
+                                       'anatomy': {'verdict': 'unsure', 'reason': '사람이 작아서 판단하기 어려워', 'confidence': None}}},
+                 'summary': '대체로 자연스럽지만 왼쪽 아래를 확인해줘.', 'uncertainty': '작은 글자는 확대해 봐야 해', 'suggestions': ['왼쪽 아래 글자 무늬만 지워줘'],
+                 'est_usd': est, 'usage_usd': None if free else round(est * 0.8, 6), 'cost_status': '청구 없음' if free else '사용량 기준'}
+            self.reviews.insert(0, r)
+            return 200, {'review': r}
+        m = re.fullmatch(r'images/([0-9a-f-]{36})/evaluate', path)
+        if m and method == 'POST':
+            i = self.img(m.group(1))
+            if not i:
+                return 404, {'error': 'not_found'}
+            scores = {k: v for k, v in (body.get('scores') or {}).items() if k in ('fit', 'natural', 'detail', 'composition', 'ai_look', 'usable') and v in (1, 2, 3)}
+            if body.get('preferred') and body.get('batch_id'):
+                for e in self.evals:
+                    if e.get('batch_id') == body['batch_id'] and e['image_id'] != i['id']:
+                        e['preferred'] = False
+            self.evals = [e for e in self.evals if e['image_id'] != i['id']]
+            e = {'id': self.new_id(), 'kind': 'user_eval', 'image_id': i['id'], 'model': i.get('model', ''), 'batch_id': body.get('batch_id'), 'scores': scores, 'preferred': bool(body.get('preferred'))}
+            self.evals.append(e)
+            return 200, {'review': e}
+        m = re.fullmatch(r'images/([0-9a-f-]{36})/lineage', path)
+        if m and method == 'GET':
+            byid = {x['id']: x for x in self.images}
+            root = byid.get(m.group(1))
+            if not root:
+                return 404, {'error': 'not_found'}
+            while root.get('parent_image_id') and root['parent_image_id'] in byid:
+                root = byid[root['parent_image_id']]
+            items, todo = [], [(root, 0)]
+            while todo:
+                x, lv = todo.pop(0)
+                g = next((g for g in self.gens if g['id'] == x.get('generation_id')), None)
+                items.append({'id': x['id'], 'parent_image_id': x.get('parent_image_id'), 'level': lv, 'kind': x['kind'], 'provider': x['provider'], 'model': x.get('model', ''),
+                              'user_prompt': x.get('user_prompt', ''), 'description': x.get('description', ''), 'created_at': NOW, 'deleted': bool(x.get('deleted_at')),
+                              'url': '' if x.get('deleted_at') else x['url'], 'cost': {'est_usd': g['est_usd'], 'usage_usd': g['usage_usd'], 'actual_usd': None, 'cost_status': g['cost_status'], 'mode': g['mode']} if g else None})
+                todo += [(c, lv + 1) for c in self.images if c.get('parent_image_id') == x['id']]
+            return 200, {'root_id': root['id'], 'items': items}
         if path == 'images/generate' and method == 'POST':
-            if not self.keys['openai']:
-                return 503, {'error': 'openai_key_missing'}
+            # 1.5.0 서버처럼: 요청의 모델(화면에서 고른 모드)이 먼저, 없으면 설정의 모델. 모르는·종료된 모델은 거절, 공급자마다 키 확인
+            model = body.get('model') or self.settings['image_edit_model' if body.get('mode') == 'edit' else 'image_gen_model']
+            prov = PROVIDER_OF.get(model)
+            if not prov:
+                return 400, {'error': 'model_unknown', 'model': model}
+            if model in RETIRED:
+                return 400, {'error': 'model_retired', 'model': model, 'retired': RETIRED[model]}
+            if model != 'gf-test-fake' and not self.keys.get(prov):
+                return 503, {'error': KEY_MISSING[prov]}
             dup = next((g for g in self.gens if g['request_key'] == body['request_key']), None)
             if dup:
                 return 200, {'generation': dup, 'duplicate': True}
@@ -529,31 +662,47 @@ class Mock:
             if self.busy_left > 0:
                 self.busy_left -= 1
                 return 503, {'error': 'server_busy', 'retry_after': 1}
-            model = self.settings['image_edit_model' if body.get('mode') == 'edit' else 'image_gen_model']
-            size = size_for(model, body.get('ratio'))
-            changed = {'error': 'estimate_changed', 'model': model, 'size': size, 'quality': body.get('quality', 'medium')}  # 실제 서버처럼 무엇으로 계산했는지도
+            refs = body.get('refs') or []
+            if prov == 'cloudflare':
+                need = [r['image_id'] for r in refs if not (self.img(r['image_id']) or {}).get('ref_small_path')]
+                if body.get('mode') == 'edit' and not (self.img(body.get('base_image_id')) or {}).get('ref_small_path'):
+                    need.insert(0, body.get('base_image_id'))
+                if need:
+                    return 409, {'error': 'ref_small_missing', 'ids': need}
+            quality = body.get('quality', 'medium')
+            size = size_for(model, body.get('ratio'), quality)
+            changed = {'error': 'estimate_changed', 'model': model, 'size': size, 'quality': quality}  # 실제 서버처럼 무엇으로 계산했는지도
             if not isinstance(body.get('confirm_usd'), (int, float)):
                 return 409, {**changed, 'est_usd': 0.0111}
             if self.min_est and body['confirm_usd'] + 1e-9 < self.min_est:
                 return 409, {**changed, 'est_usd': self.min_est}
+            free = prov == 'cloudflare'
             g = {'id': self.new_id(), 'request_key': body['request_key'], 'post_id': body['post_id'], 'slot_key': body['slot_key'], 'mode': body.get('mode', 'generate'),
-                 'model': model, 'size': size, 'quality': body.get('quality', 'medium'),
+                 'model': model, 'provider': prov, 'size': size, 'quality': quality,
                  'purpose': body.get('purpose'), 'style': body.get('style'), 'user_prompt': '\n'.join(x for x in (body.get('text', ''), body.get('extra', '')) if x),
-                 'ratio': body.get('ratio') or '', 'status': '생성 중', 'provider_called': True,
+                 'ratio': body.get('ratio') or '', 'status': '생성 중', 'provider_called': True, 'refs': refs, 'batch': body.get('batch'), 'preset': body.get('preset', ''),
+                 'scene': body.get('scene'), 'base_image_id': body.get('base_image_id'),
                  'error_code': '', 'error_message': '', 'est_usd': body['confirm_usd'], 'usage_usd': None, 'actual_usd': None, 'actual_checked_at': None,
-                 'cost_status': '예상', 'fx_krw': 1400, 'image_id': None, 'created_at': NOW, 'started_at': NOW, 'finished_at': None}
+                 'cost_status': '청구 없음' if free else '예상', 'fx_krw': 1400, 'image_id': None, 'created_at': NOW, 'started_at': NOW, 'finished_at': None}
             self.gens.insert(0, g)
             self.polls[g['id']] = 0
-            return 202, {'generation': g, 'est_usd': g['est_usd'], 'model': g['model'], 'size': g['size'], 'quality': g['quality']}
+            return 202, {'generation': g, 'est_usd': g['est_usd'], 'model': g['model'], 'size': g['size'], 'quality': g['quality'], 'provider': prov}
         m = re.fullmatch(r'images/generations/([0-9a-f-]{36})', path)
         if m and method == 'GET':
             g = next(x for x in self.gens if x['id'] == m.group(1))
             self.polls[g['id']] += 1
             image = None
             if g['status'] == '생성 중' and self.polls[g['id']] >= 2:
-                i = self.add_image('ai', g['post_id'], g['slot_key'], {'16:9': '16x9', '4:5': '4x5'}.get(g.get('ratio') or '', '4x3'), model=g['model'], prompt='Create an illustrative image… Rules: No text', description=g['user_prompt'],
-                                   alt_text=g['user_prompt'][:120], generation_id=g['id'], purpose=g['purpose'] or 'blog_body', ratio=g.get('ratio') or '')
-                g.update({'status': '성공', 'image_id': i['id'], 'usage_usd': 0.01107, 'cost_status': '사용량 기준', 'finished_at': NOW})
+                refs = g.get('refs') or []
+                composite = any(r.get('role') in ('subject', 'background') and (self.img(r['image_id']) or {}).get('kind') not in ('ai', 'card', None) for r in refs)
+                i = self.add_image('ai', g['post_id'], g['slot_key'], {'16:9': '16x9', '4:5': '4x5'}.get(g.get('ratio') or '', '4x3'), model=g['model'], provider=g.get('provider', 'openai'),
+                                   prompt='Image type: Photograph — … Text and logos: none', description=g['user_prompt'],
+                                   alt_text=g['user_prompt'][:120], generation_id=g['id'], purpose=g['purpose'] or 'blog_body', ratio=g.get('ratio') or '',
+                                   ref_images=[{'image_id': r['image_id'], 'role': r['role'], 'kind': (self.img(r['image_id']) or {}).get('kind', '')} for r in refs],
+                                   composite=composite, parent_image_id=g.get('base_image_id') if g['mode'] == 'edit' else None, preset=g.get('preset', ''), scene=g.get('scene'),
+                                   user_prompt=g['user_prompt'])
+                free = g.get('provider') == 'cloudflare'
+                g.update({'status': '성공', 'image_id': i['id'], 'usage_usd': 0 if free else 0.01107, 'cost_status': '청구 없음' if free else '사용량 기준', 'finished_at': NOW})
             if g['image_id']:
                 image = self.with_uses(self.img(g['image_id']))
             return 200, {'generation': g, 'image': image, 'usage': self.usage()}
@@ -615,7 +764,8 @@ class Mock:
             if method == 'GET':
                 used = [{**{k: r[k] for k in ('post_id', 'slot_key', 'slot_index', 'slot_text', 'used_at', 'downloaded_at')},
                          'posts': {'titles': next(p for p in self.posts if p['id'] == r['post_id'])['titles'], 'keyword': '', 'deleted_at': None}} for r in self.slots if r['image_id'] == i['id']]
-                return 200, {'image': self.with_uses(i), 'used_in': used, 'decks': [], 'generation': next((g for g in self.gens if g['id'] == i['generation_id']), None)}
+                return 200, {'image': self.with_uses(i), 'used_in': used, 'decks': [], 'generation': next((g for g in self.gens if g['id'] == i['generation_id']), None),
+                             'reviews': [r for r in self.reviews + self.evals if r['image_id'] == i['id']]}
             if method == 'POST':
                 if 'source_type' in body:
                     if i['kind'] != 'upload' or body['source_type'] not in ('', 'own', 'official', 'external'):
@@ -702,7 +852,8 @@ def main():
                 meta = re.search(rb'name="meta"\r\n\r\n(.*?)\r\n--', raw, re.S)
                 fpart = re.search(rb'name="file"; filename="([^"]*)"\r\nContent-Type: ([^\r\n]+)\r\n\r\n(.*)\r\n--', raw, re.S)
                 body = {'meta': json.loads(meta.group(1)) if meta else {}, 'filename': fpart.group(1).decode() if fpart else '',
-                        'mime': fpart.group(2).decode() if fpart else '', 'size': len(fpart.group(3)) if fpart else 0, 'file_head': fpart.group(3)[:16].hex() if fpart else ''}
+                        'mime': fpart.group(2).decode() if fpart else '', 'size': len(fpart.group(3)) if fpart else 0, 'file_head': fpart.group(3)[:16].hex() if fpart else '',
+                        'file_bytes': fpart.group(3) if fpart else b''}
             else:
                 try:
                     body = json.loads(req.post_data) if req.post_data else {}
@@ -1346,7 +1497,7 @@ def main():
             ai_sheet(0)
             go().click()
             expect(sheet).to_contain_text('서버에서 다시 계산한 예상 비용이 $0.0500')
-            sheet.locator('label', has_text='품질').locator('select').select_option('low')
+            sheet.locator('select[name=quality]').select_option('low')  # 1.5.0: '모드' 칸에도 '고품질'이라는 글자가 있어서 이름으로 찾음
             expect(sheet).not_to_contain_text('서버에서 다시 계산한')
             assert '$0.0500' not in go().inner_text(), go().inner_text()
             mock.min_est = None
@@ -1446,6 +1597,284 @@ def main():
             page.locator('#sheet').get_by_role('button', name='닫기').click()
             mock.keys = {'openai': True, 'pexels': True}
         check('키가 없으면: AI 만들기는 잠기고 이유 안내, 사진 검색은 직접 올리기로 안내', t_img_no_keys)
+
+        # ───────── 1.5.0 이미지 스튜디오 고품질화 ─────────
+        sheet = page.locator('#sheet')
+        gen_bodies = lambda: [c['body'] for c in mock.calls if c['path'] == 'images/generate']
+
+        def sheet_shot(name):
+            # 창(시트)만 찍기 — 전체 화면 캡처에는 고정된 창이 잘 안 담겨서
+            sheet.screenshot(path=str(OUT / f'{name}.png'))
+
+        def close_sheet():
+            # 앞 시험이 중간에 실패해서 창이 열려 있으면 닫고 시작 (다음 시험이 따라 실패하지 않게). 닫히는 중이면 기다리기만
+            page.wait_for_timeout(300)
+            if sheet.is_visible():
+                try:
+                    sheet.locator('.split button', has_text='닫기').first.click(timeout=3000)
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(200)
+
+        def reload_keys(**keys):
+            close_sheet()
+            mock.keys = {'openai': True, 'pexels': True, 'gemini': True, 'cloudflare': True, **keys}
+            page.get_by_role('button', name='새로고침').click()
+            page.wait_for_timeout(400)
+
+        def open_ai(i):
+            card = page.locator('section.studio .slot').nth(i)
+            b = card.get_by_role('button', name='바꾸기', exact=True).or_(card.get_by_role('button', name='AI로 만들기')).first
+            expect(b).to_be_enabled()
+            was = b.inner_text()
+            b.click()
+            if was == '바꾸기':
+                sheet.get_by_role('button', name='AI로 새로 만들기').click()
+            expect(sheet.locator('select[name=mode]')).to_be_visible()
+
+        def t_studio_modes_presets():
+            reload_keys()
+            open_p8()
+            n_set = len([c for c in mock.calls if c['path'] == 'settings'])
+            open_ai(0)
+            mode = sheet.locator('select[name=mode]')
+            opts = mode.locator('option').all_inner_texts()
+            assert len(opts) == 4, opts
+            assert any('FLUX.2 [klein] 4B (무료)' in o for o in opts) and any('GPT Image 2.5 (유료)' in o for o in opts) and any('Gemini 3 Pro Image (유료)' in o for o in opts), opts
+            expect(mode).to_have_value('fast_paid')  # 설정의 모델(gpt-image-2.5-flare)·기본 품질(보통)과 같은 모드로 열림
+            expect(sheet).to_contain_text('OpenAI · gpt-image-2.5-flare')
+            preset = sheet.locator('select[name=preset]')
+            assert preset.locator('option').count() == 9
+            expect(preset.locator('option', has_text='(추천)')).to_have_count(1)
+            sheet.get_by_text('AI에 보낼 내용 보기').click()
+            pre = sheet.locator('pre.prompt').first
+            expect(pre).to_contain_text('Image type: Photograph')
+            expect(pre).to_contain_text('Text and logos:')
+            assert 'Create an illustrative image' not in pre.inner_text(), '예전 고정 문구가 없어야 함'
+            assert not re.search(r'dust|crease|clutter|not perfectly centered', pre.inner_text(), re.I), '사용 흔적·어수선함·가운데 피하기를 강제하지 않음'
+            expect(sheet).to_contain_text('계절·날씨·시간: 원고에 없어서 넣지 않음')
+            preset.select_option('diagram')
+            expect(pre).to_contain_text('Image type: Information diagram')
+            # 무료 모드: 실제 모델 이름과 무료 표시
+            mode.select_option('free_draft')
+            expect(sheet.locator('.costbox')).to_contain_text('cf-flux-2-klein-4b')
+            expect(sheet.locator('.costbox')).to_contain_text('무료 (')
+            # Gemini 모드: 품질 칸이 해상도, 크기는 비율·해상도, 공급자 사용량 화면 안내
+            mode.select_option('gemini_hq')
+            q = sheet.locator('select[name=quality]')
+            assert q.locator('option').all_inner_texts() == ['1K (보통)', '2K (높음)', '4K (최고)'], q.locator('option').all_inner_texts()
+            expect(q).to_have_value('high')
+            expect(sheet.locator('.costbox')).to_contain_text('4:3 · 2K')
+            expect(sheet.locator('.costbox')).to_contain_text('예상 $0.13')
+            expect(sheet.locator('.costbox')).to_contain_text('Google Gemini API 사용량 화면')
+            expect(sheet.locator('.costbox')).to_contain_text('계산 근거:')
+            no_overflow('AI 만들기 창 (1.5.0)')
+            sheet_shot('30-studio-modes')
+            assert len([c for c in mock.calls if c['path'] == 'settings']) == n_set, '모드를 바꿔도 설정은 안 바뀜'
+            sheet.get_by_role('button', name='닫기').click()
+            expect(sheet).to_be_hidden()
+        check('1.5.0 모드·프리셋: 모드마다 실제 모델·무료/유료, 설정과 같은 모드로 열림, 프리셋 9가지(추천 하나), 이미지 종류별 지시문, Gemini는 해상도', t_studio_modes_presets)
+
+        def t_studio_free_and_candidates():
+            # 설정이 무료 모델이면 창도 무료 모드로 열리고, 유료로 저절로 바뀌지 않음
+            mock.settings['image_gen_model'] = 'cf-flux-2-klein-4b'
+            reload_keys()
+            open_p8()
+            open_ai(0)
+            expect(sheet.locator('select[name=mode]')).to_have_value('free_draft')
+            n0 = len(gen_bodies())
+            sheet.get_by_role('button', name=re.compile(r'· 만들기$')).click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=20000)
+            req = gen_bodies()[n0]
+            assert req['model'] == 'cf-flux-2-klein-4b' and req['confirm_usd'] == 0, req
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            mock.settings['image_gen_model'] = 'gpt-image-2.5-flare'
+            reload_keys()
+            open_p8()
+            # 후보 2장: 버튼에 장수·합계 예상, 한 장씩 차례로 (같은 묶음 번호, 남은 장의 예상 비용을 미리 예약)
+            open_ai(0)
+            sheet.get_by_role('button', name='2장 비교').click()
+            go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ \(2장\) · 만들기'))
+            expect(go).to_be_enabled()
+            expect(sheet.locator('.costbox')).to_contain_text('× 2장 =')
+            n0 = len(gen_bodies())
+            go.click()
+            expect(sheet).to_contain_text('후보 2장', timeout=40000)
+            reqs = gen_bodies()[n0:]
+            assert len(reqs) == 2, len(reqs)
+            b0, b1 = reqs[0]['batch'], reqs[1]['batch']
+            assert b0['kind'] == 'candidates' and b0['id'] == b1['id'] and [b0['index'], b1['index']] == [0, 1] and b0['total'] == b1['total'] == 2, (b0, b1)
+            assert reqs[0]['request_key'] != reqs[1]['request_key']
+            assert abs(reqs[0]['reserve_usd'] - 2 * reqs[0]['confirm_usd']) < 1e-6 and abs(reqs[1]['reserve_usd'] - reqs[1]['confirm_usd']) < 1e-6, reqs
+            assert all(r['model'] == 'gpt-image-2.5-flare' for r in reqs)
+            expect(sheet).to_contain_text('앱이 대신 고르지 않아')
+            picks = sheet.get_by_role('button', name=re.compile('이걸로 쓰기'))
+            expect(picks).to_have_count(2)
+            sheet_shot('31-studio-candidates')
+            picks.nth(1).click()
+            expect(page.locator('#toast')).to_contain_text('연결했어')
+        check('1.5.0 무료 모드 그대로·후보 2장: 설정이 무료면 무료로(유료로 안 바뀜), 후보는 장수·합계 예상, 같은 묶음으로 한 장씩, 고르는 건 사용자', t_studio_free_and_candidates)
+
+        def t_studio_real_product_ref():
+            close_sheet()
+            # 진짜 제품 사진(직접 올린 사진)을 '대상 모양 유지' 참고 사진으로 → 실제 상품이 보여야 하는 자리(구성품)도 'AI 합성'으로 만들 수 있음
+            # (앞 시험에서 자리를 맞바꿨을 수 있어서, 직접 올린 사진을 구성품 자리(사진 2)에 다시 연결해 두고 시작)
+            up0 = next(i for i in mock.images if i['kind'] == 'upload' and not i.get('deleted_at'))
+            mock.link(P8, parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])[1]['key'], up0['id'])
+            reload_keys()
+            open_p8()
+            card = page.locator('section.studio .slot').nth(1)
+            card.get_by_role('button', name='미리보기·내려받기').click()
+            sheet.get_by_role('button', name='이 사진을 참고해서 AI로 새로 만들기').click()
+            expect(sheet.locator('select[aria-label="참고 사진 역할"]')).to_have_value('subject')
+            expect(sheet).to_contain_text("결과는 'AI 합성'으로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼")
+            expect(sheet.get_by_label(re.compile('일반 장면으로 만들게'))).to_have_count(0)
+            go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
+            expect(go).to_be_enabled()
+            up = next(i for i in mock.images if i['kind'] == 'upload' and not i.get('deleted_at'))
+            n0 = len(gen_bodies())
+            go.click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=20000)
+            req = gen_bodies()[n0]
+            assert req['refs'] == [{'image_id': up['id'], 'role': 'subject'}] and 'generic_ok' not in req, req
+            expect(sheet).to_contain_text('참고한 제품 사진과 모양·글자·버튼이 같은지')
+            new = next(i for i in mock.images if i['kind'] == 'ai')
+            assert new['composite'] is True and new['ref_images'][0]['role'] == 'subject'
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            # 무료 모델로 같은 참고 사진: 512px보다 작은 사본을 먼저 올리고(원본은 그대로) 그다음 생성
+            open_p8()
+            card.get_by_role('button', name='미리보기·내려받기').click()
+            sheet.get_by_role('button', name='이 사진을 참고해서 AI로 새로 만들기').click()
+            sheet.locator('select[name=mode]').select_option('free_draft')
+            expect(sheet).to_contain_text('500px 안으로 줄인 사본')
+            n_calls = len(mock.calls)
+            sheet.get_by_role('button', name=re.compile(r'· 만들기$')).click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=20000)
+            later = [c['path'] for c in mock.calls[n_calls:]]
+            small = f"images/{up['id']}/small"
+            assert small in later and later.index(small) < later.index('images/generate'), later
+            s = mock.small_uploads[-1]
+            assert s['id'] == up['id'] and max(s['w'], s['h']) <= 500, s
+            assert up['storage_path'].startswith('upload/'), '원본은 그대로'
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+        check('1.5.0 진짜 제품 사진 참고: 대상 모양 유지 역할, 실제 상품 자리도 AI 합성으로, 결과에 원본 비교 안내, 무료 모델은 작은 사본을 먼저', t_studio_real_product_ref)
+
+        def t_studio_review():
+            close_sheet()
+            open_p8()
+            n_link = len([c for c in mock.calls if c['path'].endswith('/images/link')])
+            page.locator('section.studio .slot').nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            sheet.get_by_role('button', name='AI 검수 (참고용)').click()
+            sel = sheet.get_by_label('검수할 AI')
+            expect(sel).to_have_value('cf-gemma-4-26b')  # 키가 있으면 무료 모델이 먼저 (설정에서 고른 모델이 없을 때)
+            expect(sheet).to_contain_text('무료 (Cloudflare 무료 플랜')
+            sel.select_option('gpt-5.6-luna')
+            expect(sheet).to_contain_text('근거: 입력 약 1,208토큰')
+            sheet.get_by_role('button', name='AI 검수 받기').click()
+            expect(sheet).to_contain_text('품질을 보장하는 점수가 아니고 틀릴 수 있어')
+            expect(sheet).to_contain_text('(확신 80%)')
+            expect(sheet).to_contain_text('판단 어려움')
+            expect(sheet).to_contain_text('불확실한 점: 작은 글자는 확대해 봐야 해')
+            body = [c for c in mock.calls if c['path'].endswith('/review')][-1]['body']
+            assert body['model'] == 'gpt-5.6-luna' and abs(body['confirm_usd'] - review_est('gpt-5.6-luna', 1)) < 1e-9, body
+            assert len([c for c in mock.calls if c['path'].endswith('/images/link')]) == n_link, '검수가 대신 고르거나 연결하지 않음'
+            assert not [c for c in mock.calls if c['method'] == 'DELETE' and c['path'].startswith('images/')], '검수가 이미지를 지우지 않음'
+            sheet_shot('32-studio-review')
+            # AI가 제안한 고칠 점 → 그 문장으로 고치기 창 (원본은 그대로)
+            sheet.get_by_role('button', name='이걸로 고치기').click()
+            expect(sheet).to_contain_text('AI 이미지 고치기')
+            expect(sheet.locator('textarea').first).to_have_value('왼쪽 아래 글자 무늬만 지워줘')
+            sheet.get_by_role('button', name='닫기').click()
+        check('1.5.0 AI 검수: 무료 모델 먼저, 유료는 예상 비용·근거, 결과는 의견·확신·판단 어려움·불확실한 점, 고칠 점은 고치기로, 대신 고르거나 지우지 않음', t_studio_review)
+
+        def t_studio_edit_history():
+            close_sheet()
+            open_p8()
+            page.locator('section.studio .slot').nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            sheet.get_by_role('button', name='고치기 (부분 수정)').click()
+            expect(sheet).to_contain_text('원본은 그대로 남고, 고친 이미지는 수정 이력으로 이어져')
+            expect(sheet.locator('select[name=mode]')).to_have_value('settings')  # 설정의 편집 모델 (gpt-image-2.5-sunburst)
+            expect(sheet).to_contain_text('gpt-image-2.5-sunburst')
+            sheet.get_by_role('button', name='조명만 더 자연스럽게 바꿔줘').click()
+            base_id = next(r for r in mock.slots if r['post_id'] == P8 and r['slot_key'] == parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])[0]['key'])['image_id']
+            n0 = len(gen_bodies())
+            sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 고치기')).click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=20000)
+            req = gen_bodies()[n0]
+            assert req['mode'] == 'edit' and req['base_image_id'] == base_id and req['model'] == 'gpt-image-2.5-sunburst' and '조명만' in req['text'], req
+            new = next(i for i in mock.images if i['kind'] == 'ai')
+            assert new['parent_image_id'] == base_id and mock.img(base_id), '원본은 그대로 있고 새 이미지가 원본을 가리킴'
+            sheet.get_by_role('button', name=re.compile('이 이미지 쓰기')).click()
+            expect(page.locator('#toast')).to_contain_text('연결했어')
+            page.locator('section.studio .slot').nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            sheet.get_by_text('수정 이력', exact=True).click()
+            expect(sheet).to_contain_text('1번째 고침 · 지금 보는 이미지')
+            expect(sheet).to_contain_text('원본')
+            sheet.get_by_role('button', name='닫기').click()
+        check('1.5.0 고치기·수정 이력: 설정의 편집 모델, 예시 문장, 원본은 그대로·새 이미지가 원본을 가리킴, 미리보기에서 원본부터 이력', t_studio_edit_history)
+
+        def t_studio_compare():
+            reload_keys(cloudflare=False)  # 비교 기본값이 서로 다른 두 모델(OpenAI·Gemini)이 되게
+            open_p8()
+            open_ai(0)
+            sheet.get_by_role('button', name='여러 모델로 비교하기').click()
+            expect(sheet).to_contain_text('한두 번 비교로 어느 모델이 늘 낫다고 단정할 수는 없어')
+            checked = [l.inner_text() for l in sheet.locator('label.chk').all() if l.locator('input').is_checked()]
+            assert len(checked) == 2 and any('GPT Image 2.5' in t for t in checked) and any('Gemini 3 Pro Image' in t for t in checked), checked
+            expect(sheet.locator('.costbox')).to_contain_text('합계 예상 $')
+            go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ \(2장\) · 비교 만들기'))
+            expect(go).to_be_enabled()
+            n0 = len(gen_bodies())
+            go.click()
+            expect(sheet).to_contain_text('내 평가 (AI 평가와 따로 저장)', timeout=40000)
+            reqs = gen_bodies()[n0:]
+            assert [r['model'] for r in reqs] == ['gpt-image-2.5-flare', 'gemini-3-pro-image'], [r['model'] for r in reqs]
+            assert all(r['batch']['kind'] == 'compare' and r['batch']['total'] == 2 and r['batch']['id'] == reqs[0]['batch']['id'] for r in reqs)
+            assert reqs[0]['reserve_usd'] > reqs[1]['reserve_usd'], '남은 장의 예상 비용만큼 예약'
+            same = lambda k: len({json.dumps(r.get(k), sort_keys=True) for r in reqs}) == 1
+            assert same('text') and same('ratio') and same('preset') and same('refs'), '같은 설명·비율·종류·참고 사진'
+            first = sheet.locator('.slot.on').first
+            expect(first).to_contain_text('gpt-image-2.5-flare')
+            first.get_by_role('group', name='글과의 일치도').get_by_role('button', name='좋음').click()
+            first.get_by_label(re.compile('이 비교에서 제일 나아')).check()
+            first.get_by_role('button', name='내 평가 저장').click()
+            expect(page.locator('#toast')).to_contain_text('AI 평가와 따로 남아')
+            ev = [c for c in mock.calls if c['path'].endswith('/evaluate')][-1]['body']
+            assert ev == {'scores': {'fit': 3}, 'preferred': True, 'batch_id': reqs[0]['batch']['id']}, ev
+            expect(first.get_by_role('button', name='AI 평가 (참고용)')).to_be_visible()
+            no_overflow('모델 비교')
+            sheet_shot('33-studio-compare')
+            sheet.get_by_role('button', name='닫기').first.click()
+            reload_keys()
+        check('1.5.0 모델 비교: 서로 다른 모델 둘을 같은 설명·비율·참고 사진으로, 합계 예상 확인 뒤 한 장씩, 내 평가는 AI 평가와 따로', t_studio_compare)
+
+        def t_studio_settings_150():
+            reload_keys()
+            goto_hash('settings/images')
+            sec = page.locator('#sec-images')
+            gem = sec.locator('.item', has_text='Google Gemini')
+            expect(gem).to_contain_text('키 연결됨 · 확인 전')
+            expect(gem).to_contain_text('연결 확인: 아직 안 함')
+            gem.get_by_role('button', name='연결 확인').click()
+            expect(page.locator('#toast')).to_contain_text('연결 확인됨 (이미지는 만들지 않았어)')
+            expect(sec.locator('.item', has_text='Google Gemini')).to_contain_text('키 연결됨 · 확인됨')
+            assert [c for c in mock.calls if c['path'] == 'images/providers/check'][-1]['body'] == {'provider': 'gemini'}
+            row = sec.locator('.stack', has=page.locator('b', has_text='Gemini 고품질 생성')).last
+            row.locator('label', has_text='모델').locator('select').select_option('gemini-nano-banana-2.1')
+            sec.get_by_label('기본 검수 모델').select_option('gemini-3.5-flash-lite')
+            sec.locator('label', has_text='한 번 상한').locator('input').fill('0.5')
+            sec.get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
+            assert body['image_modes']['gemini_hq'] == {'model': 'gemini-nano-banana-2.1', 'quality': 'high'}, body['image_modes']
+            assert body['image_modes']['free_draft']['model'] == 'cf-flux-2-klein-4b' and body['image_gen_model'] == 'gpt-image-2.5-flare', '다른 모드·기본 모델은 그대로'
+            assert body['image_review_model'] == 'gemini-3.5-flash-lite' and body['image_request_cap_usd'] == 0.5
+            assert 'gemini-nano-banana-2.1' in body['image_prices'] and 'gemini-2.5-flash-image' not in body['image_prices'], list(body['image_prices'])
+            html = page.content() + json.dumps(page.evaluate('() => Object.values(localStorage)'), ensure_ascii=False)
+            assert mock.server_secret not in html and 'AIza' not in html, 'API 키가 화면·저장소에 나옴'
+            no_overflow('설정 > 이미지 (1.5.0)')
+            shot('34-settings-images-150')
+        check('1.5.0 설정 > 이미지: 공급자마다 키·연결 확인(만들지 않고)·실제 생성 기록을 따로, 모드·검수 모델·한 번 상한 저장, 키는 화면에 없음', t_studio_settings_150)
 
         # 검색 노출 점검 (1.3.0 → 1.3.1): 앱 권장 기준·내 기록·실측 데이터 없음 구분, 주력 주제는 게시한 글만·키워드·제목 근거, 하루 발행량은 고른 값 그대로
         def t_seo_helper():
@@ -1782,6 +2211,7 @@ def main():
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
+            close_sheet()  # 앞 시험이 연 창이 남아 있으면 닫고 (창이 새로고침 버튼을 가리지 않게)
             mock.force_401 = True
             page.get_by_role('button', name='새로고침').click()
             expect(page.locator('#gate')).to_be_visible()

@@ -8,7 +8,8 @@ import { fileURLToPath } from 'node:url';
 import { parseSlots, matchSlots, planSlotSync, ctxOf } from '../images.js';
 
 const KEY = (n) => `req-key-${String(n).padStart(4, '0')}-abcdef`;
-const begin = (db, p) => val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ model: 'gpt-image-2.5-flare', size: '1024x1024', quality: 'medium', est_usd: 0.0132, ...p })]);
+// 1.5.0(017): 생성 시작 함수는 공급자를 꼭 받음 (모르는 공급자를 openai 로 바꾸지 않음) — 서버는 늘 보냄. 그래서 기본값으로 openai 를 넣어 부름
+const begin = (db, p) => val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ model: 'gpt-image-2.5-flare', size: '1024x1024', quality: 'medium', est_usd: 0.0132, provider: 'openai', ...p })]);
 const save = (db, img, link = null, gen = null, fin = null) => val(db, `select public.image_save($1::jsonb, $2::jsonb, $3::uuid, $4::jsonb)`,
   [JSON.stringify({ kind: 'upload', provider: 'upload', storage_path: 'up/x.jpg', mime: 'image/jpeg', ...img }), link && JSON.stringify(link), gen, fin && JSON.stringify(fin)]);
 const slotRow = (db, post, key) => one(db, `select * from public.post_image_slots where post_id = $1 and slot_key = $2`, [post, key]);
@@ -224,7 +225,8 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       await db.query(`insert into public.post_card_decks (post_id, bg_image_id) values ($1, $2)`, [postA, free.id]);
       await assert.rejects(val(db, `select public.image_delete($1)`, [free.id]), /image in use/, '카드뉴스 배경으로 쓰는 중');
       await db.query(`update public.post_card_decks set bg_image_id = null where post_id = $1`, [postA]);
-      assert.deepEqual(await val(db, `select public.image_delete($1)`, [free.id]), { storage_path: 'up/free.jpg' });
+      // 1.5.0(017)부터 작은 사본(FLUX.2 klein 참고용) 경로도 같이 돌려줘서 서버가 그 파일도 지움 — 사본이 없으면 빈 값
+      assert.deepEqual(await val(db, `select public.image_delete($1)`, [free.id]), { storage_path: 'up/free.jpg', ref_small_path: '' });
       assert.ok(await val(db, `select deleted_at from public.post_images where id = $1`, [free.id]));
       await assert.rejects(val(db, `select public.image_delete($1)`, [free.id]), /image not found/);
     });

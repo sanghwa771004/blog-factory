@@ -294,9 +294,11 @@ export const ratioOf = (purpose, ratio) => {
 // AI에 요청할 크기. 임의 크기를 못 받는 모델은 표준 크기 세 가지 중 방향이 같은 것으로 만들고, 내려받을 때 비율대로 자름
 export const STANDARD_SIZES = ['1024x1024', '1536x1024', '1024x1536'];
 export const standardSizeFor = (ratio) => { const R = RATIOS[ratio] || RATIOS['1:1']; return R.w > R.h ? '1536x1024' : R.w < R.h ? '1024x1536' : '1024x1024'; };
-export const sizeFor = (purpose, ratio, model) => {
+// quality: Gemini처럼 품질 대신 해상도(1K·2K·4K)를 고르는 모델에서만 씀 → '비율@해상도' (예: 16:9@2K)
+export const sizeFor = (purpose, ratio, model, quality) => {
   const r = ratioOf(purpose, ratio);
   const c = model ? modelCaps(model) : null;
+  if (c && c.aspect) { const sz = c.imageSizes ? c.imageSizes[normQuality(model, quality || 'medium')] : ''; return sz ? `${r}@${sz}` : r; }
   if (c && c.sizes) return c.sizes[r] || c.sizes['1:1'];   // 비율별로 정해 둔 크기로 바로 만드는 모델 (자를 필요 없음)
   if (c && c.fixedSize) return c.fixedSize;
   return model && !modelCaps(model).flexible ? standardSizeFor(r) : RATIOS[r].size;
@@ -343,28 +345,264 @@ export function defaultRatio(img, purpose) {
 // 사진 검색 방향 (Pexels orientation)
 export const orientationFor = (ratio) => { const R = RATIOS[ratio]; return !R ? '' : R.w > R.h ? 'landscape' : R.w < R.h ? 'portrait' : 'square'; };
 
-// ───────── 스타일·프롬프트 ─────────
-export const STYLES = {
-  life_photo: { label: '자연스러운 생활 사진풍', prompt: 'Natural lifestyle photo look, soft daylight, an ordinary Korean home or daily-life setting, generic unbranded objects.' },
-  product_bg: { label: '깔끔한 제품 주변 배경', prompt: 'A clean, minimal surface and background with soft shadows and generous empty space in the middle, ready for a real product photo to be placed later. Do not draw any product.' },
-  explainer: { label: '설명용 일러스트', prompt: 'A simple explanatory flat illustration with clear shapes and friendly colors, diagram-like but with no labels or text.' },
-  editorial: { label: '미니멀한 편집 디자인', prompt: 'Minimal editorial design, lots of negative space, muted palette, calm and refined composition.' },
-  warm_info: { label: '따뜻한 생활 정보 콘텐츠', prompt: 'Warm, cozy illustration for everyday tips content, soft warm light and gentle colors.' },
-  compare_bg: { label: '비교 콘텐츠용 배경', prompt: 'A background for a side-by-side comparison layout: two balanced, clearly separated empty areas with a subtle divider. No objects.' },
-  ig_card: { label: '인스타그램 카드뉴스용 이미지', prompt: 'A bold, clean background for a social media card, with a large calm area where the app will place text later.' },
+// ───────── 이미지 종류(프리셋)·장면 설계서·프롬프트 (1.5.0) ─────────
+// 1.4.0까지는 모든 이미지에 'illustrative image'와 같은 생활 사진 규칙(가운데 두기 등)을 똑같이 붙였음.
+// 1.5.0: 이미지 종류(실사 사진·일러스트·도식·카드뉴스 배경)마다 프롬프트를 따로 만들고, 프리셋마다 구도·빛·질감·피할 것을 다르게 줌.
+// 먼저 '장면 설계서'(buildScene, JSON)를 만들고 → 그걸로 공급자에 보낼 글(promptFromScene)을 만듦. 설계서는 생성 기록에 같이 저장.
+// 계절·날씨·시간·장소·나라는 원고(사진 자리 설명·소제목·제목, 계절 등은 앞뒤 문장까지)에 있을 때만 넣음 — 없으면 '넣지 마'라고 적음.
+export const IMAGE_TYPES = { photo: '실사 사진', illustration: '일러스트', diagram: '정보 도식', card_bg: '카드뉴스 배경' };
+const TYPE_EN = { photo: 'Photograph', illustration: 'Illustration', diagram: 'Information diagram', card_bg: 'Background image for a social media card' };
+// 프리셋: 화면·장면 설계서에는 한국어로 보여주고 고칠 수 있게, 공급자에는 render(영어 한 줄) + 한국어 값으로 보냄
+export const PRESETS = {
+  life_photo: {
+    label: '자연스러운 생활 사진', type: 'photo',
+    hint: '일상에서 실제로 찍은 듯한 사진. 생활 정보·사용법 글 본문에 무난해.',
+    render: 'A believable everyday photograph of a real moment, the way a person would take it in daily life. Not an advertisement.',
+    camera: '눈높이나 살짝 위, 35~50mm 표준 화각, 중간 거리',
+    light: '그 자리의 자연광이나 평범한 실내 조명, 부드러운 그림자',
+    color: '실제와 같은 색, 중립적인 화이트 밸런스',
+    materials: '물건마다 실제 재질 그대로의 질감',
+    composition: '자연스럽고 지나치게 반듯하지 않은 구도, 피사체가 답답하지 않게',
+    avoid: ['스튜디오 조명', '광고 사진처럼 번쩍이는 연출', '지나치게 완벽한 대칭'],
+  },
+  documentary: {
+    label: '다큐멘터리·현장 사진풍', type: 'photo',
+    hint: '현장을 지켜보듯 찍은 사진. 최신 정보·장소·현장 이야기에 맞아.',
+    render: 'An observational documentary photograph of a real, unposed situation.',
+    camera: '눈높이, 28~35mm 넓은 화각, 주변 상황이 같이 보이는 거리',
+    light: '현장의 빛 그대로 (여러 빛이 섞여도 됨), 플래시 없음',
+    color: '꾸미지 않은 담백한 색, 고운 입자감은 괜찮음',
+    materials: '현장의 실제 재질',
+    composition: '장소의 선과 앞·뒤 층을 살린 구도. 사람은 장면에 꼭 필요할 때만, 뒷모습이나 옆모습으로',
+    avoid: ['포즈 잡은 모델', '연출한 소품', '과한 보정'],
+  },
+  editorial: {
+    label: '고급 편집 디자인 사진', type: 'photo',
+    hint: '잡지 화보처럼 정돈된 사진. 대표 이미지나 분위기가 중요한 자리에.',
+    render: 'A refined editorial photograph for a magazine-style layout.',
+    camera: '정면이나 3/4 시점, 50~85mm, 반듯한 원근',
+    light: '한쪽에서 오는 부드러운 방향광, 은은하게 떨어지는 그림자',
+    color: '2~3가지 색으로 절제한 톤',
+    materials: '고급스럽게 보이는 실제 재질, 선명한 디테일',
+    composition: '한쪽에 의도한 여백(나중에 글을 얹을 자리), 비대칭 균형',
+    avoid: ['어수선한 배경', '과한 소품'],
+  },
+  product_still: {
+    label: '제품 정물 사진', type: 'photo',
+    hint: '제품 하나를 깔끔하게 보여주는 사진. 실제 제품이면 참고 사진(제품 모양 유지)을 꼭 넣어줘.',
+    render: 'A product still-life photograph.',
+    camera: '3/4 앞모습이나 정면, 50~100mm, 왜곡 적게',
+    light: '창가나 큰 소프트박스 같은 넓고 부드러운 주광 + 약한 보조광, 바닥에 닿는 그림자',
+    color: '제품 고유의 색 그대로, 중립적인 배경',
+    materials: '제품의 재질·마감 그대로',
+    composition: '제품이 잘리지 않고 다 보이게 여유 있는 여백, 제품에 초점',
+    avoid: ['없는 부품·버튼 만들기', '가짜 라벨·글자', '제품 모양 바꾸기'],
+  },
+  food: {
+    label: '음식 사진', type: 'photo',
+    hint: '식탁 위 음식을 자연스럽게. 레시피·맛집·간식 글에.',
+    render: 'A natural, appetizing but realistic food photograph.',
+    camera: '음식에 맞게 45도 위나 바로 위에서, 가까운~중간 거리',
+    light: '옆에서 들어오는 부드러운 창가 빛, 자연스러운 반사',
+    color: '먹음직스럽지만 실제 같은 색 (과하게 진하지 않게)',
+    materials: '음식 본래의 질감, 그릇·식탁 재질',
+    composition: '음식이 주인공, 소품은 적게, 식탁이나 조리대 위',
+    avoid: ['플라스틱 같은 음식', '실제로 없을 장식', '뜨거운 음식이 아닌데 김 나는 것'],
+  },
+  pet: {
+    label: '반려동물 일상 사진', type: 'photo',
+    hint: '반려동물의 평소 모습. 몸 생김새가 자연스러운지 꼭 확인해.',
+    render: 'A natural everyday photograph of a pet.',
+    camera: '동물 눈높이, 35~85mm, 빠른 셔터 느낌 (움직이는 장면이 아니면 흔들림 없이)',
+    light: '부드러운 자연광',
+    color: '털·눈 색 그대로',
+    materials: '털의 결, 주변 물건의 실제 재질',
+    composition: '얼굴과 자세가 잘 보이게, 주변에 숨 쉴 여백',
+    avoid: ['다리·발가락 개수가 틀린 몸', '사람처럼 꾸민 표정', '말하지 않은 옷·소품'],
+  },
+  explainer: {
+    label: '설명용 일러스트', type: 'illustration',
+    hint: '원리·방법을 그림으로 쉽게. 글자는 넣지 않아.',
+    render: 'A clear explanatory illustration in a clean flat vector style.',
+    camera: '단순한 정면이나 아이소메트릭 시점',
+    light: '평평한 조명, 사진 같은 그림자 없음',
+    color: '대비가 좋은 3~5가지 색',
+    materials: '단순한 도형, 일정한 선 굵기',
+    composition: '한 그림에 생각 하나, 넉넉한 간격, 깔끔한 배경',
+    avoid: ['사진처럼 보이는 질감', '복잡한 배경'],
+  },
+  diagram: {
+    label: '정보 전달용 도식', type: 'diagram',
+    hint: '순서·구조·비교를 아이콘·화살표로. 글자는 나중에 앱(카드뉴스)이나 본문으로.',
+    render: 'An information diagram made of simple schematic shapes, icons and arrows.',
+    camera: '평면(2D)이나 아이소메트릭',
+    light: '평평한 조명',
+    color: '대비가 높은 2~4가지 색',
+    materials: '단순한 아이콘과 선',
+    composition: '읽는 순서가 분명하게 (왼쪽→오른쪽 또는 위→아래), 격자에 맞춘 정렬, 나중에 글을 얹을 빈칸',
+    avoid: ['사진 같은 장면', '장식만 많은 그림'],
+  },
+  card_bg: {
+    label: '카드뉴스 배경', type: 'card_bg',
+    hint: '카드뉴스 글자 뒤에 깔 배경. 글자는 앱이 얹어.',
+    render: 'A calm background image for a social media card; text will be placed on it later.',
+    camera: '평면적이고 단순한 시점',
+    light: '부드럽고 고른 빛',
+    color: '서로 어울리는 차분한 색, 글자가 잘 읽히는 밝기',
+    materials: '단순한 질감이나 은은한 사진 배경',
+    composition: '위쪽이나 가운데에 글자가 올라갈 넓고 조용한 공간, 볼거리는 가장자리에',
+    avoid: ['복잡한 무늬', '가운데를 가리는 물체'],
+  },
 };
+export const STYLES = PRESETS; // 예전 이름 (1.4.0까지 '스타일')
 export const DEFAULT_STYLE = 'life_photo';
+// 1.4.0 스타일 이름 → 1.5.0 프리셋 (예전 생성 기록으로 '다시 만들기' 할 때)
+export const STYLE_ALIAS = { product_bg: 'editorial', warm_info: 'explainer', compare_bg: 'diagram', ig_card: 'card_bg' };
+export const presetOf = (id) => (PRESETS[id] ? id : STYLE_ALIAS[id] && PRESETS[STYLE_ALIAS[id]] ? STYLE_ALIAS[id] : DEFAULT_STYLE);
+export const validPreset = (id) => !!(id && (PRESETS[id] || STYLE_ALIAS[id]));
 
+// 원고 내용으로 프리셋 추천 (사용자가 바꿀 수 있음)
+const PET_RE = /강아지|고양이|반려(동물|견|묘)|댕댕|냥이|애견|애묘|햄스터|앵무|(?<![가-힣])토끼|강쥐|퍼피/;
+const FOOD_RE = /음식|요리|반찬|국물|찌개|김치|밥상|도시락|라면|레시피|간식|디저트|과일|(?<![가-힣])빵|소금빵|케이크|떡볶이|(?<![가-힣])떡|커피(?!\s?(머신|메이커|포트))|차 한 잔|한 끼|식사/;
+const DIAGRAM_RE = /도식|구조도|원리|순서도|흐름도|단계별|과정|비교표|그래프|차트|구성도|배치도|작동\s?방식/;
+const PRODUCT_RE = /제품|상품|정면|외관|본체|구성품|패키지|박스/;
+export function recommendPreset({ post, slot, text, purpose } = {}) {
+  const t = [text != null && String(text).trim() ? text : slot && slot.text, slot && slot.heading].filter(Boolean).join(' ');
+  if (purpose === 'cards') return { id: 'card_bg', why: '카드뉴스에 쓸 배경이라' };
+  if (PET_RE.test(t)) return { id: 'pet', why: '반려동물이 나오는 자리라' };
+  if (FOOD_RE.test(t)) return { id: 'food', why: '음식이 나오는 자리라' };
+  if (DIAGRAM_RE.test(t)) return { id: 'diagram', why: '원리·순서·구조를 보여주는 자리라' };
+  if (PRODUCT_RE.test(t)) return { id: 'product_still', why: '제품 모습이 중심인 자리라' };
+  if (purpose === 'blog_cover') return { id: 'editorial', why: '대표 이미지라' };
+  if (post && post.content_type === 'news_summary') return { id: 'documentary', why: '최신 정보 글이라' };
+  return { id: 'life_photo', why: '일상 장면이라' };
+}
+
+// ── 원고에서 읽는 맥락 (있을 때만) ──
+// [찾을 말, 한국어, 영어, 한국을 뜻하는지]
+const SEASON_AFTER = '(?=철|맞이|날|시즌|에|이|의|은|엔|을|도|용|\\s|$|[,.·)!?~])';
+const CTX_SEASON = [
+  [new RegExp(`(?<![가-힣])봄${SEASON_AFTER}|벚꽃|꽃샘추위`), '봄', 'spring'],
+  [new RegExp(`(?<![가-힣])여름${SEASON_AFTER}|한여름|폭염|무더위|열대야`), '여름', 'summer'],
+  [new RegExp(`(?<![가-힣])가을${SEASON_AFTER}|단풍`), '가을', 'autumn'],
+  [new RegExp(`(?<![가-힣])겨울${SEASON_AFTER}|한겨울|한파|첫눈|동파`), '겨울', 'winter'],
+  [/김장/, '김장철', 'early winter (kimchi-making season)', true],
+  [/장마/, '장마철', 'rainy season'],
+  [/크리스마스|성탄절/, '크리스마스', 'Christmas season'],
+  [/설날|설\s?연휴|추석|명절/, '명절', 'a Korean holiday season', true],
+  [/연말|송년|새해|신년/, '연말연시', 'year-end holidays'],
+  [/환절기/, '환절기', 'change of seasons'],
+];
+const CTX_WEATHER = [
+  [/비\s?(오는|내리는|올\s?때|소식)|비가\s?(오|내리)|빗(물|방울|길|소리)|폭우|소나기/, '비', 'rain'],
+  [/눈\s?(오는|내리는|올\s?때)|눈이\s?(오|내리|쌓)|폭설|함박눈|첫눈|눈길|눈사람/, '눈', 'snow'],
+  [/맑은\s?날|화창/, '맑음', 'clear sky'],
+  [/흐린\s?날/, '흐림', 'overcast sky'],
+  [/미세먼지|황사/, '미세먼지', 'hazy air'],
+  [/습한|습기|눅눅/, '습함', 'humid air'],
+  [/추운\s?날|영하|강추위|쌀쌀/, '추운 날씨', 'cold weather'],
+  [/더운\s?날|무더운/, '더운 날씨', 'hot weather'],
+];
+const CTX_TIME = [
+  [/새벽/, '새벽', 'dawn'],
+  [/아침|오전/, '아침', 'morning'],
+  [/(?<![가-힣])(한낮|낮)(에|시간|동안)?(?![가-힣])|점심/, '낮', 'midday'],
+  [/오후/, '오후', 'afternoon'],
+  [/해\s?질\s?녘|노을|석양/, '해 질 녘', 'sunset'],
+  [/저녁/, '저녁', 'evening'],
+  [/(?<![가-힣])밤(에|중|새|늦게|시간|사이)?(?![가-힣])|야간|한밤/, '밤', 'night'],
+];
+const CTX_PLACE = [
+  [/원룸/, '원룸', 'a small one-room studio apartment', true],
+  [/오피스텔/, '오피스텔', 'a small studio apartment', true],
+  [/아파트/, '아파트', 'an apartment home', true],
+  [/빌라/, '빌라', 'a small low-rise apartment', true],
+  [/한옥/, '한옥', 'a traditional Korean house', true],
+  [/거실/, '거실', 'a living room'],
+  [/침실|안방/, '침실', 'a bedroom'],
+  [/주방|부엌|싱크대|조리대/, '주방', 'a kitchen'],
+  [/욕실|화장실|세면대/, '욕실', 'a bathroom'],
+  [/베란다|발코니/, '베란다', 'a balcony'],
+  [/현관|신발장/, '현관', 'an entryway'],
+  [/창가|창문|창틀|창밖/, '창가', 'by a window'],
+  [/책상/, '책상', 'at a desk'],
+  [/사무실|회사|오피스(?!텔)/, '사무실', 'an office'],
+  [/카페/, '카페', 'a cafe'],
+  [/식당|음식점/, '식당', 'a restaurant'],
+  [/편의점/, '편의점', 'a convenience store', true],
+  [/대형\s?마트|(?<![가-힣])마트/, '마트', 'a supermarket'],
+  [/전통\s?시장|재래시장/, '전통시장', 'a traditional market', true],
+  [/지하철/, '지하철', 'a subway station or train'],
+  [/정류장/, '정류장', 'a bus stop'],
+  [/길거리|골목|거리\s?(풍경|에서)/, '거리', 'a street'],
+  [/공원/, '공원', 'a park'],
+  [/캠핑/, '캠핑장', 'a campsite'],
+  [/차\s?안|차량\s?(안|내부)|운전석|자동차\s?안/, '차 안', 'inside a car'],
+  [/주차장/, '주차장', 'a parking lot'],
+  [/교실|학교/, '학교', 'a school'],
+  [/도서관/, '도서관', 'a library'],
+  [/헬스장|체육관/, '헬스장', 'a gym'],
+  [/매장|진열대/, '매장', 'a store'],
+];
+const CTX_KOREA = /한국|국내|우리나라|서울|부산|대구|인천|광주|대전|울산|제주/;
+const hitsOf = (list, text) => {
+  const out = [];
+  for (const [re, ko, en, kr] of list) if (re.test(text) && !out.some((x) => x.ko === ko)) out.push({ ko, en, kr: !!kr });
+  return out;
+};
+// 원고에서 계절·날씨·시간·장소를 읽음. 장소는 사진 자리 설명·소제목·제목에서만(앞뒤 문장은 다른 이야기일 때가 많아서 뺌),
+// 계절·날씨·시간은 가장 가까운 곳(사진 자리 → 소제목 → 제목 → 앞뒤 문장) 한 곳에서. from = 어디서 읽었는지
+export function readContext({ post, slot, text } = {}) {
+  const sceneText = stripOwnMark(text != null && String(text).trim() ? text : (slot && slot.text) || '');
+  const src = [
+    ['사진 자리', sceneText],
+    ['소제목', (slot && slot.heading) || ''],
+    ['제목', (post && ((post.titles && post.titles[0]) || post.keyword)) || ''],
+    ['앞뒤 문장', [slot && slot.before, slot && slot.after].filter(Boolean).join(' ')],
+  ];
+  const first = (list) => {
+    for (const [from, t] of src) { const items = hitsOf(list, String(t)); if (items.length) return { items: items.slice(0, 2), from }; }
+    return { items: [], from: '' };
+  };
+  const place = { items: [], from: [] };
+  for (const [from, t] of src.slice(0, 3)) {
+    for (const x of hitsOf(CTX_PLACE, String(t))) if (place.items.length < 3 && !place.items.some((y) => y.ko === x.ko)) { place.items.push(x); if (!place.from.includes(from)) place.from.push(from); }
+  }
+  const season = first(CTX_SEASON), weather = first(CTX_WEATHER), time = first(CTX_TIME);
+  const all = src.map(([, t]) => String(t || '')).join(' ');
+  const korea = place.items.some((x) => x.kr) || season.items.some((x) => x.kr) || CTX_KOREA.test(all);
+  return { place: { items: place.items, from: place.from.join('·') }, season, weather, time, korea };
+}
+
+// ── 참고 이미지 역할 ──
+export const REF_ROLES = {
+  subject: { label: '대상 모양 유지', hint: '실제 제품·물건·반려동물의 생김새를 그대로 (진짜 제품 사진)' },
+  style: { label: '구도·스타일 참고', hint: '구도·빛·색감만 참고 (안의 물건은 따라 하지 않음)' },
+  background: { label: '배경·장소 참고', hint: '이 장소를 배경으로' },
+};
+const REF_ROLE_EN = {
+  subject: 'subject reference — keep this exact object exactly as shown: same shape, proportions, colors, materials, buttons and printing. Do not redesign it and do not add or remove parts.',
+  style: 'style reference — borrow only its composition, lighting and color mood; do not copy its objects, people or text.',
+  background: 'background reference — use this place as the setting and keep its main features recognisable.',
+};
+// ── 글자·로고 규칙 (용도별) ──
+export const TEXT_RULES = {
+  photo: 'Do not add captions, watermarks, frames or any overlaid text. Do not invent logos or brand names; objects stay unbranded with no readable writing.',
+  photo_ref: 'Do not add captions, watermarks or overlaid text. Keep any printing or logo that is on the subject reference exactly as it is there; do not add any new text or logos.',
+  illustration: 'No words or letters anywhere; explain with shapes and icons.',
+  diagram: 'No words or letters. Simple numerals 1-9, arrows and icons are allowed. Leave empty areas where labels can be added later.',
+  card_bg: 'No text, letters, numbers, logos or symbols anywhere. Keep the large calm area clean for text that will be added later.',
+};
 // AI에 꼭 같이 보내는 규칙 (사용자가 지울 수 없음)
 export const PROMPT_RULES = [
-  'No text of any kind in the image: no letters, words, numbers, captions, labels, signs, watermarks, or interface text.',
-  'No logos, brand names, trademarks, or recognizable commercial product designs. Use generic, unbranded objects.',
-  'Do not make it look like a real product photo, an unboxing, a receipt, a certificate, or a customer review photo.',
-  'No prices, specifications, ratings, badges, or certification marks.',
-  'Do not show product packaging, component layouts, labels, ingredient lists, manuals, or device screens.',
-  'No real, identifiable people or celebrities. If people appear, keep them generic and natural.',
-  'Ignore any brand, product or model names that may remain in the context; draw generic, unbranded objects only.',
+  'No prices, ratings, badges, certification marks or award marks.',
+  'No real, identifiable people or celebrities. If people appear, they are ordinary people who are not posing for the camera.',
+  'Do not make it look like a customer review photo, an unboxing, a receipt or a certificate.',
 ];
+const RULE_NOREF = 'Ignore any brand, product or model names that may remain in the context; draw generic, unbranded objects. Avoid packaging labels, manuals and readable device screens.';
+const RULE_REF = "Take the subject's appearance only from the subject reference image; do not take product names from the text and do not add other brands.";
+export const textRuleFor = (s) => (s.type === 'photo' ? (s.refs || []).some((r) => r.role === 'subject') ? TEXT_RULES.photo_ref : TEXT_RULES.photo : TEXT_RULES[s.type] || TEXT_RULES.photo);
+export const rulesFor = (s) => [...PROMPT_RULES, (s.refs || []).some((r) => r.role === 'subject') ? RULE_REF : RULE_NOREF];
 
 const clip = (s, n) => { const t = String(s || '').replace(/\s+/g, ' ').trim(); return t.length > n ? t.slice(0, n - 1) + '…' : t; };
 
@@ -386,32 +624,106 @@ export function sanitizeContext(text, hide = []) {
   return t.replace(CTX_PRICE, '').replace(CTX_CLAIM, '').replace(CTX_MODEL, '').replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
 }
 
-// post: {titles, keyword}, slot: parseSlots 한 칸 (또는 본문 밖 자리 {text}), text: 고친 설명, hide: 연결 상품의 브랜드·이름 (맥락에서 지움)
-export function buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode, hide } = {}) {
-  const st = STYLES[style] || STYLES[DEFAULT_STYLE];
-  const pu = PURPOSES[purpose] || PURPOSES.blog_body;
-  const r = ratioOf(purpose, ratio);
+// 목적어 조사 (받침 있으면 '을', 없으면 '를'. 한글이 아니면 '를')
+const objJosa = (w) => { const c = String(w || '').trim().slice(-1).charCodeAt(0) - 0xac00; return c >= 0 && c < 11172 && c % 28 ? '을' : '를'; };
+// ── 장면 설계서 ──
+// 화면에서 고칠 수 있는 칸 (overrides 로 옴). 서버는 이 칸만 받고 길이를 자름
+export const SCENE_EDITABLE = ['subject', 'setting', 'time', 'camera', 'light', 'color', 'materials', 'composition', 'must_show', 'avoid', 'locale'];
+export const SCENE_LABELS = {
+  goal: '이미지의 목적', subject: '주 피사체와 행동', setting: '장소와 주변 환경', time: '계절·날씨·시간', camera: '카메라 각도와 거리',
+  light: '광원과 그림자', color: '색감', materials: '소재와 질감', composition: '구도와 여백', platform: '대상 플랫폼·화면 비율',
+  must_show: '정확히 보여야 하는 요소', avoid: '생성하면 안 되는 요소', locale: '지역', refs: '참고 이미지',
+};
+// 다른 비율로 잘려서 쓰이는 용도: 대표 이미지는 목록 썸네일(정사각형에 가깝게)로 잘리는 경우가 많아서 주인공을 가운데 쪽에
+const CROP_NOTE = { blog_cover: '목록 썸네일로 정사각형에 가깝게 잘려도 주인공이 보이게, 주인공은 가운데 60% 안에' };
+/** @param {{ post?: any, slot?: any, text?: string, style?: string, preset?: string, purpose?: string, ratio?: string, extra?: string, mode?: string, hide?: any[], refs?: any[], channel?: string, size?: string, overrides?: any }} [o] */
+export function buildScene({ post, slot, text, style, preset, purpose, ratio, extra, mode, hide, refs, channel, size, overrides } = {}) {
+  const pid = presetOf(preset || style);
+  const P = PRESETS[pid];
+  const pu = PURPOSES[purpose] ? purpose : 'blog_body';
+  const r = ratioOf(pu, ratio);
   const sc = (s, n) => clip(sanitizeContext(s, hide), n);
-  const title = sc((post && ((post.titles && post.titles[0]) || post.keyword)) || '', 120);
-  const scene = clip(stripOwnMark(text != null && String(text).trim() ? text : (slot && slot.text) || ''), 300);
-  const lines = [];
-  lines.push(mode === 'edit'
-    ? 'Edit the provided image for a Korean blog post. Keep what works and apply the change below.'
-    : 'Create an illustrative image for a Korean blog post.');
-  if (title) lines.push(`Post topic (Korean): ${title}`);
+  const sceneText = clip(stripOwnMark(text != null && String(text).trim() ? text : (slot && slot.text) || ''), 300);
+  const c = readContext({ post, slot, text: sceneText });
+  const o = overrides && typeof overrides === 'object' ? overrides : {};
+  const has = (k) => typeof o[k] === 'string' && o[k].trim() !== '';
+  const line = (k, d, n = 300) => (has(k) ? clip(o[k], n) : d);
+  const list = (k, d) => (Array.isArray(o[k]) ? o[k].map((x) => clip(x, 120)).filter(Boolean).slice(0, 8) : d);
   const heading = slot && slot.heading ? sc(slot.heading, 120) : '';
-  if (heading) lines.push(`Section heading (Korean): ${heading}`);
-  const ctx = [slot && slot.before, slot && slot.after].filter(Boolean).map((x) => sc(x, 160)).filter(Boolean).join(' / ');
-  if (ctx) lines.push(`Nearby text for context only (Korean, do not render it): ${ctx}`);
-  lines.push(`${mode === 'edit' ? 'Change to make' : 'Scene to show'} (Korean): ${scene}`);
-  lines.push(`Style: ${st.prompt}`);
-  lines.push(`Use: ${pu.label} — aspect ratio ${r}. Keep the main subject centered with safe margins so it can be cropped to other ratios.`);
-  const ex = clip(extra || '', 400);
-  if (ex) lines.push(`Extra direction from the author (Korean): ${ex}`);
-  lines.push('Rules:');
-  for (const rule of PROMPT_RULES) lines.push('- ' + rule);
-  return lines.join('\n');
+  const isEdit = mode === 'edit';
+  const timeItems = [...c.season.items, ...c.weather.items, ...c.time.items];
+  const roleList = (refs || []).filter((x) => x && REF_ROLES[x.role]).slice(0, 14).map((x) => ({ role: x.role, image_id: x.image_id || '', label: clip(x.label || '', 80) }));
+  const notes = [];
+  if (!isEdit) {
+    if (!has('setting') && !c.place.items.length) notes.push('장소: 원고에 없어서 정하지 않음 (지어내지 않음)');
+    if (!has('time') && !timeItems.length) notes.push('계절·날씨·시간: 원고에 없어서 넣지 않음');
+    if (!c.korea && !(o.locale === 'KR')) notes.push('지역: 원고에 한국을 뜻하는 말이 없어서 나라를 정하지 않음');
+  }
+  const composition = [P.composition, CROP_NOTE[pu]].filter(Boolean).join('. ');
+  return {
+    v: 1, preset: pid, preset_label: P.label, type: P.type, mode: isEdit ? 'edit' : 'generate',
+    goal: isEdit ? `AI 이미지 고치기: ${sceneText}` : `${heading ? `'${heading}' 부분에서 ` : ''}'${sceneText}'${objJosa(sceneText)} 보여주는 ${PURPOSES[pu].label} 이미지`,
+    subject: line('subject', sceneText),
+    setting: line('setting', c.place.items.map((x) => x.ko).join(' · '), 200),
+    setting_en: has('setting') ? '' : c.place.items.map((x) => x.en).join(', '),
+    setting_from: has('setting') ? '직접 적음' : c.place.from,
+    time: line('time', timeItems.map((x) => x.ko).join(' · '), 120),
+    time_en: has('time') ? '' : timeItems.map((x) => x.en).join(', '),
+    camera: line('camera', P.camera, 200), light: line('light', P.light, 200), color: line('color', P.color, 200),
+    materials: line('materials', P.materials, 200), composition: line('composition', composition, 300),
+    platform: { purpose: pu, label: PURPOSES[pu].label, ratio: r, size: String(size || ''), channel: String(channel || '') },
+    must_show: list('must_show', roleList.some((x) => x.role === 'subject') ? ['참고 사진 속 대상 (모양·색·버튼·인쇄 그대로)'] : []),
+    avoid: list('avoid', [...P.avoid]),
+    locale: o.locale === 'KR' ? 'KR' : o.locale === 'none' ? '' : c.korea ? 'KR' : '',
+    refs: roleList,
+    context: { title: sc((post && ((post.titles && post.titles[0]) || post.keyword)) || '', 120), heading,
+      nearby: [slot && slot.before, slot && slot.after].filter(Boolean).map((x) => sc(x, 160)).filter(Boolean).join(' / ') },
+    extra: clip(extra || '', 400),
+    notes,
+  };
 }
+// 장면 설계서 → 공급자에 보낼 글 (OpenAI·Gemini는 이 글 그대로, Cloudflare는 무료 글 모델이 이 글을 영어 프롬프트로 바꿈)
+export function promptFromScene(s) {
+  const P = PRESETS[s.preset] || PRESETS[DEFAULT_STYLE];
+  const L = [];
+  const edit = s.mode === 'edit';
+  if (edit) {
+    L.push('Edit the provided image (the first attached image). Change only what the request below asks for.');
+    L.push(`Requested change (Korean): ${s.subject}`);
+    L.push("Keep everything else as it is: the main subject's identity and shape, the composition and framing, the background, colors and lighting, unless the request asks otherwise. Do not redraw the whole image and do not add new objects, people or text.");
+  } else {
+    L.push(`Image type: ${TYPE_EN[s.type] || TYPE_EN.photo} — ${P.render}`);
+    L.push(`Purpose (Korean): ${s.goal}`);
+    L.push(`Main subject and action (Korean): ${s.subject}`);
+  }
+  if (s.context.title) L.push(`Post topic (Korean, context only): ${s.context.title}`);
+  if (s.context.heading) L.push(`Section heading (Korean, context only): ${s.context.heading}`);
+  if (s.context.nearby) L.push(`Nearby text for context only (Korean, do not render it): ${s.context.nearby}`);
+  if (!edit) {
+    L.push(s.setting ? `Setting (from the post, Korean): ${s.setting}${s.setting_en ? ` (${s.setting_en})` : ''}` : 'Setting: the post names no specific place — keep the surroundings simple and plausible for the subject.');
+    L.push(s.time ? `Season, weather and time (from the post, Korean): ${s.time}${s.time_en ? ` (${s.time_en})` : ''}` : 'Season, weather and time: not stated in the post — do not add a particular season, weather or time of day.');
+    L.push(s.locale === 'KR' ? 'Location: South Korea, as the post implies — everyday Korean surroundings.' : 'Location: not stated — do not add a particular country, city or culture-specific details.');
+    L.push(`Camera (Korean): ${s.camera}`);
+    L.push(`Light (Korean): ${s.light}`);
+    L.push(`Color (Korean): ${s.color}`);
+    L.push(`Materials and texture (Korean): ${s.materials}`);
+    L.push(`Composition (Korean): ${s.composition}`);
+  }
+  L.push(`Format: ${s.platform.label} — aspect ratio ${s.platform.ratio}${s.platform.size ? ` (${s.platform.size})` : ''}.`);
+  if (s.must_show.length) { L.push('Must show:'); for (const x of s.must_show) L.push('- ' + x); }
+  if (s.refs.length) {
+    L.push('Reference images (attached after the text, in this order):');
+    s.refs.forEach((x, i) => L.push(`- Image ${i + 1 + (edit ? 1 : 0)}: ${REF_ROLE_EN[x.role]}`));
+  }
+  if (s.extra) L.push(`Extra direction from the author (Korean): ${s.extra}`);
+  if (s.avoid.length) { L.push('Avoid (Korean):'); for (const x of s.avoid) L.push('- ' + x); }
+  L.push('Text and logos: ' + textRuleFor(s));
+  L.push('Rules:');
+  for (const rule of rulesFor(s)) L.push('- ' + rule);
+  return L.join('\n');
+}
+// post: {titles, keyword}, slot: parseSlots 한 칸 (또는 본문 밖 자리 {text}), text: 고친 설명, hide: 연결 상품의 브랜드·이름 (맥락에서 지움)
+export function buildPrompt(args = {}) { return promptFromScene(buildScene(args)); }
 
 // ───────── 위험 표현 검사 ─────────
 // 이미지에 넣으면 안 되는 요청. block = 생성을 막음, warn = 알려만 줌. brands: 이 글에 연결된 상품 브랜드
@@ -469,6 +781,23 @@ export function slotRisk(text) {
   const m = firstHit(REAL_NEEDED, String(text || ''));
   return m ? { real: true, word: m[1], msg: `'${m[1]}'처럼 실제 상품·화면이 보여야 하는 자리야. AI로 만들면 실제와 다르게 보일 수 있어서, 직접 찍은 사진이나 쓸 수 있는 공식 이미지를 권해.` } : { real: false };
 }
+// AI로 만들어도 되는 자리인지 (1.5.0 — 서버와 화면이 같은 판단)
+// slotText: 본문의 사진 자리 설명 (사용자가 고친 설명이 아니라 본문 그대로 — '(직접 찍기)' 표시를 지워서 넘어가지 않게)
+// text: 고친 설명·추가 요청, refs: [{role}] 참고 이미지, genericOk: '특정 제품 모양이 꼭 필요하지 않아 — 일반 장면으로' 확인
+// - '직접 찍기' 자리: 막음 (실제로 해본 것처럼 보이는 사진을 AI로 만들지 않음 — 참고 사진을 넣어도 마찬가지)
+// - 실제 상품·화면이 보여야 하는 자리: 대상 모양 유지 참고 사진(진짜 제품 사진)이 있으면 'AI 합성'으로 만들고,
+//   없으면 사용자가 '일반 장면이어도 돼'라고 확인했을 때만 (그때는 특정 제품처럼 보이지 않게 만듦). 몰래 일반 물건으로 바꿔 그리지 않음
+/** @param {string} slotText @param {{ text?: string, refs?: any[], genericOk?: boolean }} [o] */
+export function aiGate(slotText, { text = '', refs = [], genericOk = false } = {}) {
+  if (isOwnPhotoSlot(slotText)) {
+    return { ok: false, code: 'own_photo_slot', msg: "'직접 찍기' 자리는 네가 찍은 사진만 넣어 (AI로 만들면 실제로 해본 것처럼 보여서). 휴대폰으로 찍어서 '파일 올리기'로 넣거나, 본문에서 '(직접 찍기)'를 지워 일반 사진 자리로 바꿔줘." };
+  }
+  const r = slotRisk(`${stripOwnMark(slotText)} ${text || ''}`);
+  if (!r.real) return { ok: true };
+  if ((refs || []).some((x) => x && x.role === 'subject')) return { ok: true, composite: true, word: r.word };
+  if (genericOk) return { ok: true, generic: true, word: r.word };
+  return { ok: false, code: 'real_photo_needed', word: r.word, msg: `'${r.word}'처럼 실제 제품 모양이 보여야 하는 자리야. 진짜 제품 사진을 '참고 사진(대상 모양 유지)'으로 넣거나, 직접 찍은 사진을 올려줘. 특정 제품이 아니어도 되면 '일반 장면으로 만들게'를 체크해줘.` };
+}
 // 이미지 설명이 사진 자리 설명과 너무 다르면 알려줌
 export function descriptionMismatch(slotText, desc) {
   const a = normText(slotText), b = normText(desc);
@@ -481,9 +810,10 @@ export function descriptionMismatch(slotText, desc) {
 }
 
 // ───────── 비용 예상 ─────────
-// OpenAI 공식 가이드(Cost and latency)의 계산기로 확인한 출력 토큰 (GPT Image 2.5 Sunburst·Flare, 2026-10-22)
-// 실제 사용량(usage)이 오면 그걸로 다시 계산해. 예상과 실제 청구액은 다를 수 있음.
-export const PRICE_SOURCE = { url: 'https://developers.openai.com/api/docs/guides/image-generation', checked_at: '2026-10-22' };
+// 출력 토큰 수: 2026-10-22에 OpenAI 이미지 가이드의 계산기에서 읽은 값 (크기·품질별).
+// 2026-10-27 다시 보니 2.5 모델 페이지에 'GPT Image 2 계산기는 2.5의 토큰 사용량을 추정하지 않는다'고 적혀 있고, 가이드의 표도 다시 읽지 못했어.
+// → 2.5는 이 값이 '추정'일 뿐이라고 화면에 밝히고, 실제 사용량(usage)이 오면 그걸로 다시 계산함. 토큰 가격($/100만)은 가격 페이지에서 다시 확인함.
+export const PRICE_SOURCE = { url: 'https://developers.openai.com/api/docs/guides/image-generation', checked_at: '2026-10-22', rates_checked_at: '2026-10-27' };
 export const OUTPUT_TOKENS = {
   '1024x1024': { low: 196, medium: 439, high: 1756, xhigh: 3122, max: 7024 },
   '1536x1024': { low: 158, medium: 343, high: 1372, xhigh: 2459, max: 5488 },
@@ -500,52 +830,163 @@ export const EDIT_INPUT_TOKENS_EST = 1500;
 export const DEFAULT_PRICES = { image_output_per_m: 30, image_input_per_m: 8, text_input_per_m: 5 };
 const priceOf = (prices, k) => { const n = Number(prices && prices[k]); return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PRICES[k]; };
 
-// ───────── 모델별로 되는 것·가격 (OpenAI 공식 문서, 2026-10-22 확인) ─────────
-// 크기: API 레퍼런스 — 임의 WIDTHxHEIGHT는 gpt-image-2·2.5 계열만, 나머지는 1024x1024·1536x1024·1024x1536
-// 품질: API 레퍼런스 — xhigh·max는 2.5 계열만, 나머지는 low·medium·high
-// 가격: 2.5 계열은 설정의 가격표(기본 = 가격 페이지 Standard), 1.5·1·1-mini는 각 모델 페이지의 장당 가격표와 토큰 가격.
-// gpt-image-2는 가격 페이지 Standard 표에서 확인하지 못해서, 모르는 모델처럼 넉넉하게 잡음
-export const MODEL_CHECKED = '2026-10-22';
+// ───────── 공급자·모델 등록표 (1.5.0) ─────────
+// 모델마다 되는 것(크기·품질·고치기·참고 사진 수)과 가격을 여기 한 곳에만 둠 — 화면·서버·문서의 비용 표가 모두 이걸 씀.
+// 확인한 날(checked)과 공식 주소(source)를 같이 둠. 가격이 바뀌면 여기와 설정의 가격표(OpenAI·Gemini)를 고침.
+// 설정에 모델 이름을 넣은 것만으로 '연결됨'이라고 하지 않음 — 연결 상태는 서버가 키를 실제로 물어본 결과(연결 확인)와 실제 생성 기록으로 따로 보여줌.
+// 2026-10-27 공식 문서 다시 확인 (OpenAI 가이드·모델·가격·지원 종료 페이지, Gemini 이미지 생성·가격·지원 종료·오류 페이지, Cloudflare 모델·변경 기록·가격 페이지)
+export const PROVIDERS = {
+  cloudflare: { label: 'Cloudflare Workers AI', env: ['CF_ACCOUNT_ID', 'CF_API_TOKEN'], free_note: 'Cloudflare 무료 플랜 하루 10,000 뉴런 안에서 청구 없음 — 넘으면 실패만 함',
+    usage_url: 'https://dash.cloudflare.com/', checked: '2026-10-27', source: 'https://developers.cloudflare.com/workers-ai/platform/pricing/' },
+  openai: { label: 'OpenAI', env: ['OPENAI_API_KEY'], usage_url: 'https://platform.openai.com/usage', checked: '2026-10-27', source: 'https://developers.openai.com/api/docs/pricing' },
+  gemini: { label: 'Google Gemini API', env: ['GEMINI_API_KEY'], usage_url: 'https://aistudio.google.com/usage', checked: '2026-10-27', source: 'https://ai.google.dev/gemini-api/docs/pricing' },
+};
+// 크기: OpenAI 레퍼런스 — 임의 WIDTHxHEIGHT는 gpt-image-2·2.5 계열만(16의 배수·비율 1:3~3:1·한 변 3840 이하), 나머지는 1024x1024·1536x1024·1024x1536
+// 품질: OpenAI — xhigh·max는 2.5 계열만, 그 밖은 high까지. Gemini — 품질 대신 해상도(1K·2K·4K, 대문자 K)를 고름 (아래 imageSizes). Cloudflare — 단계 수
+// 가격: OpenAI 2·2.5는 같은 토큰 가격(설정의 가격표, 기본 = 가격 페이지 Standard), 1.5·1-mini는 모델 페이지의 장당 가격표·토큰 가격,
+//       Gemini는 가격 페이지의 해상도별 장당 가격과 토큰 가격 (이미지 모델은 무료 등급 없음)
+export const MODEL_CHECKED = '2026-10-27';
 const Q3 = ['low', 'medium', 'high'];
 const per = (a, b) => ({ '1024x1024': a, '1536x1024': b, '1024x1536': b });
+const GEMINI_ASPECTS = ['1:1', '1:4', '1:8', '2:3', '3:2', '3:4', '4:1', '4:3', '4:5', '5:4', '8:1', '9:16', '16:9', '21:9'];
 const MODEL_FAMILIES = [
-  // 무료: Cloudflare Workers AI 의 FLUX.1 schnell (무료 플랜 하루 10,000 뉴런 안에서 청구 없음 — 넘으면 실패만 함. 2026-10-24 확인)
-  // 크기는 1024x1024 하나(크기 지정 없음) → 내려받을 때 고른 비율로 자름. 고치기(편집)는 못 함. 품질 = 단계 수(4·6·8)
-  // 무료(기본, 2026-10-25~): FLUX.2 [klein] 4B — 고른 비율 그대로 만들고(긴 변 1024, 512칸 4개 ≈ 104뉴런), 사진이 더 자연스러움.
-  // 단계는 4로 고정(바꿀 수 없음)이라 품질 칸은 '보통' 하나. 요청은 multipart(prompt·width·height). 공식: Cloudflare 변경 기록 2026-01-15
-  { id: 'cf-flux-2-klein-4b', re: /^cf-flux-2-klein-4b$/, flexible: true, qualities: ['medium'], free: true, noEdit: true,
-    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-2-klein-4b', multipart: true, label: 'FLUX.2 [klein] 4B',
+  // 무료(기본, 2026-10-25~): FLUX.2 [klein] 4B — 만들기와 고치기를 한 모델에서. 고른 비율 그대로(긴 변 1024), 단계 4 고정이라 품질은 '보통' 하나.
+  // 요청은 multipart(prompt·width·height, 참고 사진은 input_image_0~3 — 최대 4장, 한 장이 512x512보다 작아야 함 → 앱이 작은 사본을 만들어 보냄).
+  // 뉴런: 출력 512칸마다 26.05, 입력 사진 512칸마다 5.37 (단계당 과금 없음). 공식: Cloudflare 변경 기록 2026-01-15, 가격 페이지
+  { id: 'cf-flux-2-klein-4b', re: /^cf-flux-2-klein-4b$/, flexible: true, qualities: ['medium'], free: true, edit: true, refsMax: 4, refSmall: 500,
+    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-2-klein-4b', multipart: true, label: 'FLUX.2 [klein] 4B', checked: '2026-10-27',
     sizes: { '16:9': '1024x576', '4:3': '1024x768', '1:1': '1024x1024', '4:5': '816x1024', '9:16': '576x1024' },
     url: 'https://developers.cloudflare.com/workers-ai/models/flux-2-klein-4b/' },
-  { id: 'cf-flux-1-schnell', re: /^cf-flux-1-schnell$/, flexible: false, fixedSize: '1024x1024', qualities: Q3, free: true, noEdit: true,
-    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-1-schnell', steps: { low: 4, medium: 6, high: 8 }, label: 'FLUX.1 schnell',
+  // 무료: FLUX.1 schnell — 1024x1024 하나(크기 지정 없음) → 내려받을 때 고른 비율로 자름. 고치기·참고 사진 못 함. 품질 = 단계 수(4·6·8)
+  { id: 'cf-flux-1-schnell', re: /^cf-flux-1-schnell$/, flexible: false, fixedSize: '1024x1024', qualities: Q3, free: true, noEdit: true, refsMax: 0,
+    provider: 'cloudflare', cfModel: '@cf/black-forest-labs/flux-1-schnell', steps: { low: 4, medium: 6, high: 8 }, label: 'FLUX.1 schnell', checked: '2026-10-24',
     url: 'https://developers.cloudflare.com/workers-ai/models/flux-1-schnell/' },
-  { id: 'gpt-image-2.5', re: /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: QUALITIES, settingsPrices: true },
-  { id: 'gpt-image-2', re: /^gpt-image-2(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: Q3, conservative: true },
-  { id: 'gpt-image-1.5', re: /^gpt-image-1\.5(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
+  // OpenAI GPT Image 2.5 (2026-09-08 출시): 'Sunburst = 고치기 정확도가 가장 중요할 때, Flare = 빠르고 질 좋은 일상 생성' (OpenAI 가이드).
+  // edits 는 이미지 16장까지 (고치기면 고칠 이미지 포함). input_fidelity 는 2.5에서 되는지 문서로 확인 못 해서 안 보냄
+  { id: 'gpt-image-2.5', re: /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: QUALITIES, settingsPrices: true, edit: true, refsMax: 16,
+    label: 'GPT Image 2.5', checked: '2026-10-27', url: 'https://developers.openai.com/api/docs/guides/image-generation' },
+  // GPT Image 2 (2026-04-21): 2.5와 같은 토큰 가격(가격 페이지), 품질은 high까지
+  { id: 'gpt-image-2', re: /^gpt-image-2(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: Q3, settingsPrices: true, edit: true, refsMax: 16, label: 'GPT Image 2', checked: '2026-10-27',
+    url: 'https://developers.openai.com/api/docs/models/gpt-image-2' },
+  // 지원 종료 예정 (2026-12-01 API에서 빠짐 — OpenAI 지원 종료 페이지)
+  { id: 'gpt-image-1.5', re: /^gpt-image-1\.5(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true, shutdown: '2026-12-01', edit: true, refsMax: 16, label: 'GPT Image 1.5', checked: '2026-10-27',
     prices: { image_output_per_m: 32, image_input_per_m: 8, text_input_per_m: 5 },
     perImage: per({ low: 0.009, medium: 0.034, high: 0.133 }, { low: 0.013, medium: 0.05, high: 0.2 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1.5' },
-  { id: 'gpt-image-1-mini', re: /^gpt-image-1-mini(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
+  { id: 'gpt-image-1-mini', re: /^gpt-image-1-mini(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true, shutdown: '2026-12-01', edit: true, refsMax: 16, label: 'GPT Image 1 mini', checked: '2026-10-27',
     prices: { image_output_per_m: 8, image_input_per_m: 2.5, text_input_per_m: 2 },
     perImage: per({ low: 0.005, medium: 0.011, high: 0.036 }, { low: 0.006, medium: 0.015, high: 0.052 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1-mini' },
-  { id: 'gpt-image-1', re: /^gpt-image-1(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true,
+  // 종료됨 (2026-10-23 — OpenAI 모델 페이지): 이름은 알아보지만 만들지 않음 (보내도 실패만 하니까 앱이 먼저 막음)
+  { id: 'gpt-image-1', re: /^gpt-image-1(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true, retired: '2026-10-23', edit: true, refsMax: 16, label: 'GPT Image 1 (종료됨)', checked: '2026-10-27',
     prices: { image_output_per_m: 40, image_input_per_m: 10, text_input_per_m: 5 },
     perImage: per({ low: 0.011, medium: 0.042, high: 0.167 }, { low: 0.016, medium: 0.063, high: 0.25 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1' },
+  // Google Gemini API — 비율(aspectRatio)과 해상도(imageSize)로 고름. 품질 칸: 보통=1K · 높음=2K · 최고=4K. 생각(thinking) 토큰은 글 출력 값으로 청구됨
+  // 3 Pro Image (GA, preview 이름은 2026-06-25 종료): 참고 사진은 물건 6장(정확하게)·인물 5장·스타일 3장까지 → 앱은 6장까지만
+  { id: 'gemini-3-pro-image', re: /^gemini-3-pro-image$/, provider: 'gemini', aspect: true, aspects: GEMINI_ASPECTS, flexible: false,
+    qualities: ['medium', 'high', 'max'], imageSizes: { medium: '1K', high: '2K', max: '4K' }, qualityLabels: { medium: '1K (보통)', high: '2K (높음)', max: '4K (최고)' },
+    edit: true, refsMax: 6, label: 'Gemini 3 Pro Image', checked: '2026-10-27', maxInlineBytes: 18 * 1024 * 1024,
+    gemini: { text_input_per_m: 2, image_input_per_image: 0.0011, image_output_per_m: 120, text_output_per_m: 12, per_image: { '1K': 0.134, '2K': 0.134, '4K': 0.24 } },
+    url: 'https://ai.google.dev/gemini-api/docs/image-generation' },
+  // Nano Banana 2.1 (2026-10-06, Google이 새 프로젝트에 권함): 참고 사진은 물건 10장·인물 4장까지. 넣는 이미지 토큰 수는 문서로 확인 못 해서 넉넉히 1,120토큰으로 셈
+  { id: 'gemini-nano-banana-2.1', re: /^gemini-nano-banana-2\.1$/, provider: 'gemini', aspect: true, aspects: GEMINI_ASPECTS, flexible: false,
+    qualities: ['medium', 'high', 'max'], imageSizes: { medium: '1K', high: '2K', max: '4K' }, qualityLabels: { medium: '1K (보통)', high: '2K (높음)', max: '4K (최고)' },
+    edit: true, refsMax: 10, label: 'Gemini Nano Banana 2.1', checked: '2026-10-27', maxInlineBytes: 18 * 1024 * 1024,
+    gemini: { text_input_per_m: 1.5, image_input_per_image: 0.00168, image_output_per_m: 30, text_output_per_m: 7.5, per_image: { '1K': 0.0336, '2K': 0.0504, '4K': 0.113 } },
+    url: 'https://ai.google.dev/gemini-api/docs/image-generation' },
 ];
-// 가격을 모르는 모델: 확인한 모델 중 가장 비싼 값(gpt-image-1)으로 넉넉히 잡고, 사용량으로 계산하지 않음(청구액은 직접 확인)
+// 가격을 모르는 모델을 넉넉하게 잡을 때의 값 (지금 등록표에는 그런 모델이 없음 — gpt-image-2 는 2026-10-27 가격 페이지에서 확인)
 const CONSERVATIVE = { prices: { image_output_per_m: 40, image_input_per_m: 10, text_input_per_m: 5 }, perImage: MODEL_FAMILIES.find((f) => f.id === 'gpt-image-1').perImage };
+// 모델 이름 → 되는 것. 앱이 모르는 이름이면 known: false, provider: '' — 서버는 만들기 전에 거절함 (모르는 이름을 OpenAI로 보내지 않음, 1.5.0)
+// retired: 공급자가 종료한 모델 (알아보지만 만들지 않음)
 export function modelCaps(model) {
   const m = String(model || '').trim();
   const f = MODEL_FAMILIES.find((x) => x.re.test(m));
-  if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false, provider: 'openai' };
+  if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false, provider: '', label: m, edit: false, refsMax: 0, free: false, usable: false };
   return { id: f.id, known: true, flexible: f.flexible, qualities: f.qualities, conservative: !!f.conservative, settingsPrices: !!f.settingsPrices, deprecated: !!f.deprecated, prices: f.prices || null, perImage: f.perImage || null, url: f.url || '',
     provider: f.provider || 'openai', free: !!f.free, noEdit: !!f.noEdit, fixedSize: f.fixedSize || '', cfModel: f.cfModel || '', steps: f.steps || null,
-    sizes: f.sizes || null, multipart: !!f.multipart, label: f.label || f.id };
+    sizes: f.sizes || null, multipart: !!f.multipart, label: f.label || f.id, edit: !!f.edit && !f.noEdit, refsMax: Number(f.refsMax || 0), refSmall: Number(f.refSmall || 0),
+    aspect: !!f.aspect, aspects: f.aspects || null, imageSizes: f.imageSizes || null, qualityLabels: f.qualityLabels || null, gemini: f.gemini || null, maxInlineBytes: Number(f.maxInlineBytes || 0),
+    inputFidelity: !!f.inputFidelity, retired: f.retired || '', shutdown: f.shutdown || '', usable: !f.retired,
+    status: f.retired ? 'retired' : f.status || (f.deprecated ? 'deprecated' : 'ga'), checked: f.checked || MODEL_CHECKED };
 }
+// 같이 보낼 수 있는 이미지 수 (고치기면 고칠 이미지가 한 장을 씀) — 참고 사진은 이만큼까지
+export const refsLimit = (model, mode) => { const c = modelCaps(model); return Math.max(0, c.refsMax - (mode === 'edit' ? 1 : 0)); };
 export const FREE_MODEL = 'cf-flux-2-klein-4b';
 export const qualitiesFor = (model) => (model ? modelCaps(model).qualities : QUALITIES);
-// 모델이 못 받는 품질이면 가까운 것으로 (xhigh·max → high, 그 밖 → medium)
-export const normQuality = (model, q) => { const qs = qualitiesFor(model); return qs.includes(q) ? q : qs.includes('high') && (q === 'xhigh' || q === 'max') ? 'high' : 'medium'; };
+// 모델이 못 받는 품질이면 가까운 것으로 (xhigh·max → high 또는 그 모델의 가장 높은 것, 그 밖 → medium 또는 그 모델의 첫 품질)
+export const normQuality = (model, q) => {
+  const qs = qualitiesFor(model);
+  if (qs.includes(q)) return q;
+  if (q === 'xhigh' || q === 'max') return qs.includes('high') ? 'high' : qs[qs.length - 1];
+  return qs.includes('medium') ? 'medium' : qs[0];
+};
+export const qualityLabel = (model, q) => { const c = modelCaps(model); return (c.qualityLabels && c.qualityLabels[q]) || QUALITY_LABEL[q] || String(q || ''); };
+// 공급자에 보낼 크기 표시: OpenAI·Cloudflare = 'WIDTHxHEIGHT', Gemini = '비율@해상도' (예: 16:9@2K, 해상도를 못 고르는 모델은 비율만)
+export const sizeLabel = (size) => { const m = /^(\d+:\d+)(?:@(\w+))?$/.exec(String(size || '')); return m ? `${m[1]}${m[2] ? ' · ' + m[2] : ''}` : String(size || '').replace('x', '×'); };
+export const geminiSizeOf = (size) => { const m = /^(\d+:\d+)(?:@(1K|2K|4K))?$/.exec(String(size || '')); return m ? { aspectRatio: m[1], imageSize: m[2] || '' } : null; };
+
+// ───────── 모드 (설정 > 이미지에서 모드마다 모델·품질을 바꿀 수 있음) ─────────
+// 화면은 고른 모드의 실제 모델 이름을 늘 보여주고, 사용자가 고르지 않은 유료 모델로 저절로 바꾸지 않음
+export const IMAGE_MODES = [
+  { id: 'free_draft', label: '무료·저비용 초안', model: 'cf-flux-2-klein-4b', quality: 'medium' },
+  { id: 'fast_paid', label: '빠른 유료 생성', model: 'gpt-image-2.5-flare', quality: 'medium' },
+  { id: 'hq_paid', label: '고품질 유료 생성', model: 'gpt-image-2.5-flare', quality: 'high' },
+  { id: 'gemini_hq', label: 'Gemini 고품질 생성', model: 'gemini-3-pro-image', quality: 'high' },
+];
+// 설정의 image_modes({모드: {model, quality}})를 반영한 모드 목록. 모르는 모델이면 그 모드는 기본 모델로 (사용자에게 알림은 설정 화면에서)
+export function resolveModes(settings) {
+  const o = (settings && settings.image_modes && typeof settings.image_modes === 'object') ? settings.image_modes : {};
+  return IMAGE_MODES.map((d) => {
+    const x = o[d.id] && typeof o[d.id] === 'object' ? o[d.id] : {};
+    const model = typeof x.model === 'string' && modelCaps(x.model).known && modelCaps(x.model).usable ? x.model : d.model;
+    const caps = modelCaps(model);
+    return { id: d.id, label: d.label, model, quality: normQuality(model, typeof x.quality === 'string' ? x.quality : d.quality), caps, paid: !caps.free, custom: model !== d.model };
+  });
+}
+// 설정 화면의 모델 고르기 목록 (공급자별)
+export const KNOWN_MODELS = ['cf-flux-2-klein-4b', 'cf-flux-1-schnell', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2', 'gpt-image-1.5', 'gpt-image-1-mini', 'gemini-3-pro-image', 'gemini-nano-banana-2.1'];
+
+// ───────── AI 검수 모델 (멀티모달: 이미지를 보고 의견을 줌 — 품질 보증 아님) ─────────
+// 2026-10-27 확인: Cloudflare Gemma 4 (이미지 입력 됨, 무료 뉴런 안에서), Gemini 3.5 Flash-Lite (종료일 없음, 이미지 1장 기본 1,120토큰),
+// OpenAI gpt-5.6-luna (이미지 토큰 규칙이 문서에 있음: detail low = 512×512 안 → 32px 칸 최대 256개 × 1.2 = 308토큰)
+// Llama 3.2 Vision 은 처음에 라이선스 동의('agree')를 보내야 해서 쓰지 않음 (사용자 대신 약관에 동의하지 않게)
+export const REVIEW_MODELS = [
+  { id: 'cf-gemma-4-26b', provider: 'cloudflare', cfModel: '@cf/google/gemma-4-26b-a4b-it', label: 'Gemma 4 26B (Cloudflare)', free: true, checked: '2026-10-27' },
+  { id: 'gemini-3.5-flash-lite', provider: 'gemini', label: 'Gemini 3.5 Flash-Lite', price: { input_per_m: 0.3, output_per_m: 2.5, image_tokens: 1120, out_tokens: 1000 }, checked: '2026-10-27' },
+  { id: 'gpt-5.6-luna', provider: 'openai', label: 'GPT-5.6 luna', price: { input_per_m: 0.2, output_per_m: 1.2, image_tokens: 308, out_tokens: 1000 }, checked: '2026-10-27' },
+];
+export const reviewCaps = (id) => REVIEW_MODELS.find((m) => m.id === id) || null;
+// 검수 예상 비용: 이미지 n장(토큰) + 지시문(약 900토큰) + 답(약 700토큰). 무료 모델은 0
+export function estimateReviewUsd(id, nImages = 1) {
+  const m = reviewCaps(id);
+  if (!m) return null;
+  if (m.free) return 0;
+  const p = m.price;
+  return roundUsd(((Math.max(1, nImages) * p.image_tokens + 900) * p.input_per_m + p.out_tokens * p.output_per_m) / 1e6);
+}
+export function reviewBasis(id, nImages = 1) {
+  const m = reviewCaps(id);
+  if (!m) return '';
+  if (m.free) return PROVIDERS[m.provider].free_note;
+  const p = m.price;
+  return `입력 약 ${(Math.max(1, nImages) * p.image_tokens + 900).toLocaleString('en-US')}토큰 × $${p.input_per_m}/100만 + 답 약 ${p.out_tokens}토큰 × $${p.output_per_m}/100만 (${m.checked} 가격표)`;
+}
+// 검수 항목 (지시서 7번)
+export const REVIEW_CHECKS = [
+  ['match', '원고의 이미지 자리와 내용이 맞는지'],
+  ['artifacts', '불필요한 물체·글자·로고가 없는지'],
+  ['anatomy', '사람·동물 형태가 자연스러운지'],
+  ['physics', '물리적으로 이상한 곳이 없는지'],
+  ['camera', '카메라 구도와 조명이 자연스러운지'],
+  ['crop', '목표 비율로 잘라도 피사체가 안 잘리는지'],
+  ['misleading', '실제 제품으로 오해할 요소가 없는지'],
+  ['ref_match', '참고한 제품 사진과 모양·글자가 같은지'],
+];
+// 모델 비교 평가 항목 (지시서 8번) — [키, 이름, 낮을수록 좋은 항목인지]
+export const EVAL_CRITERIA = [
+  ['fit', '글과의 일치도'], ['natural', '사진의 자연스러움'], ['detail', '형태와 디테일의 정확성'],
+  ['composition', '구도와 시각적 완성도'], ['ai_look', 'AI 생성 티', true], ['usable', '최종 게시용으로 쓸 수 있는지'],
+];
+
 // 프롬프트 토큰 수 어림: 영어·숫자는 약 3.5글자에 1토큰, 한글 등은 1글자에 1.2토큰으로 넉넉하게 (실제 사용량이 오면 그걸로 다시 계산)
 export function estimateTokens(text) {
   const t = String(text || '');
@@ -559,17 +1000,44 @@ const perImageSize = (size) => {
   const m = /^(\d+)x(\d+)$/.exec(String(size || ''));
   return m && Number(m[1]) * Number(m[2]) <= 1024 * 1024 ? '1024x1024' : '1536x1024';
 };
-/** @param {{ quality?: string, size?: string, promptChars?: number, promptTokens?: number, mode?: string, prices?: any, model?: string }} [o] */
-export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode = 'generate', prices, model } = {}) {
+// Gemini 가격: 등록표 값 + 설정의 가격표에서 그 모델 칸(prices[모델 id])을 고쳤으면 그 값
+// 설정에서 가격을 고칠 수 있는 Gemini 모델 (등록표의 id — 서버 저장·설정 화면이 같은 목록을 씀)
+export const GEMINI_PRICE_IDS = MODEL_FAMILIES.filter((f) => f.provider === 'gemini').map((f) => f.id);
+export function geminiPrices(caps, prices) {
+  const base = (caps && caps.gemini) || null;
+  if (!base) return null;
+  const ov = prices && caps && prices[caps.id] && typeof prices[caps.id] === 'object' ? prices[caps.id] : {};
+  const num = (v, d) => { const n = Number(v); return v != null && v !== '' && Number.isFinite(n) && n >= 0 ? n : d; };
+  const per_image = { ...base.per_image };
+  if (ov.per_image && typeof ov.per_image === 'object') for (const k of Object.keys(per_image)) per_image[k] = num(ov.per_image[k], per_image[k]);
+  return {
+    per_image, text_input_per_m: num(ov.text_input_per_m, base.text_input_per_m), image_input_per_image: num(ov.image_input_per_image, base.image_input_per_image),
+    image_output_per_m: num(ov.image_output_per_m, base.image_output_per_m), text_output_per_m: num(ov.text_output_per_m, base.text_output_per_m),
+    checked_at: ov.checked_at || caps.checked, source: ov.source || (PROVIDERS.gemini && PROVIDERS.gemini.source),
+  };
+}
+const inImages = (mode, refs) => Math.max(0, Number(refs) || 0) + (mode === 'edit' ? 1 : 0);
+/** @param {{ quality?: string, size?: string, promptChars?: number, promptTokens?: number, mode?: string, prices?: any, model?: string, refs?: number }} [o] */
+export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode = 'generate', prices, model, refs = 0 } = {}) {
   const tokens = Math.max(0, promptTokens != null ? promptTokens : promptChars); // promptChars 만 주면 글자 수 = 토큰 수로 아주 넉넉히
   const caps = model ? modelCaps(model) : null;
+  if (caps && !caps.known) return null; // 1.5.0: 모르는 모델은 계산하지 않음 (만들기 전에 거절)
   if (caps && caps.free) return caps.qualities.includes(quality) ? 0 : null;
+  const nIn = inImages(mode, refs);
+  if (caps && caps.provider === 'gemini') {
+    if (!caps.qualities.includes(quality)) return null;
+    const g = geminiPrices(caps, prices);
+    const sz = caps.imageSizes ? caps.imageSizes[quality] : '';
+    const out = g && g.per_image[sz];
+    if (out == null) return null;
+    return roundUsd(out + (tokens * g.text_input_per_m) / 1e6 + nIn * g.image_input_per_image);
+  }
   if (!caps || caps.settingsPrices) {
     const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
     if (t == null) return null;
     const out = (t * priceOf(prices, 'image_output_per_m')) / 1e6;
     const text = (tokens * priceOf(prices, 'text_input_per_m')) / 1e6;
-    const img = mode === 'edit' ? (EDIT_INPUT_TOKENS_EST * priceOf(prices, 'image_input_per_m')) / 1e6 : 0;
+    const img = (nIn * EDIT_INPUT_TOKENS_EST * priceOf(prices, 'image_input_per_m')) / 1e6;
     return roundUsd(out + text + img);
   }
   if (!caps.qualities.includes(quality)) return null;
@@ -577,22 +1045,56 @@ export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode
   const src = caps.perImage ? caps : CONSERVATIVE;
   const out = src.perImage[perImageSize(size)][quality];
   const text = (tokens * src.prices.text_input_per_m) / 1e6;
-  const img = mode === 'edit' ? (EDIT_INPUT_TOKENS_EST * src.prices.image_input_per_m) / 1e6 : 0;
+  const img = (nIn * EDIT_INPUT_TOKENS_EST * src.prices.image_input_per_m) / 1e6;
   return roundUsd(out + text + img);
 }
+const n$ = (x) => '$' + String(roundUsd(x));
+// 예상 비용의 계산 근거 (생성 전 확인 칸에 그대로 보여줌)
+export function costBasis({ quality, size, promptTokens = 0, mode = 'generate', prices, model, refs = 0 } = {}) {
+  const caps = model ? modelCaps(model) : null;
+  if (caps && !caps.known) return '앱이 모르는 모델이라 계산하지 않아';
+  if (caps && caps.free) return PROVIDERS[caps.provider] ? PROVIDERS[caps.provider].free_note : '무료';
+  const nIn = inImages(mode, refs);
+  const tok = Math.max(0, Number(promptTokens) || 0).toLocaleString('en-US');
+  if (caps && caps.provider === 'gemini') {
+    const g = geminiPrices(caps, prices);
+    const sz = caps.imageSizes ? caps.imageSizes[quality] : '';
+    return `이미지 1장 ${n$(g.per_image[sz] ?? 0)}${sz ? ` (${sz})` : ''} + 설명 약 ${tok}토큰 × $${g.text_input_per_m}/100만${nIn ? ` + 넣는 이미지 ${nIn}장 × ${n$(g.image_input_per_image)}` : ''} — Gemini 가격 페이지 ${g.checked_at} 확인값`;
+  }
+  if (!caps || caps.settingsPrices) {
+    const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
+    return `출력 이미지 약 ${t == null ? '?' : t.toLocaleString('en-US')}토큰 × $${priceOf(prices, 'image_output_per_m')}/100만 + 설명 약 ${tok}토큰 × $${priceOf(prices, 'text_input_per_m')}/100만${nIn ? ` + 넣는 이미지 ${nIn}장 × 약 ${EDIT_INPUT_TOKENS_EST.toLocaleString('en-US')}토큰 × $${priceOf(prices, 'image_input_per_m')}/100만` : ''} — 토큰 가격은 설정의 가격표(${(prices && prices.checked_at) || '확인일 없음'}), 출력 토큰 수는 OpenAI 계산기 값(${PRICE_SOURCE.checked_at})${caps && caps.id === 'gpt-image-2.5' ? '이라 2.5는 추정 — 만든 뒤 실제 사용량으로 다시 계산해' : ''}`;
+  }
+  const src = caps.perImage ? caps : CONSERVATIVE;
+  const pi = src.perImage[perImageSize(size)] ? src.perImage[perImageSize(size)][quality] : null;
+  return `${caps.perImage ? '모델 페이지' : '가격을 확인 못 해서 gpt-image-1'}의 장당 ${pi == null ? '?' : n$(pi)} (${perImageSize(size)} 기준) + 설명 약 ${tok}토큰 × $${src.prices.text_input_per_m}/100만${nIn ? ` + 넣는 이미지 ${nIn}장 × 약 ${EDIT_INPUT_TOKENS_EST.toLocaleString('en-US')}토큰 × $${src.prices.image_input_per_m}/100만` : ''} (${caps.checked} 확인)`;
+}
 // 실제 사용량(usage) × 그 모델의 가격. 가격을 모르는 모델이면 null (예상치만 남기고 청구액은 직접 확인)
+// OpenAI: { input_tokens_details: {text_tokens, image_tokens}, output_tokens }
+// Gemini: { promptTokenCount, candidatesTokenCount, thoughtsTokenCount, candidatesTokensDetails: [{modality, tokenCount}] }
 export function usageUsd(usage, prices, model) {
   if (!usage || typeof usage !== 'object') return null;
+  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
   if (model) {
     const caps = modelCaps(model);
+    if (!caps.known) return null;
     if (caps.free) return 0;
+    if (caps.provider === 'gemini') {
+      const g = geminiPrices(caps, prices);
+      const det = Array.isArray(usage.candidatesTokensDetails) ? usage.candidatesTokensDetails : [];
+      const outImg = det.filter((x) => x && x.modality === 'IMAGE').reduce((a, x) => a + n(x.tokenCount), 0);
+      const outAll = n(usage.candidatesTokenCount);
+      const outText = Math.max(0, outAll - outImg) + n(usage.thoughtsTokenCount);
+      const inTok = n(usage.promptTokenCount);
+      if (!inTok && !outAll) return null;
+      return roundUsd((inTok * g.text_input_per_m + outImg * g.image_output_per_m + outText * g.text_output_per_m) / 1e6);
+    }
     if (!caps.settingsPrices) {
       if (!caps.prices) return null;
       prices = caps.prices;
     }
   }
   const d = usage.input_tokens_details || {};
-  const n = (v) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : 0);
   const textIn = d.text_tokens != null || d.image_tokens != null ? n(d.text_tokens) : n(usage.input_tokens);
   const imgIn = n(d.image_tokens);
   const out = n(usage.output_tokens);
@@ -792,6 +1294,8 @@ export function originOf(img) {
 // 화면에 보여줄 출처 이름 (게시 원고 미리보기·보관함·검수 화면이 같은 이름을 씀)
 export function originLabel(img) {
   const o = originOf(img);
+  // 1.5.0: 실제 사진(제품 사진 등)을 참고해서 AI가 만든 이미지 — 직접 찍은 사진처럼 보이지 않게 따로 표시
+  if (o === 'ai' && img && img.composite) return 'AI 합성 (실제 사진 참고)';
   if (o === 'external' && img && img.kind === 'stock') return '외부 제공 (Pexels)';
   if (img && img.kind === 'upload' && o !== 'own') return ORIGIN_LABEL[o] + ' · 직접 올림';
   return ORIGIN_LABEL[o];
@@ -803,6 +1307,7 @@ export function attributionFor(img) {
 }
 export function captionHint(img) {
   if (!img) return '';
+  if (img.kind === 'ai' && img.composite) return '※ 실제 사진을 참고해 AI로 만든 연출 이미지 (실제 사용 사진 아님)';
   if (img.kind === 'ai') return '※ AI로 만든 예시 이미지';
   if (img.provider === 'pexels') return attributionFor(img);
   // 카드뉴스: 배경으로 쓴 이미지의 출처를 그대로 (AI 배경이면 AI 표시, Pexels 배경이면 사진가)
@@ -847,13 +1352,14 @@ export function imageChecks(post, rows, opts = {}) {
   const slots = parseSlots(post && post.body);
   const byKey = new Map((rows || []).filter((r) => r && r.image).map((r) => [r.slot_key, r.image]));
   const list = (ns) => ns.map((n) => '사진 ' + n).join(', ');
-  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [], unknownSrc = [], credit = [];
+  const unrev = [], rejected = [], aiReal = [], aiOwn = [], ai = [], mismatch = [], unknownSrc = [], credit = [], composite = [];
   for (const s of slots) {
     const img = byKey.get(s.key);
     if (!img) continue;
     if (img.review_status === '검수 전') unrev.push(s.n);
     if (img.review_status === '사용 안 함') rejected.push(s.n);
-    if (img.kind === 'ai') { ai.push(s.n); if (isOwnPhotoSlot(s.text)) aiOwn.push(s.n); else if (slotRisk(s.text).real) aiReal.push(s.n); }
+    // 1.5.0: 진짜 제품 사진을 참고한 AI 합성은 '실제 상품 자리' 경고 대신 원본과 비교하라는 참고로 (그래도 '직접 찍기' 자리는 경고)
+    if (img.kind === 'ai') { ai.push(s.n); if (img.composite) composite.push(s.n); if (isOwnPhotoSlot(s.text)) aiOwn.push(s.n); else if (slotRisk(s.text).real && !img.composite) aiReal.push(s.n); }
     if (img.description && descriptionMismatch(s.text, img.description)) mismatch.push(s.n);
     if (originOf(img) === 'unknown') unknownSrc.push(s.n);
     if (img.kind === 'upload' && (img.source_type === 'official' || img.source_type === 'external')) credit.push(s.n);
@@ -874,6 +1380,7 @@ export function imageChecks(post, rows, opts = {}) {
     if (linkedImgs.length && !own) W.push({ code: 'no_own_photo', msg: '직접 촬영으로 확인한 사진이 하나도 없어 (막지는 않아). AI 이미지·남의 사진만 있으면 다른 글과 같아 보이기 쉬워.', fix: "사진 자리 하나는 휴대폰으로 직접 찍어서 '파일 올리기'로 넣고 출처를 '직접 촬영'으로 골라줘." });
   }
   if (credit.length) T.push({ code: 'image_credit', msg: `공식·외부 제공 사진이 ${credit.length}곳 있어 (${list(credit)}). 올릴 때 출처(제조사·사이트·사진가)와 이용 조건을 같이 확인해서 적어줘.` });
+  if (composite.length) T.push({ code: 'ai_composite', msg: `실제 사진을 참고한 AI 합성 이미지가 ${composite.length}곳 있어 (${list(composite)}). 제품 모양·글자·버튼이 원본과 같은지 확인하고, 실제로 써본 사진처럼 쓰지 마 (캡션이 같이 들어가).` });
   if (opts.naver && ai.length) T.push({ code: 'ai_label', msg: `AI 이미지가 ${ai.length}곳 있어. 네이버 글쓰기에서 'AI 활용' 표시를 켜두면 안전해 (2026년 7월 기준 블로그는 자율).` });
   if (slots.length) {
     const linked = slots.filter((s) => byKey.has(s.key)).length;

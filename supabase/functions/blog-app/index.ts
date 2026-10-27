@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.4.0)
+// 블로그 글공장 서버 API (1.5.0)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -7,13 +7,18 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
 import {
-  parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, STYLES, QUALITIES, ratioOf, sizeFor,
-  validApiSize, buildPrompt, promptRisk, blocksOf, slotRisk, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
+  parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, QUALITIES, ratioOf, sizeFor,
+  validApiSize, promptRisk, blocksOf, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
   CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
+  presetOf, buildScene, promptFromScene, sizeLabel, aiGate, REF_ROLES, SCENE_EDITABLE, IMAGE_MODES, REVIEW_MODELS, reviewCaps, estimateReviewUsd, EVAL_CRITERIA, PRESETS, refsLimit, sniffImage,
+  GEMINI_PRICE_IDS,
 } from "./images.js";
-import { BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter } from "./image_service.js";
+import {
+  BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter,
+  reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub,
+} from "./image_service.js";
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -391,12 +396,13 @@ async function getState(c: Ctx) {
     fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
     fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
     // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (1000줄이 넘어도 끝까지. 이미지 스튜디오 표가 아직 없으면 빈 목록)
-    // source_type(직접 올린 사진의 출처)은 014→015 사이에 생김 — 아직 015 전인 DB면 빼고 다시 읽음
-    fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null),
-      "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text, source_type)")
-      .catch(() => fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null),
-        "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text)"))
-      .then((data) => ({ data, error: null as unknown }), (error) => ({ data: [] as J[], error: error as unknown })),
+    // source_type(직접 올린 사진의 출처)은 014→015 사이, composite(실제 사진을 참고한 AI 이미지)는 017에서 생김 — 그 전 DB면 빼고 다시 읽음
+    (() => {
+      const base = "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text";
+      const read = (extra: string) => fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null), `${base}${extra})`);
+      // 015 전이면 source_type 도 없으니 바로 둘 다 뺀 것으로, 015 뒤·017 전이면 composite 만 빼고 (다시 읽기는 한 번만)
+      return read(", source_type, composite").catch((e) => (/source_type/.test(String((e as Error)?.message ?? e)) ? read("") : read(", source_type")));
+    })().then((data) => ({ data, error: null as unknown }), (error) => ({ data: [] as J[], error: error as unknown })),
   ]);
   if (imageSlots.error) console.error("state image_slots:", String((imageSlots.error as Error)?.message ?? imageSlots.error));
   return json({
@@ -1070,10 +1076,49 @@ async function patchSettings(c: Ctx) {
     const cat = await assertCompat(progs, ch);
     Object.assign(s, { default_channel: ch, default_programs: progs }, legacyNames(cat, progs, ch));
   }
-  // 이미지: 모델 이름(계정에서 안 되면 바꿀 수 있게)·기본 품질·하루 한도·한 달 예산·환율·가격
-  const modelName = (v: unknown, field: string) => { const m = str(v, 64).trim(); if (!/^[a-z0-9][a-z0-9._-]{1,60}$/.test(m)) fail(400, "bad_field", { field }); return m; };
+  // 이미지: 모델 이름·기본 품질·하루 한도·한 달 예산·환율·가격
+  // 1.5.0: 앱이 아는 모델만 저장 (모르는 이름을 받아 두었다가 OpenAI로 보내지 않게), 편집 모델은 고치기가 되는 모델만
+  const modelName = (v: unknown, field: string) => {
+    const m = str(v, 64).trim();
+    if (!/^[a-z0-9][a-z0-9._-]{1,60}$/.test(m)) fail(400, "bad_field", { field });
+    if (m !== TEST_MODEL && !modelCaps(m).known) fail(400, "model_unknown", { field, model: m });
+    // 공급자가 종료한 모델(gpt-image-1, 2026-10-23)은 새로 저장하지 않음 — 보내도 실패만 하니까
+    if (m !== TEST_MODEL && !modelCaps(m).usable) fail(400, "model_retired", { field, model: m, retired: modelCaps(m).retired });
+    return m;
+  };
   if ("image_gen_model" in b) s.image_gen_model = modelName(b.image_gen_model, "image_gen_model");
-  if ("image_edit_model" in b) s.image_edit_model = modelName(b.image_edit_model, "image_edit_model");
+  if ("image_edit_model" in b) {
+    s.image_edit_model = modelName(b.image_edit_model, "image_edit_model");
+    if (s.image_edit_model !== TEST_MODEL && !modelCaps(s.image_edit_model as string).edit) fail(400, "edit_unsupported", { field: "image_edit_model", model: s.image_edit_model });
+  }
+  if ("image_modes" in b) {
+    const o = (b.image_modes && typeof b.image_modes === "object" && !Array.isArray(b.image_modes) ? b.image_modes : {}) as J;
+    const out: J = {};
+    for (const d of IMAGE_MODES as J[]) {
+      const x = o[String(d.id)] as J | undefined;
+      if (!x || typeof x !== "object") continue;
+      const m = modelName(x.model, "image_modes");
+      const q = (QUALITIES as readonly string[]).includes(String(x.quality)) ? normQuality(m, String(x.quality)) : normQuality(m, String(d.quality));
+      out[String(d.id)] = { model: m, quality: q };
+    }
+    s.image_modes = out;
+  }
+  if ("image_review_model" in b) {
+    const m = str(b.image_review_model, 64).trim();
+    if (m && !reviewCaps(m)) fail(400, "review_model_unknown", { field: "image_review_model" });
+    s.image_review_model = m;
+  }
+  if ("image_request_cap_usd" in b) s.image_request_cap_usd = optNum(b.image_request_cap_usd, "image_request_cap_usd", 0, 20) ?? 1;
+  if ("image_ratio_prefs" in b) {
+    const o = (b.image_ratio_prefs && typeof b.image_ratio_prefs === "object" ? b.image_ratio_prefs : {}) as J;
+    const out: J = {};
+    for (const [k, v] of Object.entries(o)) {
+      if (!has(PURPOSES, k)) continue;
+      if (!(((PURPOSES as J)[k] as J).ratios as string[]).includes(String(v))) fail(400, "bad_field", { field: "image_ratio_prefs" });
+      out[k] = String(v);
+    }
+    s.image_ratio_prefs = out;
+  }
   if ("image_quality" in b) s.image_quality = oneOf(b.image_quality, QUALITIES as readonly string[], "image_quality");
   if ("image_daily_limit" in b) s.image_daily_limit = optInt(b.image_daily_limit, "image_daily_limit", 0, 100) ?? 0;
   if ("image_monthly_budget_usd" in b) s.image_monthly_budget_usd = optNum(b.image_monthly_budget_usd, "image_monthly_budget_usd", 0, 500) ?? 0;
@@ -1088,13 +1133,27 @@ async function patchSettings(c: Ctx) {
       // 확인한 날을 비우면 비운 그대로 (서버가 오늘 날짜로 지어내지 않음)
       checked_at: optDate(p.checked_at, "image_prices") ?? null, source: optUrl(p.source, "image_prices"),
     };
+    // 1.5.0: Gemini 모델 가격 (모델 표의 id 마다 — 장당·토큰 가격, 확인한 날·주소). 안 보내면 모델 표의 값을 씀
+    for (const fid of GEMINI_PRICE_IDS) {
+      const g = p[fid];
+      if (!g || typeof g !== "object") continue;
+      const gg = g as J;
+      const pi = (gg.per_image && typeof gg.per_image === "object" ? gg.per_image : {}) as J;
+      const per: J = {};
+      for (const [k, v] of Object.entries(pi)) if (["1K", "2K", "4K", ""].includes(k)) per[k] = optNum(v, "image_prices", 0, 10);
+      (s.image_prices as J)[fid] = {
+        per_image: per, text_input_per_m: optNum(gg.text_input_per_m, "image_prices", 0, 1000), image_input_per_image: optNum(gg.image_input_per_image, "image_prices", 0, 10),
+        image_output_per_m: optNum(gg.image_output_per_m, "image_prices", 0, 1000), text_output_per_m: optNum(gg.text_output_per_m, "image_prices", 0, 1000),
+        checked_at: optDate(gg.checked_at, "image_prices") ?? null, source: optUrl(gg.source, "image_prices"),
+      };
+    }
   }
   if (!Object.keys(s).length) fail(400, "empty");
   let { data, error } = await sb.from("settings").update(s).eq("id", 1).select().single();
   // DB에 015(주력 주제 낱말 열)가 아직 없으면 그 칸만 빼고 저장 — 서버를 DB보다 먼저 올려도 다른 설정 저장이 막히지 않게
   const skipped: string[] = [];
   // DB에 그 열이 아직 없으면(015 전: 주력 주제 낱말, 016 전: 쌓아둘 원고 한도) 그 칸만 빼고 저장
-  for (const col of ["focus_terms", "backlog_limit"]) {
+  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs"]) {
     if (!(error && col in s && missingColumn(error, col))) continue;
     delete s[col];
     skipped.push(col);
@@ -1199,7 +1258,27 @@ const STORAGE_SOFT_LIMIT = 900 * 1024 * 1024;    // 저장 공간이 이만큼 �
 const keyOpenAI = () => Deno.env.get("OPENAI_API_KEY") ?? "";
 // 무료 이미지(Cloudflare Workers AI): 계정 ID + 'Workers AI' 권한 토큰
 const keyCf = () => ({ accountId: (Deno.env.get("CF_ACCOUNT_ID") ?? "").trim(), token: (Deno.env.get("CF_API_TOKEN") ?? "").trim() });
-const keysInfo = () => ({ openai: !!keyOpenAI(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? ""), cloudflare: !!(keyCf().accountId && keyCf().token) });
+// 1.5.0: Google Gemini API 키 (Supabase Secrets 의 GEMINI_API_KEY). 화면에는 있음/없음만
+const keyGemini = () => (Deno.env.get("GEMINI_API_KEY") ?? "").trim();
+const keysInfo = () => ({ openai: !!keyOpenAI(), gemini: !!keyGemini(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? ""), cloudflare: !!(keyCf().accountId && keyCf().token) });
+const providerKeys = () => ({ openai: keyOpenAI(), gemini: keyGemini(), cf: keyCf() });
+const providerKeyOk = (p: string) => (p === "openai" ? !!keyOpenAI() : p === "gemini" ? !!keyGemini() : p === "cloudflare" ? keysInfo().cloudflare : false);
+const keyMissingCode = (p: string) => (p === "gemini" ? "gemini_key_missing" : p === "cloudflare" ? "cf_key_missing" : "openai_key_missing");
+// 장면 설계서에서 사용자가 고친 칸만 받음 (길이 자름). 고칠 수 없는 칸(목적·플랫폼 등)은 서버가 원고로 다시 만듦
+function cleanSceneOverrides(v: unknown): J {
+  const o = (v && typeof v === "object" && !Array.isArray(v) ? v : {}) as J;
+  const out: J = {};
+  for (const k of SCENE_EDITABLE as string[]) {
+    if (!(k in o)) continue;
+    if (k === "locale") { if (["", "KR", "none"].includes(String(o.locale))) out.locale = String(o.locale); continue; }
+    if (k === "must_show" || k === "avoid") { if (Array.isArray(o[k])) out[k] = (o[k] as unknown[]).map((x) => str(x, 120).trim()).filter(Boolean).slice(0, 8); continue; }
+    const t = str(o[k], 300).trim();
+    if (t) out[k] = t;
+  }
+  return out;
+}
+const sceneUserText = (v: unknown) => Object.values(cleanSceneOverrides(v)).map((x) => (Array.isArray(x) ? x.join(" ") : String(x))).join("\n");
+const needs017 = (e: unknown, name: string) => { if (missingTable(e, name)) fail(409, "db_update_needed", { migration: "017" }); };
 const providersInfo = () => Object.entries(PHOTO_PROVIDERS).map(([id, p]) => ({ id, label: p.label, connected: !!(Deno.env.get(p.envKey) ?? ""), site: p.site, license_url: p.licenseUrl }));
 // 생성 기록을 화면에 보낼 때는 긴 프롬프트를 뺌 (이미지 정보에 따로 있음)
 const GEN_COLS = "id, request_key, post_id, slot_key, slot_index, slot_text, mode, provider, model, size, quality, output_format, purpose, style, user_prompt, base_image_id, status, provider_called, provider_request_id, risk_override, error_code, error_message, est_usd, usage, usage_usd, actual_usd, actual_checked_at, cost_status, auto_cost_status, fx_krw, fx_date, fx_source, image_id, started_at, finished_at, created_at";
@@ -1212,7 +1291,7 @@ function inBackground(p: Promise<unknown>) {
 }
 addEventListener("beforeunload", () => {
   for (const id of RUNNING) {
-    sb.rpc("image_gen_fail", { gen: id, fin: { error_code: "server_stopped", error_message: "서버가 중간에 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.", cost_status: "확인 필요" } })
+    sb.rpc("image_gen_fail", { gen: id, fin: { error_code: "server_stopped", error_message: "서버가 중간에 멈췄어. 청구됐을 수 있으니 그 공급자의 사용량 화면에서 확인해줘.", cost_status: "확인 필요" } })
       .then(() => {}, () => {});
   }
 });
@@ -1275,10 +1354,15 @@ async function withUrls(rows: J[]) {
   const [urls, uses] = await Promise.all([signPaths(rows.map((i) => String(i.storage_path ?? ""))), usesOf(rows.map((i) => String(i.id)))]);
   return rows.map((i) => ({ ...i, url: urls[String(i.storage_path)] ?? "", uses: uses[String(i.id)]?.uses ?? 0, used_posts: uses[String(i.id)]?.used_posts ?? 0 }));
 }
+const IMG_SETTING_COLS = "image_gen_model, image_edit_model, image_quality, image_daily_limit, image_monthly_budget_usd, image_fx_krw, image_fx_date, image_fx_source, image_prices";
 async function imageSettings() {
-  const { data, error } = await sb.from("settings").select("image_gen_model, image_edit_model, image_quality, image_daily_limit, image_monthly_budget_usd, image_fx_krw, image_fx_date, image_fx_source, image_prices").eq("id", 1).single();
+  // 1.5.0 칸(모드·검수 모델·한 번 상한·용도별 비율) — 017 전 DB면 빼고 읽음 (그때는 기본값)
+  let { data, error } = await sb.from("settings").select(IMG_SETTING_COLS + ", image_modes, image_review_model, image_request_cap_usd, image_ratio_prefs").eq("id", 1).single();
+  if (error && /image_modes|image_review_model|image_request_cap_usd|image_ratio_prefs/.test(String(error.message ?? ""))) {
+    ({ data, error } = await sb.from("settings").select(IMG_SETTING_COLS).eq("id", 1).single());
+  }
   if (error) throw error;
-  return data as J;
+  return data as unknown as J;
 }
 async function imageUsage() {
   const { data, error } = await sb.rpc("image_usage");
@@ -1366,9 +1450,25 @@ async function linkedProducts(postId: string) {
   return { brands, hide };
 }
 
+// 공급자마다: 키가 있는지(서버 Secrets) · 마지막 연결 확인 결과 · 마지막으로 실제로 만든 때 — 셋을 따로 보여줌
+// (설정에 모델 이름을 넣은 것만으로 '연결됨'이라고 하지 않음)
+async function providerStatus() {
+  const out: Record<string, J> = {};
+  const k = keysInfo() as J;
+  for (const p of ["cloudflare", "openai", "gemini"]) out[p] = { key: !!k[p], check: null, last_success: null, last_failure: null };
+  const [checks, ok, bad] = await Promise.all([
+    sb.from("image_provider_checks").select("provider, model, ok, code, message, checked_at").order("checked_at", { ascending: false }).limit(30),
+    sb.from("image_generations").select("provider, model, finished_at").eq("status", "성공").eq("provider_called", true).order("finished_at", { ascending: false }).limit(60),
+    sb.from("image_generations").select("provider, model, finished_at, error_code").eq("status", "실패").eq("provider_called", true).order("finished_at", { ascending: false }).limit(60),
+  ]);
+  for (const r of ((checks.error ? [] : checks.data) ?? []) as J[]) if (out[String(r.provider)] && !out[String(r.provider)].check) out[String(r.provider)].check = r;
+  for (const r of (ok.data ?? []) as J[]) if (out[String(r.provider)] && !out[String(r.provider)].last_success) out[String(r.provider)].last_success = { model: r.model, at: r.finished_at };
+  for (const r of (bad.data ?? []) as J[]) if (out[String(r.provider)] && !out[String(r.provider)].last_failure) out[String(r.provider)].last_failure = { model: r.model, at: r.finished_at, code: r.error_code };
+  return out;
+}
 async function getImageConfig(_c: Ctx) {
-  const [settings, usage] = await Promise.all([imageSettings(), imageUsage()]);
-  return json({ keys: keysInfo(), providers: providersInfo(), settings, usage, test_model: TEST_MODEL, sign_seconds: SIGN_SECONDS, storage_limit: STORAGE_SOFT_LIMIT });
+  const [settings, usage, status] = await Promise.all([imageSettings(), imageUsage(), providerStatus()]);
+  return json({ keys: keysInfo(), providers: providersInfo(), provider_status: status, settings, usage, test_model: TEST_MODEL, sign_seconds: SIGN_SECONDS, storage_limit: STORAGE_SOFT_LIMIT });
 }
 
 // 원고 하나의 이미지 화면: 사진 자리(본문 순서) + 본문 밖 자리 + 사라진 자리 + 이미지(서명 주소) + 생성 기록 + 카드뉴스 + 비용
@@ -1408,8 +1508,11 @@ async function getPostImages(c: Ctx) {
 }
 
 // AI 이미지 만들기: 검사·예상 비용 확인·한도 확인 → '생성 중' 기록 → 응답은 바로, 생성은 뒤에서 (화면은 상태를 물어봄)
+// 1.5.0: 모델을 요청에 직접 고를 수 있음(모드·비교) — 앱이 아는 모델만, 키가 있는 공급자만 (모르는 이름을 OpenAI로 보내지 않음)
+//        이미지 종류(프리셋)·장면 설계서·참고 사진(역할)·묶음(후보 여러 장·모델 비교)
+const MAX_REF_BYTES = 8 * 1024 * 1024;
 async function generateImage(c: Ctx) {
-  const b = await readJson(c.req, 20_000);
+  const b = await readJson(c.req, 40_000);
   const requestKey = str(b.request_key, 80);
   if (!/^[A-Za-z0-9_-]{8,80}$/.test(requestKey)) fail(400, "bad_field", { field: "request_key" });
   // 응답을 못 받아 같은 요청 번호로 다시 온 것은 검사·대기 없이 그 기록을 바로 돌려줌 (두 번 만들지 않음 — 만드는 중이면 화면이 바로 진행 상황을 봄)
@@ -1419,42 +1522,92 @@ async function generateImage(c: Ctx) {
   const { post, slot, purpose } = await slotTarget(b, true);
   const mode = b.mode === "edit" ? "edit" : "generate";
   const ratio = ratioOf(purpose, str(b.ratio, 8));
-  const style = has(STYLES, b.style) ? String(b.style) : "life_photo";
+  const preset = presetOf(str(b.preset, 30) || str(b.style, 30));
   const text = str(b.text, 300).trim() || String(slot!.text ?? "").trim();
   const extra = str(b.extra, 400).trim();
   if (!text) fail(400, "bad_field", { field: "text" });
   const s = await imageSettings();
-  const model = String(mode === "edit" ? s.image_edit_model : s.image_gen_model);
+  // 모델: 요청에 있으면 그것(화면에서 사용자가 고른 모드·비교 모델), 없으면 설정의 생성·편집 모델. 설정을 몰래 유료로 바꾸지 않음
+  const asked = str(b.model, 64).trim();
+  if (asked && !/^[a-z0-9][a-z0-9._-]{1,60}$/.test(asked)) fail(400, "bad_field", { field: "model" });
+  const model = asked || String(mode === "edit" ? s.image_edit_model : s.image_gen_model);
   const isTest = model === TEST_MODEL;
   const capsModel = isTest ? "gpt-image-2.5-flare" : model; // 점검용 가짜 모델은 크기·품질 규칙을 2.5처럼
-  // 모델이 못 받는 품질은 가까운 것으로 (xhigh·max는 2.5 계열만 — OpenAI API 레퍼런스)
-  const quality = normQuality(capsModel, (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality));
   const caps = modelCaps(capsModel);
-  const isFree = caps.provider === "cloudflare";
-  if (isFree && mode === "edit") fail(400, "edit_unsupported");
-  if (isFree && !keysInfo().cloudflare) fail(503, "cf_key_missing");
-  if (!isTest && !isFree && !keyOpenAI()) fail(503, "openai_key_missing");
+  if (!caps.known) fail(400, "model_unknown", { model });
+  if (!caps.usable) fail(400, "model_retired", { model, retired: caps.retired });
+  const provider = caps.provider as string;
+  const isFree = !!caps.free;
+  if (mode === "edit" && !caps.edit) fail(400, "edit_unsupported", { model });
+  if (!isTest && !providerKeyOk(provider)) fail(503, keyMissingCode(provider));
+  // 모델이 못 받는 품질은 가까운 것으로 (모델마다 되는 품질이 다름 — images.js 모델 표)
+  const quality = normQuality(capsModel, (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality));
   // 상표·가격·인증·후기 사진·글자 요청은 서버에서도 막음 (화면에서 먼저 알려줌)
   const products = await linkedProducts(String(post!.id));
   const risks = blocksOf(promptRisk(text + "\n" + extra, products.brands));
   if (risks.length) fail(400, "prompt_blocked", { risks });
-  // 실제 상품·화면이 보여야 하는 자리(구성품·라벨·화면 등)는 사용자가 '일반 장면'이라고 확인해야만 만들고, 확인한 말을 기록
-  const real = slotRisk(text + " " + extra);
-  if (real.real && b.generic_ok !== true) fail(400, "real_photo_needed", { word: real.word });
+  // 참고 사진: 이 모델이 받는 만큼만, 보관함에 있고 지우지 않은 것만 (직접 올린 사진은 쓸 권한 확인한 것만)
+  const refsIn = Array.isArray(b.refs) ? (b.refs as J[]) : [];
+  const maxRefs = refsLimit(capsModel, mode); // 고치기면 고칠 이미지가 한 장을 씀
+  if (refsIn.length > 16) fail(400, "too_many_refs", { max: maxRefs }); // 어느 모델도 16장을 넘게 받지 않음 (OpenAI edits 최대)
+  const refs: { image_id: string; role: string }[] = [];
+  for (const r of refsIn) {
+    if (!isUuid(r?.image_id) || !has(REF_ROLES, r?.role)) fail(400, "bad_field", { field: "refs" });
+    if (refs.some((x) => x.image_id === r.image_id)) continue;
+    refs.push({ image_id: String(r.image_id), role: String(r.role) });
+  }
+  if (refs.length > maxRefs) fail(400, refs.length && !caps.refsMax ? "refs_unsupported" : "too_many_refs", { max: maxRefs, model });
+  let refRows: J[] = [];
+  if (refs.length) {
+    const { data, error } = await sb.from("post_images").select("id, kind, provider, storage_path, mime, bytes, rights_confirmed, source_type, description, ref_small_path").in("id", refs.map((r) => r.image_id)).is("deleted_at", null);
+    if (error) throw error;
+    refRows = refs.map((r) => ((data ?? []) as J[]).find((x) => x.id === r.image_id)).filter(Boolean) as J[];
+    if (refRows.length !== refs.length) fail(404, "ref_not_found");
+    for (const x of refRows) {
+      if (x.kind === "upload" && x.rights_confirmed !== true) fail(400, "rights_required");
+      if (Number(x.bytes ?? 0) > MAX_REF_BYTES) fail(400, "ref_too_big");
+    }
+  }
+  // AI로 만들어도 되는 자리인지 (images.js aiGate — 화면과 같은 판단): '직접 찍기' 자리는 막음,
+  // 실제 상품·화면이 보여야 하는 자리는 진짜 제품 사진(대상 모양 유지)이 있거나 '일반 장면' 확인이 있어야 함
+  const gate = aiGate(isExtraKey(String(slot!.key)) ? "" : String(slot!.text ?? ""), { text: text + " " + extra, refs, genericOk: b.generic_ok === true });
+  if (!gate.ok) fail(400, String(gate.code), gate.word ? { word: gate.word } : {});
   let base: J | null = null;
   if (mode === "edit") {
     if (!isUuid(b.base_image_id)) fail(400, "bad_field", { field: "base_image_id" });
     const { data } = await sb.from("post_images").select("*").eq("id", b.base_image_id).is("deleted_at", null).maybeSingle();
     if (!data) fail(404, "not_found");
     // 직접 찍은 사진·실제 사진을 AI로 고치면 실제와 다른 '진짜 같은 사진'이 될 수 있어서, AI가 만든 이미지만 고침
+    // (실제 사진은 '참고 사진'으로 넣어 새로 만들면 'AI 합성'으로 표시됨)
     if ((data as J).kind !== "ai") fail(400, "edit_ai_only");
     base = data as J;
   }
-  const size = sizeFor(purpose, ratio, capsModel);
-  if (!isFree && !validApiSize(size)) fail(400, "bad_field", { field: "ratio" }); // 크기 규칙은 OpenAI 것 (무료 모델은 정해 둔 크기)
-  // 맥락(제목·소제목·앞뒤 문장)에서 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄
-  const prompt = buildPrompt({ post, slot, text, style, purpose, ratio, extra, mode, hide: products.hide });
-  const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices, model });
+  // 무료 모델(FLUX.2 klein)은 512px보다 작은 사본만 받음 — 사본이 없는 이미지가 있으면 화면이 만들어 올린 뒤 다시 보냄 (돈 안 나감)
+  if (provider === "cloudflare" && !isTest) {
+    const need = [...(base ? [base] : []), ...refRows].filter((x) => !String(x.ref_small_path ?? "")).map((x) => String(x.id));
+    if (need.length) fail(409, "ref_small_missing", { ids: need });
+  }
+  // 묶음(후보 2~3장·모델 비교): 화면이 한 장씩 차례로 보냄. 남은 장의 수·예상 비용으로 한도·예산을 미리 확인
+  let batch: J | null = null;
+  if (b.batch && typeof b.batch === "object") {
+    const x = b.batch as J;
+    const total = Number(x.total), index = Number(x.index);
+    if (!isUuid(x.id) || !["candidates", "compare"].includes(String(x.kind)) || !Number.isInteger(total) || total < 1 || total > 3 || !Number.isInteger(index) || index < 0 || index >= total) fail(400, "bad_field", { field: "batch" });
+    if (mode === "edit") fail(400, "bad_field", { field: "batch" });
+    batch = { id: x.id, kind: x.kind, index, total };
+  }
+  const size = sizeFor(purpose, ratio, capsModel, quality);
+  if (provider === "openai" && caps.flexible && !validApiSize(size)) fail(400, "bad_field", { field: "ratio" }); // 크기 규칙은 OpenAI 것
+  // 장면 설계서: 원고 맥락 + 이미지 종류 + 사용자가 고친 칸. 맥락에서 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄
+  const scene = buildScene({
+    post, slot, text, preset, purpose, ratio, extra, mode, hide: products.hide, refs, size: sizeLabel(size), channel: String(post!.channel_id ?? ""),
+    overrides: cleanSceneOverrides(b.scene),
+  });
+  // 고친 장면 칸에도 같은 금지 검사 (상표·가격·후기 사진 등)
+  const sceneRisks = blocksOf(promptRisk(sceneUserText(b.scene), products.brands));
+  if (sceneRisks.length) fail(400, "prompt_blocked", { risks: sceneRisks });
+  const prompt = promptFromScene(scene);
+  const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices, model, refs: refs.length });
   if (est == null) fail(400, "bad_field", { field: "quality" });
   // 화면에서 보여준 예상 비용보다 눈에 띄게 비싸지면(설정·가격·제목이 바뀐 경우) 다시 확인받음 — 토큰 몇 개 차이는 넘어감
   const seen = Number(b.confirm_usd);
@@ -1462,47 +1615,72 @@ async function generateImage(c: Ctx) {
   if (!isTest && !(Number.isFinite(seen) && seen + tol >= Number(est))) {
     fail(409, "estimate_changed", { est_usd: est, model, quality, size, prices: s.image_prices });
   }
+  const reserveN = batch ? Number(batch.total) - Number(batch.index) : 1;
+  const reserveAsked = Number(b.reserve_usd);
+  const reserveUsd = batch ? Math.max(Number(est) * reserveN, Number.isFinite(reserveAsked) ? reserveAsked : 0) : Number(est);
   await storageGuard(2 * 1024 * 1024);
   // 이 일꾼이 꺼질 때까지 남은 시간이 그 품질을 기다리기에 모자라면, 돈이 나가기 전에 '잠깐 뒤에 다시' (그때는 새 일꾼이 받음)
   // 화면은 retry_after 초만큼 기다렸다가 같은 요청 번호로 다시 보냄 (image_service.js busyRetryAfter)
-  if (DEADLINE - Date.now() < (isFree ? 45000 : needMsFor(quality, mode, WALL_MS))) {
+  if (DEADLINE - Date.now() < (isFree ? 45000 : needMsFor(quality, mode, WALL_MS, provider)) + (refs.length ? 8000 : 0)) {
     fail(503, "server_busy", { retry_after: busyRetryAfter(Date.now() - BOOT_AT, WALL_MS) });
   }
+  const composite = refRows.some((x) => x.kind !== "ai" && x.kind !== "card" && refs.find((r) => r.image_id === x.id && (r.role === "subject" || r.role === "background")));
   const begin = await sb.rpc("image_gen_begin", {
     p: {
       request_key: requestKey, post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, mode, model, size, quality,
-      provider: isFree ? "cloudflare" : "openai",
-      output_format: "jpeg", purpose, style, user_prompt: [text, extra].filter(Boolean).join("\n"), prompt, base_image_id: base ? base.id : "", est_usd: est,
-      risk_override: real.real ? "일반 장면으로 만들기 확인: " + real.word : "",
+      provider: isTest ? "openai" : provider,
+      output_format: "jpeg", purpose, style: preset, preset, user_prompt: [text, extra].filter(Boolean).join("\n"), prompt, base_image_id: base ? base.id : "", est_usd: est,
+      risk_override: gate.generic ? "일반 장면으로 만들기 확인: " + gate.word : gate.composite ? "진짜 제품 사진 참고: " + gate.word : "",
+      refs, scene, batch_id: batch?.id ?? "", batch_kind: batch?.kind ?? "", batch_index: batch?.index ?? "", batch_total: batch?.total ?? "",
+      reserve_n: reserveN, reserve_usd: reserveUsd,
     },
   });
-  if (begin.error) rpcError(begin.error);
+  if (begin.error) {
+    // 017 전 DB: 새 칸(참고 사진·장면 설계서·묶음)이나 공급자 gemini 를 모름 → 'DB 업데이트 필요'
+    if (/bad provider|reserve|column .* does not exist/.test(String(begin.error.message ?? "")) && (provider === "gemini" || refs.length || batch)) fail(409, "db_update_needed", { migration: "017" });
+    rpcError(begin.error);
+  }
   const gen = begin.data as J;
   const { prompt: _p, revised_prompt: _r, ...pub } = gen;
   if (gen.duplicate) return json({ generation: pub, duplicate: true });
+  // 017 전 DB의 생성 시작 함수는 공급자를 openai·cloudflare 로만 적고 새 칸(refs 등)을 모름 → 공급자를 부르기 전에 멈춤 (청구 없음)
+  if (!("refs" in gen) || String(gen.provider) !== (isTest ? "openai" : provider)) {
+    await sb.rpc("image_gen_fail", { gen: gen.id, fin: { provider_called: false, error_code: "db_update_needed", error_message: "DB 업데이트(017)가 필요해서 만들지 않았어 (청구 없음).", cost_status: "청구 없음" } });
+    fail(409, "db_update_needed", { migration: "017" });
+  }
   RUNNING.add(String(gen.id));
   const task = runGeneration(imageDeps(), gen, {
-    key: keyOpenAI(), cf: keyCf(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: isFree ? 90_000 : 115_000, ratio,
-    base: base ? { path: String(base.storage_path), mime: String(base.mime) } : null,
+    keys: providerKeys(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: isFree ? 90_000 : 115_000, ratio,
+    base: base ? { path: String(base.storage_path), mime: String(base.mime), id: String(base.id), small: String(base.ref_small_path ?? "") } : null,
+    refs: refs.map((r) => { const x = refRows.find((y) => y.id === r.image_id)!; return { path: String(x.storage_path), mime: String(x.mime), role: r.role, id: r.image_id, kind: String(x.kind), small: String(x.ref_small_path ?? "") }; }),
+    composite, scene, preset, type: scene.type,
     // 고치기는 바뀐 내용(지시)이 아니라 원래 이미지 설명을 그대로 씀 (지시는 생성 기록의 user_prompt 에)
     description: mode === "edit" ? String(base?.description || slot!.text || text) : text,
   }).catch(async (e) => {
     console.error("image generation:", String((e as Error)?.message ?? e).slice(0, 200));
-    await sb.rpc("image_gen_fail", { gen: gen.id, fin: { error_code: "server_error", error_message: "서버에서 문제가 생겼어. 청구됐을 수 있으니 OpenAI 사용량을 확인해줘.", cost_status: "확인 필요" } });
+    await sb.rpc("image_gen_fail", { gen: gen.id, fin: { error_code: "server_error", error_message: "서버에서 문제가 생겼어. 청구됐을 수 있으니 공급자 사용량을 확인해줘.", cost_status: "확인 필요" } });
   }).finally(() => RUNNING.delete(String(gen.id)));
   inBackground(task);
-  return json({ generation: pub, est_usd: est, model, size, quality }, 202);
+  return json({ generation: pub, est_usd: est, model, size, quality, provider }, 202);
 }
-// 4분 넘게 끝나지 않은 생성은 실패(청구됐을 수 있음 → 확인 필요)로 정리 (그 생성 하나 또는 그 글 전체)
+// 4분 넘게 끝나지 않은 생성은 실패로 정리 (그 생성 하나 또는 그 글 전체).
+// 유료 공급자(OpenAI·Gemini)는 청구됐을 수 있음 → 확인 필요, 무료 플랜 Cloudflare 는 청구 없음 (1.5.0: 공급자별로 나눔)
 async function sweepStale(postId: string | null, genId?: string) {
-  // deno-lint-ignore no-explicit-any
-  let q: any = sb.from("image_generations").update({
-    status: "실패", error_code: "timeout", error_message: "응답이 끝나지 않아 멈췄어. 청구됐을 수 있으니 OpenAI 사용량에서 확인해줘.",
-    cost_status: "확인 필요", auto_cost_status: "확인 필요", finished_at: nowIso(),
-  }).eq("status", "생성 중").lt("started_at", new Date(Date.now() - 240e3).toISOString());
-  q = genId ? q.eq("id", genId) : q.eq("post_id", postId);
-  const { error } = await q;
-  if (error) console.error("sweep:", error.message);
+  const old = new Date(Date.now() - 240e3).toISOString();
+  const run = async (free: boolean) => {
+    // deno-lint-ignore no-explicit-any
+    let q: any = sb.from("image_generations").update({
+      status: "실패", error_code: "timeout",
+      error_message: free ? "응답이 끝나지 않아 멈췄어 (무료 모델이라 청구 없음)." : "응답이 끝나지 않아 멈췄어. 청구됐을 수 있으니 그 공급자(OpenAI·Gemini)의 사용량 화면에서 확인해줘.",
+      cost_status: free ? "청구 없음" : "확인 필요", auto_cost_status: free ? "청구 없음" : "확인 필요", finished_at: nowIso(),
+    }).eq("status", "생성 중").lt("started_at", old);
+    q = free ? q.eq("provider", "cloudflare") : q.neq("provider", "cloudflare");
+    q = genId ? q.eq("id", genId) : q.eq("post_id", postId);
+    const { error } = await q;
+    if (error) console.error("sweep:", error.message);
+  };
+  await run(true);
+  await run(false);
 }
 async function getGeneration(c: Ctx) {
   const id = c.params[0];
@@ -1517,7 +1695,7 @@ async function getGeneration(c: Ctx) {
   }
   return json({ generation: g, image, usage: await imageUsage() });
 }
-// 실제 청구액 넣기 (OpenAI 사용량 화면에서 확인한 값). 앱이 청구액을 직접 가져오지는 못함
+// 실제 청구액 넣기 (공급자 사용량 화면 — OpenAI·Google AI Studio — 에서 확인한 값). 앱이 청구액을 직접 가져오지는 못함
 async function setGenerationCost(c: Ctx) {
   const b = await readJson(c.req, 5_000);
   const { data: g, error: e1 } = await sb.from("image_generations").select("id, status, usage_usd, auto_cost_status").eq("id", c.params[0]).maybeSingle();
@@ -1537,6 +1715,154 @@ async function setGenerationCost(c: Ctx) {
 }
 
 // 사진 공급자 (Pexels): 검색은 서버가 대신 (키를 화면에 안 보냄), 시간당·월 한도를 앱에서도 지킴
+// 무료 모델(FLUX.2 klein)에 보낼 작은 사본 올리기 — 화면이 원본을 512px보다 작게 줄여서 올림 (원본은 그대로, 보관함에 새 이미지로 늘리지 않음)
+async function uploadSmallCopy(c: Ctx) {
+  const ct = (c.req.headers.get("content-type") ?? "").toLowerCase();
+  if (!ct.startsWith("multipart/form-data")) fail(415, "bad_type");
+  let form: FormData;
+  try { form = await c.req.formData(); } catch { return fail(400, "bad_body"); }
+  const f = form.get("file");
+  if (!(f instanceof Blob)) fail(400, "bad_field", { field: "file" });
+  const file = f as Blob;
+  if (file.size > 1024 * 1024) fail(413, "too_large");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const sn = sniffImage(bytes) as J | null;
+  if (!sn || sn.animated || !["image/jpeg", "image/png", "image/webp"].includes(String(sn.mime))) fail(400, "bad_image", { reason: "bad_type" });
+  if (!(Number(sn!.width) > 0 && Number(sn!.width) < 512 && Number(sn!.height) > 0 && Number(sn!.height) < 512)) fail(400, "bad_field", { field: "file" });
+  const { data: img, error } = await sb.from("post_images").select("id, ref_small_path").eq("id", c.params[0]).is("deleted_at", null).maybeSingle();
+  if (error) { if (missingColumn(error, "ref_small_path")) fail(409, "db_update_needed", { migration: "017" }); throw error; }
+  if (!img) fail(404, "not_found");
+  const now = new Date();
+  const path = `small/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, "0")}/${crypto.randomUUID()}.${sn!.ext}`;
+  const up = await sb.storage.from(BUCKET).upload(path, bytes, { contentType: String(sn!.mime), upsert: false, cacheControl: "3600" });
+  if (up.error) fail(502, "storage_failed");
+  const { data, error: e2 } = await sb.from("post_images").update({ ref_small_path: path }).eq("id", c.params[0]).select("id, ref_small_path").maybeSingle();
+  if (e2 || !data) { await sb.storage.from(BUCKET).remove([path]); if (e2) throw e2; fail(404, "not_found"); }
+  const old = String((img as J).ref_small_path ?? "");
+  if (old && old !== path) await sb.storage.from(BUCKET).remove([old]);
+  return json({ image: data });
+}
+
+// ───────── 1.5.0: AI 검수·사용자 평가·수정 이력·모델 비교 기록·연결 확인 ─────────
+// AI 검수 (참고용): 멀티모달 모델에 이미지를 보여주고 항목별 의견을 받음. 비용은 이미지 예산에 같이 셈. 원본은 그대로 두고 앱이 대신 고르지 않음
+async function reviewImage(c: Ctx) {
+  const b = await readJson(c.req, 5_000);
+  const id = c.params[0];
+  const { data: row, error } = await sb.from("post_images").select("*").eq("id", id).is("deleted_at", null).maybeSingle();
+  if (error) throw error;
+  if (!row) fail(404, "not_found");
+  const img = row as J;
+  if (img.kind !== "ai") fail(400, "review_ai_only");
+  const s = await imageSettings();
+  const model = str(b.model, 64).trim() || String(s.image_review_model ?? "");
+  const m = reviewCaps(model) as J | null;
+  if (!m) fail(400, model ? "review_model_unknown" : "review_model_off");
+  if (!providerKeyOk(String(m!.provider))) fail(503, keyMissingCode(String(m!.provider)));
+  const refs = (Array.isArray(img.ref_images) ? img.ref_images : []) as J[];
+  const est = Number(estimateReviewUsd(model, 1 + Math.min(3, refs.length)));
+  const seen = Number(b.confirm_usd);
+  if (!(Number.isFinite(seen) && seen + Math.max(0.0005, est * 0.02) >= est)) fail(409, "estimate_changed", { est_usd: est, model });
+  // 원고의 사진 자리 설명 (있으면) — 없으면 이미지 설명
+  let slotText = String(img.description ?? "");
+  if (isUuid(b.post_id) && typeof b.slot_key === "string") {
+    const { data: post } = await sb.from("posts").select("body").eq("id", b.post_id).maybeSingle();
+    const sl = parseSlots(String((post as J | null)?.body ?? "")).find((x: J) => x.key === b.slot_key);
+    if (sl) slotText = String(sl.text);
+  }
+  if (DEADLINE - Date.now() < 40_000) fail(503, "server_busy", { retry_after: busyRetryAfter(Date.now() - BOOT_AT, WALL_MS) });
+  const begin = await sb.rpc("image_review_begin", { p: { image_id: id, provider: m!.provider, model, est_usd: est, post_id: isUuid(b.post_id) ? b.post_id : "" } });
+  if (begin.error) { needs017(begin.error, "image_review_begin"); rpcError(begin.error); }
+  const review = begin.data as J;
+  const deps = imageDeps();
+  const finish = async (fin: J) => {
+    const done = await sb.rpc("image_review_finish", { p_review: review.id, fin });
+    if (done.error) throw done.error;
+    return json({ review: done.data });
+  };
+  const images: { bytes: Uint8Array; mime: string }[] = [];
+  const dl = await deps.download(String(img.storage_path));
+  if (!dl.ok) return finish({ ok: false, error_code: "bad_image", error_message: "검수할 이미지를 불러오지 못했어 (청구 없음).", cost_status: "청구 없음" });
+  images.push({ bytes: dl.bytes as Uint8Array, mime: String(img.mime) });
+  const refIds = refs.map((r) => String(r.image_id)).filter(isUuid).slice(0, 3);
+  if (refIds.length) {
+    const { data: rr } = await sb.from("post_images").select("id, storage_path, mime").in("id", refIds).is("deleted_at", null);
+    for (const x of (rr ?? []) as J[]) { const d2 = await deps.download(String(x.storage_path)); if (d2.ok) images.push({ bytes: d2.bytes as Uint8Array, mime: String(x.mime) }); }
+  }
+  const scene = (img.scene && typeof img.scene === "object" ? img.scene : {}) as J;
+  const purpose = String(img.purpose || (scene.platform as J | undefined)?.purpose || "blog_body");
+  const prompt = reviewPrompt({ slotText, goal: String(scene.goal ?? ""), type: String(scene.type ?? "photo"), ratio: String(img.ratio || (scene.platform as J | undefined)?.ratio || ""),
+    crops: purpose === "blog_cover" ? ["1:1 (목록 썸네일)"] : [], refs: images.length - 1, composite: img.composite === true });
+  const r = await visionReview({ fetchImpl: fetch, keys: providerKeys(), model, prompt, images, timeoutMs: Math.max(10_000, Math.min(60_000, DEADLINE - Date.now() - 8_000)) }) as J;
+  if (!r.ok) return finish({ ok: false, error_code: r.code, error_message: scrub(r.message, 500), cost_status: m!.free || r.billed === "no" ? "청구 없음" : "확인 필요" });
+  const usd = reviewUsageUsd(model, r.usage);
+  const cost = m!.free ? "청구 없음" : usd != null ? "사용량 기준" : "예상";
+  const parsed = parseReview(String(r.text ?? ""));
+  if (!parsed) return finish({ ok: false, error_code: "review_unreadable", error_message: "검수 답을 읽지 못했어. 다시 해줘.", usage: r.usage, usage_usd: usd, cost_status: cost });
+  return finish({ ok: true, scores: { checks: parsed.checks }, summary: parsed.summary, uncertainty: parsed.uncertainty, suggestions: parsed.suggestions, usage: r.usage, usage_usd: usd, cost_status: cost });
+}
+// 사용자 평가 (모델 비교·후보 고르기). AI 평가와 따로 저장 — 항목마다 1(아쉬움)~3(좋음), AI 티는 3 = 거의 없음
+async function evaluateImage(c: Ctx) {
+  const b = await readJson(c.req, 5_000);
+  const sc = (b.scores && typeof b.scores === "object" ? b.scores : {}) as J;
+  const scores: J = {};
+  for (const [k] of EVAL_CRITERIA as [string, string][]) { const v = Number(sc[k]); if (v === 1 || v === 2 || v === 3) scores[k] = v; }
+  const { data, error } = await sb.rpc("image_eval_save", { p: { image_id: c.params[0], scores, preferred: b.preferred === true, batch_id: isUuid(b.batch_id) ? b.batch_id : "", note: str(b.note, 300).trim() } });
+  if (error) { needs017(error, "image_eval_save"); rpcError(error); }
+  return json({ review: data });
+}
+// 수정 이력: 맨 처음 원본부터 고친 이미지까지 (원본은 지우거나 덮어쓰지 않음). 지운 이미지는 그림 없이 기록만
+async function imageLineage(c: Ctx) {
+  const { data, error } = await sb.rpc("image_lineage", { p_image: c.params[0] });
+  if (error) { needs017(error, "image_lineage"); throw error; }
+  const items = (((data as J | null)?.items ?? []) as J[]);
+  const alive = items.filter((x) => !x.deleted).map((x) => String(x.id));
+  const rows = alive.length ? (((await sb.from("post_images").select("id, storage_path").in("id", alive)).data ?? []) as J[]) : [];
+  const urls = await signPaths(rows.map((r) => String(r.storage_path ?? "")));
+  const pathOf = Object.fromEntries(rows.map((r) => [String(r.id), String(r.storage_path)]));
+  return json({ root_id: (data as J | null)?.root_id ?? null, items: items.map((x) => ({ ...x, url: x.deleted ? "" : urls[pathOf[String(x.id)]] ?? "" })) });
+}
+// 모델 비교 기록: 같은 입력으로 비교한 묶음에서 사용자가 매긴 평가만 모음 (AI 평가는 섞지 않음). 표본 수를 같이 보여줌
+async function compareStats(_c: Ctx) {
+  const [ev, gens] = await Promise.all([
+    sb.from("image_reviews").select("image_id, batch_id, model, preferred, scores").eq("kind", "user_eval").not("batch_id", "is", null).limit(2000),
+    sb.from("image_generations").select("batch_id, model, image_id").eq("batch_kind", "compare").not("image_id", "is", null).limit(4000),
+  ]);
+  if (ev.error) { needs017(ev.error, "image_reviews"); throw ev.error; }
+  if (gens.error) throw gens.error;
+  const cmp = new Set(((gens.data ?? []) as J[]).map((g) => String(g.batch_id)));
+  type Acc = { model: string; rated: number; preferred: number; sums: Record<string, number>; counts: Record<string, number> };
+  const by: Record<string, Acc> = {};
+  const batches = new Set<string>();
+  for (const e of (ev.data ?? []) as J[]) {
+    if (!cmp.has(String(e.batch_id))) continue;
+    batches.add(String(e.batch_id));
+    const k = String(e.model || "?");
+    const x = (by[k] ??= { model: k, rated: 0, preferred: 0, sums: {}, counts: {} });
+    x.rated++;
+    if (e.preferred === true) x.preferred++;
+    for (const [c2, v] of Object.entries((e.scores ?? {}) as J)) { x.sums[c2] = (x.sums[c2] ?? 0) + Number(v); x.counts[c2] = (x.counts[c2] ?? 0) + 1; }
+  }
+  const models = Object.values(by).map((x) => ({ model: x.model, rated: x.rated, preferred: x.preferred,
+    avg: Object.fromEntries(Object.keys(x.sums).map((k) => [k, Math.round((x.sums[k] / x.counts[k]) * 100) / 100])) }));
+  return json({ batches: batches.size, models });
+}
+// 연결 확인: 공급자에 키·모델을 물어보기만 함 (이미지를 만들지 않아 돈이 들지 않음). 결과를 기록해서 설정 화면에 보여줌
+async function checkProviderRoute(c: Ctx) {
+  const b = await readJson(c.req, 2_000);
+  const provider = oneOf(b.provider, ["openai", "gemini", "cloudflare"] as const, "provider");
+  const s = await imageSettings();
+  const asked = str(b.model, 64).trim();
+  const candidates = [asked, String(s.image_gen_model ?? ""), String(s.image_edit_model ?? ""), ...IMAGE_MODES.map((m: J) => String(m.model))].filter(Boolean);
+  const model = candidates.find((x) => { const cc = modelCaps(x); return cc.known && cc.provider === provider; }) ?? "";
+  if (!model) fail(400, "bad_field", { field: "model" });
+  const caps = modelCaps(model);
+  const r = await providerCheck({ fetchImpl: fetch, provider, keys: providerKeys(), model: provider === "cloudflare" ? String(caps.cfModel) : model }) as J;
+  const row = { provider, model, ok: r.ok === true, code: str(r.code, 60), message: scrub(String(r.message ?? ""), 300) };
+  const ins = await sb.from("image_provider_checks").insert(row);
+  if (ins.error) console.error("provider check save:", ins.error.message); // 017 전 DB면 기록만 못 함
+  return json({ check: { ...row, checked_at: nowIso() } });
+}
+
 async function stockGuard(provider: string) {
   const P = PHOTO_PROVIDERS[provider as keyof typeof PHOTO_PROVIDERS];
   const since = (ms: number) => new Date(Date.now() - ms).toISOString();
@@ -1665,7 +1991,9 @@ async function getImage(c: Ctx) {
   ]);
   if (slots.error) throw slots.error;
   if (decks.error) throw decks.error;
-  return json({ image: (await withUrls([data as J]))[0], used_in: slots.data, decks: decks.data, generation: gen.data });
+  // 1.5.0: 이 이미지의 AI 검수·사용자 평가 (017 전 DB면 빈 목록)
+  const rv = await sb.from("image_reviews").select("*").eq("image_id", c.params[0]).order("created_at", { ascending: false }).limit(10);
+  return json({ image: (await withUrls([data as J]))[0], used_in: slots.data, decks: decks.data, generation: gen.data, reviews: rv.error ? [] : rv.data });
 }
 async function patchImage(c: Ctx) {
   const b = await readJson(c.req, 10_000);
@@ -1695,9 +2023,10 @@ async function deleteImage(c: Ctx) {
   const { data, error } = await sb.rpc("image_delete", { p_image: c.params[0] });
   if (error) rpcError(error);
   const path = String((data as J)?.storage_path ?? "");
+  const small = String((data as J)?.ref_small_path ?? ""); // 1.5.0: 무료 모델용 작은 사본도 같이 지움
   let removed = false;
   if (path) {
-    const r = await sb.storage.from(BUCKET).remove([path]);
+    const r = await sb.storage.from(BUCKET).remove([path, small].filter(Boolean));
     removed = !r.error;
     if (r.error) console.error("image file remove:", r.error.message);
   }
@@ -1947,6 +2276,12 @@ const ROUTES: [string, RegExp, (c: Ctx) => Promise<Response>][] = [
   ["POST", R("images/upload"), uploadImage],
   ["POST", R("images/generate"), generateImage],
   ["POST", R("images/downloaded"), markDownloaded],
+  ["GET", R("images/compare-stats"), compareStats],
+  ["POST", R("images/providers/check"), checkProviderRoute],
+  ["POST", R(`images/${U}/small`), uploadSmallCopy],
+  ["POST", R(`images/${U}/review`), reviewImage],
+  ["POST", R(`images/${U}/evaluate`), evaluateImage],
+  ["GET", R(`images/${U}/lineage`), imageLineage],
   ["GET", R(`images/generations/${U}`), getGeneration],
   ["POST", R(`images/generations/${U}/cost`), setGenerationCost],
   ["GET", R(`images/${U}`), getImage],

@@ -22,7 +22,9 @@ export const pg = {
 };
 
 // handle({ method, table, rpc, select, one, body, url, query, prefer }) → [status, data, headers?] 또는 undefined(빈 표로 답함)
-export async function startServer(handle) {
+// data 가 Uint8Array 면 그대로(이미지 파일 내려받기 흉내). opts.env: 서버 환경변수 덮어쓰기 (시험용 가짜 키 — 진짜 키를 넣지 마)
+// 서버는 --allow-net=127.0.0.1 로 띄움 → 가짜 DB 말고는 어디에도 연결하지 못함 (실수로 OpenAI·Gemini·Cloudflare를 부르지 않게)
+export async function startServer(handle, opts = {}) {
   const calls = [];
   const fake = http.createServer(async (req, res) => {
     let raw = '';
@@ -41,14 +43,15 @@ export async function startServer(handle) {
     const now = new Date().toISOString();
     if (table === 'app_sessions' && req.method === 'GET') return send(200, [{ id: 'sess-1', revoked_at: null, last_used_at: now, created_at: now }]);
     const r = await handle({ ...call, one, url });
+    if (r && r[1] instanceof Uint8Array) { res.writeHead(r[0], { 'content-type': 'application/octet-stream', ...(r[2] || {}) }); return res.end(Buffer.from(r[1])); }
     if (r) return send(r[0], r[1], r[2]); // r[2]: 응답 머리글 (예: 개수 세기의 content-range)
     return send(200, one ? {} : []);
   });
   const dbPort = await new Promise((ok) => fake.listen(0, '127.0.0.1', () => ok(fake.address().port)));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const env = { ...process.env, DENO_SERVE_ADDRESS: `tcp:127.0.0.1:${port}`, SUPABASE_URL: `http://127.0.0.1:${dbPort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-only-not-a-key', SUPABASE_SECRET_KEYS: '', OPENAI_API_KEY: '', PEXELS_API_KEY: '', CF_ACCOUNT_ID: '', CF_API_TOKEN: '' };
-  const deno = spawn(DENO, ['run', '--allow-net', '--allow-env', '--allow-read', '--node-modules-dir=none', 'index.ts'], { cwd: FN_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const env = { ...process.env, DENO_SERVE_ADDRESS: `tcp:127.0.0.1:${port}`, SUPABASE_URL: `http://127.0.0.1:${dbPort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-only-not-a-key', SUPABASE_SECRET_KEYS: '', OPENAI_API_KEY: '', PEXELS_API_KEY: '', CF_ACCOUNT_ID: '', CF_API_TOKEN: '', GEMINI_API_KEY: '', ...(opts.env || {}) };
+  const deno = spawn(DENO, ['run', '--allow-net=127.0.0.1', '--allow-env', '--allow-read', '--node-modules-dir=none', 'index.ts'], { cwd: FN_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   deno.stdout.on('data', (d) => { log += d; });
   deno.stderr.on('data', (d) => { log += d; });
@@ -63,5 +66,10 @@ export async function startServer(handle) {
     const r = await fetch(`${base}/blog-app/${route}`, { method, headers: { 'content-type': 'application/json', 'x-app-session': session }, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: r.status, j: await r.json() };
   };
-  return { base, calls, call, since: (n) => calls.slice(n), stop: () => { deno.kill(); fake.close(); }, log: () => log };
+  // form: multipart 보내기 (FormData) — 작은 사본 올리기 같은 곳
+  const form = async (route, fd) => {
+    const r = await fetch(`${base}/blog-app/${route}`, { method: 'POST', headers: { 'x-app-session': session }, body: fd });
+    return { status: r.status, j: await r.json() };
+  };
+  return { base, calls, call, form, since: (n) => calls.slice(n), stop: () => { deno.kill(); fake.close(); }, log: () => log };
 }
