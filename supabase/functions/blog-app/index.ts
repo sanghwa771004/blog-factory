@@ -313,6 +313,9 @@ function rpcError(error: { message?: string; code?: string } | null): never {
   if (/image_busy/.test(m)) fail(409, "image_busy");
   if (/image_daily_limit/.test(m)) fail(429, "image_daily_limit");
   if (/image_budget/.test(m)) fail(429, "image_budget");
+  if (/image_request_cap/.test(m)) fail(429, "image_request_cap");
+  if (/review_busy/.test(m)) fail(409, "review_busy");
+  if (/bad provider/.test(m)) fail(400, "bad_field", { field: "provider" });
   const inUse = /image in use: (\d+)/.exec(m);
   if (inUse) fail(409, "image_in_use", { uses: Number(inUse[1]) });
   if (/slot taken/.test(m)) fail(409, "slot_taken");
@@ -1277,7 +1280,9 @@ function cleanSceneOverrides(v: unknown): J {
   }
   return out;
 }
-const sceneUserText = (v: unknown) => Object.values(cleanSceneOverrides(v)).map((x) => (Array.isArray(x) ? x.join(" ") : String(x))).join("\n");
+// 사용자가 고친 장면 칸 중 '그려 달라는' 칸만 (넣지 말 것 목록·지역 선택은 빼고) — 금지 표현 검사·실제 상품 판단에 씀 (1.5.0 검토)
+const sceneUserText = (v: unknown) => Object.entries(cleanSceneOverrides(v)).filter(([k]) => k !== "avoid" && k !== "locale")
+  .map(([, x]) => (Array.isArray(x) ? x.join(" ") : String(x))).join("\n");
 const needs017 = (e: unknown, name: string) => { if (missingTable(e, name)) fail(409, "db_update_needed", { migration: "017" }); };
 const providersInfo = () => Object.entries(PHOTO_PROVIDERS).map(([id, p]) => ({ id, label: p.label, connected: !!(Deno.env.get(p.envKey) ?? ""), site: p.site, license_url: p.licenseUrl }));
 // 생성 기록을 화면에 보낼 때는 긴 프롬프트를 뺌 (이미지 정보에 따로 있음)
@@ -1546,6 +1551,9 @@ async function generateImage(c: Ctx) {
   const products = await linkedProducts(String(post!.id));
   const risks = blocksOf(promptRisk(text + "\n" + extra, products.brands));
   if (risks.length) fail(400, "prompt_blocked", { risks });
+  // 고친 장면 칸에도 같은 금지 검사 — 그려 달라는 칸만 (넣지 말 것 목록·지역은 빼고). 자리 검사보다 먼저 (1.5.0 검토)
+  const sceneRisks = blocksOf(promptRisk(sceneUserText(b.scene), products.brands));
+  if (sceneRisks.length) fail(400, "prompt_blocked", { risks: sceneRisks });
   // 참고 사진: 이 모델이 받는 만큼만, 보관함에 있고 지우지 않은 것만 (직접 올린 사진은 쓸 권한 확인한 것만)
   const refsIn = Array.isArray(b.refs) ? (b.refs as J[]) : [];
   const maxRefs = refsLimit(capsModel, mode); // 고치기면 고칠 이미지가 한 장을 씀
@@ -1568,10 +1576,6 @@ async function generateImage(c: Ctx) {
       if (Number(x.bytes ?? 0) > MAX_REF_BYTES) fail(400, "ref_too_big");
     }
   }
-  // AI로 만들어도 되는 자리인지 (images.js aiGate — 화면과 같은 판단): '직접 찍기' 자리는 막음,
-  // 실제 상품·화면이 보여야 하는 자리는 진짜 제품 사진(대상 모양 유지)이 있거나 '일반 장면' 확인이 있어야 함
-  const gate = aiGate(isExtraKey(String(slot!.key)) ? "" : String(slot!.text ?? ""), { text: text + " " + extra, refs, genericOk: b.generic_ok === true });
-  if (!gate.ok) fail(400, String(gate.code), gate.word ? { word: gate.word } : {});
   let base: J | null = null;
   if (mode === "edit") {
     if (!isUuid(b.base_image_id)) fail(400, "bad_field", { field: "base_image_id" });
@@ -1582,6 +1586,14 @@ async function generateImage(c: Ctx) {
     if ((data as J).kind !== "ai") fail(400, "edit_ai_only");
     base = data as J;
   }
+  // AI로 만들어도 되는 자리인지 (images.js aiGate — 화면과 같은 판단): '직접 찍기' 자리는 막음,
+  // 실제 상품·화면이 보여야 하는 자리는 진짜 제품 사진(직접 올림·Pexels)을 '대상 모양 유지'로 넣었거나, 고치는 이미지가 이미 AI 합성이거나,
+  // '일반 장면' 확인이 있어야 함. 고친 장면 칸(주 피사체·꼭 보일 것 등)도 같이 봄 (1.5.0 검토)
+  const gateRefs = refs.map((r) => ({ role: r.role, kind: String(refRows.find((x) => x.id === r.image_id)?.kind ?? "") }));
+  const gate = aiGate(isExtraKey(String(slot!.key)) ? "" : String(slot!.text ?? ""), {
+    text: [text, extra, sceneUserText(b.scene)].join(" "), refs: gateRefs, genericOk: b.generic_ok === true, baseComposite: base?.composite === true,
+  });
+  if (!gate.ok) fail(400, String(gate.code), gate.word ? { word: gate.word } : {});
   // 무료 모델(FLUX.2 klein)은 512px보다 작은 사본만 받음 — 사본이 없는 이미지가 있으면 화면이 만들어 올린 뒤 다시 보냄 (돈 안 나감)
   if (provider === "cloudflare" && !isTest) {
     const need = [...(base ? [base] : []), ...refRows].filter((x) => !String(x.ref_small_path ?? "")).map((x) => String(x.id));
@@ -1603,9 +1615,6 @@ async function generateImage(c: Ctx) {
     post, slot, text, preset, purpose, ratio, extra, mode, hide: products.hide, refs, size: sizeLabel(size), channel: String(post!.channel_id ?? ""),
     overrides: cleanSceneOverrides(b.scene),
   });
-  // 고친 장면 칸에도 같은 금지 검사 (상표·가격·후기 사진 등)
-  const sceneRisks = blocksOf(promptRisk(sceneUserText(b.scene), products.brands));
-  if (sceneRisks.length) fail(400, "prompt_blocked", { risks: sceneRisks });
   const prompt = promptFromScene(scene);
   const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices, model, refs: refs.length });
   if (est == null) fail(400, "bad_field", { field: "quality" });
@@ -1617,14 +1626,18 @@ async function generateImage(c: Ctx) {
   }
   const reserveN = batch ? Number(batch.total) - Number(batch.index) : 1;
   const reserveAsked = Number(b.reserve_usd);
-  const reserveUsd = batch ? Math.max(Number(est) * reserveN, Number.isFinite(reserveAsked) ? reserveAsked : 0) : Number(est);
-  await storageGuard(2 * 1024 * 1024);
+  // 후보(같은 모델)는 이번 장 × 남은 장 수, 모델 비교는 장마다 모델이 달라서 화면이 보낸 남은 장 합계 — 어느 쪽이든 이번 장 예상보다 적게 잡지 않음.
+  // 예약은 미리 확인용이고, 장마다 생성 시작에서 그 장의 예상 비용으로 예산·상한을 다시 확인함 (1.5.0 검토)
+  const askedReserve = Number.isFinite(reserveAsked) ? reserveAsked : 0;
+  const reserveUsd = !batch ? Number(est) : batch.kind === "compare" ? Math.max(Number(est), askedReserve) : Math.max(Number(est) * reserveN, askedReserve);
+  await storageGuard((provider === "gemini" ? 20 : 2) * 1024 * 1024);
   // 이 일꾼이 꺼질 때까지 남은 시간이 그 품질을 기다리기에 모자라면, 돈이 나가기 전에 '잠깐 뒤에 다시' (그때는 새 일꾼이 받음)
   // 화면은 retry_after 초만큼 기다렸다가 같은 요청 번호로 다시 보냄 (image_service.js busyRetryAfter)
   if (DEADLINE - Date.now() < (isFree ? 45000 : needMsFor(quality, mode, WALL_MS, provider)) + (refs.length ? 8000 : 0)) {
     fail(503, "server_busy", { retry_after: busyRetryAfter(Date.now() - BOOT_AT, WALL_MS) });
   }
-  const composite = refRows.some((x) => x.kind !== "ai" && x.kind !== "card" && refs.find((r) => r.image_id === x.id && (r.role === "subject" || r.role === "background")));
+  const composite = (mode === "edit" && base?.composite === true)
+    || refRows.some((x) => x.kind !== "ai" && x.kind !== "card" && refs.find((r) => r.image_id === x.id && (r.role === "subject" || r.role === "background")));
   const begin = await sb.rpc("image_gen_begin", {
     p: {
       request_key: requestKey, post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, mode, model, size, quality,
@@ -1936,8 +1949,10 @@ async function uploadImage(c: Ctx) {
   // 카드뉴스 배경으로 쓴 이미지의 출처(사진가·AI 여부)를 카드 PNG 기록에도 남김
   let bg: J | null = null;
   if (meta.kind === "card" && isUuid(meta.bg_image_id)) {
-    const { data } = await sb.from("post_images").select("kind, provider, source_url, author_name, author_url, attribution_text, license, rights_confirmed").eq("id", meta.bg_image_id).maybeSingle();
-    bg = (data as J | null) ?? null;
+    const cols = "kind, provider, source_url, author_name, author_url, attribution_text, license, rights_confirmed";
+    let r0 = await sb.from("post_images").select(cols + ", composite").eq("id", meta.bg_image_id).maybeSingle();
+    if (r0.error && missingColumn(r0.error, "composite")) r0 = await sb.from("post_images").select(cols).eq("id", meta.bg_image_id).maybeSingle();
+    bg = (r0.data as J | null) ?? null;
   }
   const r = await saveUploaded(imageDeps(), {
     bytes, declaredMime: declared, kind: meta.kind === "card" ? "card" : "upload", rights: meta.rights === true,

@@ -56,6 +56,9 @@ function fakeDb(state) {
     if (t.startsWith('/storage/v1/object/post-images/') && method === 'POST') { state.uploads.push(t); return [200, { Key: t.replace('/storage/v1/object/', '') }]; }
     if (t.startsWith('/storage/v1/object/post-images') && method === 'DELETE') { state.removed.push(...(body?.prefixes || [])); return [200, []]; }
     if (rpc === 'image_usage') return [200, { storage_bytes: 0, today: 0, daily_limit: 20, month_usd: 0, budget_usd: 5, request_cap_usd: 1 }];
+    // DB 함수가 raise 한 오류 흉내 (PostgREST 가 내는 모양) — 화면용 오류로 바뀌는지 확인
+    if (rpc === 'image_gen_begin' && state.beginError) return [400, { code: 'P0001', details: null, hint: null, message: state.beginError }];
+    if (rpc === 'image_review_begin' && state.reviewError) return [400, { code: 'P0001', details: null, hint: null, message: state.reviewError }];
     if (rpc === 'image_gen_begin') {
       state.begins.push(body.p);
       const row = { id: `gen-${state.begins.length}`, status: '생성 중', duplicate: false, ...body.p };
@@ -95,7 +98,7 @@ function fakeDb(state) {
     return undefined;
   };
 }
-const newState = () => ({ pre017: false, begins: [], fails: [], saves: [], evals: [], reviews: [], checks: [], uploads: [], removed: [], settingsPatch: [], imagePatch: [] });
+const newState = () => ({ pre017: false, beginError: '', reviewError: '', begins: [], fails: [], saves: [], evals: [], reviews: [], checks: [], uploads: [], removed: [], settingsPatch: [], imagePatch: [] });
 const gen = (o) => ({ request_key: 'req-' + Math.random().toString(36).slice(2, 12), post_id: POST, slot_key: SLOT, purpose: 'blog_body', ratio: '4:3', text: '책상 위에 놓인 작은 흰색 제습기', ...o });
 const waitFor = async (fn, ms = 15000) => { const until = Date.now() + ms; for (;;) { const v = fn(); if (v) return v; if (Date.now() > until) return null; await new Promise((ok) => setTimeout(ok, 100)); } };
 
@@ -315,6 +318,84 @@ describe('키 있는 서버 (시험용 가짜 키 — 서버는 바깥에 연결
     // 검수 이미지 1장 + 참고 사진 1장 = 2장 × 308토큰 + 지시문 900 → (1516 × $0.20 + 1000 × $1.20) / 100만
     assert.equal(r.j.est_usd, Math.round(((1516 * 0.2 + 1000 * 1.2) / 1e6) * 1e6) / 1e6);
     assert.equal(st.reviews.length, 0);
+  });
+  test('DB 함수 오류를 화면용 오류로: 한 번 상한 429 · 검수 중복 409 · 모르는 공급자 400 (그대로 500으로 새지 않음)', { skip }, async () => {
+    st.beginError = 'image_request_cap';
+    try {
+      const a = await call('POST', 'images/generate', gen({ model: 'gf-test-fake' }));
+      assert.deepEqual([a.status, a.j.error], [429, 'image_request_cap']);
+      st.beginError = 'bad provider: midjourney';
+      const b = await call('POST', 'images/generate', gen({ model: 'gf-test-fake' }));
+      assert.deepEqual([b.status, b.j.error, b.j.field], [400, 'bad_field', 'provider']);
+    } finally { st.beginError = ''; }
+    st.reviewError = 'review_busy';
+    try {
+      const r = await call('POST', `images/${AI}/review`, { model: 'cf-gemma-4-26b', confirm_usd: 0 });
+      assert.deepEqual([r.status, r.j.error], [409, 'review_busy']);
+      st.reviewError = 'image_request_cap';
+      const c = await call('POST', `images/${AI}/review`, { model: 'cf-gemma-4-26b', confirm_usd: 0 });
+      assert.deepEqual([c.status, c.j.error], [429, 'image_request_cap']);
+    } finally { st.reviewError = ''; }
+  });
+  test("고친 장면 칸: '넣지 말 것'의 로고·글자는 통과, 그려 달라는 칸(주 피사체·꼭 보일 것)의 로고 요청은 막음", { skip }, async () => {
+    const n = st.begins.length;
+    const ok = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { avoid: ['로고', '글자', '가격표'] } }));
+    assert.equal(ok.status, 202, JSON.stringify(ok.j));
+    assert.deepEqual(st.begins.at(-1).scene.avoid, ['로고', '글자', '가격표']);
+    assert.match(st.begins.at(-1).prompt, /Avoid \(Korean\):\n- 로고\n- 글자\n- 가격표/);
+    const bad = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { subject: '로고가 크게 보이는 제습기' } }));
+    assert.deepEqual([bad.status, bad.j.error, bad.j.risks.map((r) => r.code)], [400, 'prompt_blocked', ['logo']]);
+    const bad2 = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { must_show: ['제습기 앞면', '브랜드 로고'] } }));
+    assert.deepEqual([bad2.status, bad2.j.error], [400, 'prompt_blocked']);
+    assert.equal(st.begins.length, n + 1, '막은 요청은 생성 기록을 만들지 않음');
+  });
+  test('제품 모양 자리: AI 이미지를 대상 모양 유지로 넣어도 진짜 사진이 아니라서 막고, 고친 주 피사체 칸도 같이 봄', { skip }, async () => {
+    const n = st.begins.length;
+    const ai = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', slot_key: SLOT_REAL, text: '제습기 버튼 부분', refs: [{ image_id: AI, role: 'subject' }] }));
+    assert.deepEqual([ai.status, ai.j.error], [400, 'real_photo_needed'], 'AI 이미지는 진짜 제품 사진이 아님');
+    // 보통 자리라도 고친 주 피사체 칸이 실제 상품(버튼)을 보여 달라면 같은 판단
+    const sc = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { subject: '제습기 버튼 부분 클로즈업' } }));
+    assert.deepEqual([sc.status, sc.j.error], [400, 'real_photo_needed']);
+    // '넣지 말 것'에만 있으면 그리라는 뜻이 아님
+    const av = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { avoid: ['없는 버튼 만들기'] } }));
+    assert.equal(av.status, 202, JSON.stringify(av.j));
+    assert.equal(st.begins.length, n + 1);
+  });
+  test('AI 합성 이미지를 고치면: 진짜 사진을 다시 안 넣어도 제품 자리를 통과하고(이미 합성), 결과도 AI 합성·고친 원본으로 저장', { skip }, async () => {
+    const r = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', mode: 'edit', base_image_id: AI, slot_key: SLOT_REAL, text: '조명만 조금 밝게' }));
+    assert.equal(r.status, 202, JSON.stringify(r.j));
+    const p = st.begins.at(-1);
+    assert.deepEqual([p.mode, p.base_image_id], ['edit', AI]);
+    assert.match(p.risk_override, /진짜 제품 사진 참고/);
+    const save = await waitFor(() => st.saves.find((x) => x.gen === r.j.generation.id));
+    assert.ok(save, '저장 함수까지 감: ' + srv.log().slice(-500));
+    assert.deepEqual([save.img.composite, save.img.parent_image_id], [true, AI]);
+    // 합성이 아닌 AI 이미지를 고치는 것은 그대로 막음 (진짜 사진 없이 제품 모양 자리를 채우지 않게)
+    images[AI].composite = false;
+    try {
+      const no = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', mode: 'edit', base_image_id: AI, slot_key: SLOT_REAL, text: '조명만 조금 밝게' }));
+      assert.deepEqual([no.status, no.j.error], [400, 'real_photo_needed']);
+    } finally { images[AI].composite = true; }
+  });
+  test('묶음 예약: 후보(같은 모델)는 이번 장 × 남은 장 수, 모델 비교는 화면이 보낸 남은 합계 — 어느 쪽이든 이번 장 예상보다 적게 잡지 않음', { skip }, async () => {
+    const NB = 'gemini-nano-banana-2.1';
+    const probe = await call('POST', 'images/generate', gen({ model: NB, quality: 'high' }));
+    assert.deepEqual([probe.status, probe.j.error], [409, 'estimate_changed']);
+    const est = probe.j.est_usd;
+    const close = (a, b) => Math.abs(a - b) < 1e-9;
+    const B2 = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', B3 = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+    const a = await call('POST', 'images/generate', gen({ model: NB, quality: 'high', confirm_usd: est, reserve_usd: 0.0001, batch: { id: B2, kind: 'candidates', index: 0, total: 3 } }));
+    assert.equal(a.status, 202, JSON.stringify(a.j));
+    assert.ok(close(st.begins.at(-1).reserve_usd, est * 3) && st.begins.at(-1).reserve_n === 3, JSON.stringify(st.begins.at(-1)));
+    const c1 = await call('POST', 'images/generate', gen({ model: NB, quality: 'high', confirm_usd: est, reserve_usd: 0.5, batch: { id: B3, kind: 'compare', index: 0, total: 2 } }));
+    assert.equal(c1.status, 202, JSON.stringify(c1.j));
+    assert.equal(st.begins.at(-1).reserve_usd, 0.5, '비교는 장마다 모델이 달라서 화면이 보낸 남은 합계');
+    const c2 = await call('POST', 'images/generate', gen({ model: NB, quality: 'high', confirm_usd: est, reserve_usd: 0.0001, batch: { id: B3, kind: 'compare', index: 1, total: 2 } }));
+    assert.equal(c2.status, 202, JSON.stringify(c2.j));
+    assert.ok(close(st.begins.at(-1).reserve_usd, est), '화면이 적게 보내도 이번 장 예상보다 적게 잡지 않음');
+    const one = await call('POST', 'images/generate', gen({ model: NB, quality: 'high', confirm_usd: est, reserve_usd: 9 }));
+    assert.equal(one.status, 202, JSON.stringify(one.j));
+    assert.ok(close(st.begins.at(-1).reserve_usd, est), '묶음이 아니면 이번 장 예상만 (화면 값은 안 씀)');
   });
   test('키 값은 응답에도, DB로 보낸 요청에도 없음', { skip }, async () => {
     const all = bodies.join('\n') + '\n' + JSON.stringify(srv.calls);

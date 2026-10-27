@@ -236,6 +236,39 @@ describe('017 — 저장·수정 이력·AI 검수·사용자 평가·비용 통
     await db.query(`insert into public.image_provider_checks (provider, model, ok, code) values ('gemini', 'gemini-3-pro-image', true, 'ok')`);
     await assert.rejects(db.query(`insert into public.image_provider_checks (provider, ok) values ('pexels', true)`), /check/);
   });
+  test("비용 통계의 '확인 필요': 생성(청구액을 넣어 고칠 수 있는 것)과 AI 검수를 따로 셈, 글마다 검수 비용도 (1.5.0 검토)", async () => {
+    // 응답을 못 받은 유료 생성 → 확인 필요 (예상 비용으로 셈)
+    const g = await begin(db, { request_key: KEY(9), post_id: post, est_usd: 0.05 });
+    await failGen(db, g.id, { provider_called: true, error_code: 'timeout', error_message: '응답 없음', cost_status: '확인 필요' });
+    // 결과를 못 받은 유료 검수 → 확인 필요 (예상 비용으로 셈)
+    const r = await val(db, `select public.image_review_begin($1::jsonb)`, [JSON.stringify({ image_id: grand.id, provider: 'gemini', model: 'gemini-3.5-flash-lite', est_usd: 0.003, post_id: post })]);
+    await val(db, `select public.image_review_finish($1, $2::jsonb)`, [r.id, JSON.stringify({ ok: false, error_code: 'timeout', cost_status: '확인 필요' })]);
+    const c = await val(db, `select public.image_costs(null, null, $1)`, [post]);
+    const r6 = (x) => Math.round(Number(x) * 1e6) / 1e6;
+    assert.deepEqual([c.totals.count, c.totals.uncertain, c.totals.reviews, c.totals.review_uncertain], [4, 1, 3, 1], '확인 필요는 생성 1 · 검수 1 따로');
+    assert.equal(r6(c.totals.review_usd), r6(0.0018 + 0.003), '확인 필요 검수는 예상 비용으로 더함');
+    assert.equal(r6(c.totals.usd), r6(0.019 + 0.028 + 0.03 + 0.05 + 0.0018 + 0.003));
+    const bp = c.by_post.find((x) => x.key === post);
+    assert.deepEqual([bp.count, bp.uncertain, bp.reviews], [4, 1, 3]);
+    assert.equal(r6(bp.review_usd), r6(0.0018 + 0.003));
+  });
+});
+
+describe('017 — 비공개 버킷 한 파일 한도 (Supabase storage 흉내)', () => {
+  test('10MB → 25MB 로 넓히기만: 비공개·허용 형식은 그대로, 한도가 없거나 이미 더 크면 안 건드림', async () => {
+    // 테스트용 Postgres 에는 storage 스키마가 없어서, 012 직전에 Supabase 와 같은 이름의 표를 만들어 둠
+    const mk = (d) => d.exec(`create schema if not exists storage;
+      create table if not exists storage.buckets (id text primary key, name text, public boolean, file_size_limit bigint, allowed_mime_types text[]);`);
+    const db = await freshDb({ before: { '012': mk } });
+    assert.deepEqual(await one(db, `select public, file_size_limit::int as lim, allowed_mime_types from storage.buckets where id = 'post-images'`),
+      { public: false, lim: 26214400, allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp'] });
+    await db.exec(`update storage.buckets set file_size_limit = 52428800 where id = 'post-images'`);
+    await db.exec(SQL017);
+    assert.equal(await val(db, `select file_size_limit::int from storage.buckets where id = 'post-images'`), 52428800, '더 큰 한도는 줄이지 않음');
+    await db.exec(`update storage.buckets set file_size_limit = null where id = 'post-images'`);
+    await db.exec(SQL017);
+    assert.equal(await val(db, `select file_size_limit from storage.buckets where id = 'post-images'`), null, '한도 없음은 그대로');
+  });
 });
 
 describe('017 파일 자체', () => {

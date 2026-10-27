@@ -391,7 +391,9 @@ select jsonb_build_object(
       'success', count(*) filter (where src = 'gen' and status = '성공'), 'failed', count(*) filter (where src = 'gen' and status = '실패'),
       'usd', coalesce(sum(usd), 0), 'usd_actual', sum(actual_usd), 'n_actual', count(actual_usd),
       'n_usage', count(*) filter (where src = 'gen' and actual_usd is null and usage_usd is not null),
-      'uncertain', count(*) filter (where cost_status = '확인 필요'),
+      -- 확인 필요: 청구액을 넣어 고칠 수 있는 생성 기록만 (검수는 따로 — 1.5.0 검토)
+      'uncertain', count(*) filter (where src = 'gen' and cost_status = '확인 필요'),
+      'review_uncertain', count(*) filter (where src = 'review' and cost_status = '확인 필요'),
       'fx_missing', count(*) filter (where fx is null and usd > 0),
       'krw', case when count(*) filter (where fx is null and usd > 0) = 0 then coalesce(sum(usd * coalesce(fx, 0)), 0) end,
       'reviews', count(*) filter (where src = 'review'),
@@ -401,8 +403,9 @@ select jsonb_build_object(
       select post_id as key, count(*) filter (where src = 'gen') as count, count(*) filter (where src = 'gen' and cost_status <> '청구 없음') as billed,
         coalesce(sum(usd), 0) as usd,
         case when count(*) filter (where fx is null and usd > 0) = 0 then coalesce(sum(usd * coalesce(fx, 0)), 0) end as krw,
-        count(*) filter (where cost_status = '확인 필요') as uncertain,
-        count(*) filter (where src = 'review') as reviews
+        count(*) filter (where src = 'gen' and cost_status = '확인 필요') as uncertain,
+        count(*) filter (where src = 'review') as reviews,
+        coalesce(sum(usd) filter (where src = 'review'), 0) as review_usd
       from g group by post_id) x), '[]'::jsonb)
 );
 $$;
@@ -442,3 +445,13 @@ grant execute on function
   public.image_review_begin(jsonb), public.image_review_finish(uuid, jsonb), public.image_eval_save(jsonb), public.image_lineage(uuid),
   public.image_costs(date, date, uuid), public.image_usage()
   to service_role;
+
+-- 8 ───────── 비공개 버킷: 한 파일 한도를 10MB → 25MB 로 넓힘 (Gemini 2K 결과가 PNG면 10MB를 넘을 수 있어서 — 1.5.0 검토)
+-- 넓히기만 함: 한도가 없거나(null) 이미 25MB 이상이면 그대로. 공개 여부·허용 형식은 건드리지 않음.
+-- 테스트용 Postgres(PGlite)에는 storage 스키마가 없어서 건너뜀
+do $$ begin
+  if exists (select 1 from information_schema.tables where table_schema = 'storage' and table_name = 'buckets') then
+    update storage.buckets set file_size_limit = 26214400
+      where id = 'post-images' and file_size_limit is not null and file_size_limit < 26214400;
+  end if;
+end $$;

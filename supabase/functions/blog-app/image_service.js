@@ -8,8 +8,9 @@ export const OPENAI_URL = 'https://api.openai.com/v1';
 export const PEXELS_URL = 'https://api.pexels.com/v1';
 export const CF_URL = 'https://api.cloudflare.com/client/v4/accounts';
 export const BUCKET = 'post-images';
-// 저장소 버킷 한도(10MB, 012)와 같게 — 이보다 크면 받아도 저장하지 못함
-export const MAX_AI_BYTES = 10 * 1024 * 1024;
+// 저장소 버킷 한도(012는 10MB, 017에서 25MB로 넓힘)와 같게 — 이보다 크면 받아도 저장하지 못함.
+// Gemini 2K 결과가 PNG면 10MB를 넘을 수 있어서 1.5.0에서 넓힘 (2K PNG 최악 약 17MB). 4K는 앱에서 막음
+export const MAX_AI_BYTES = 25 * 1024 * 1024;
 export const MAX_STOCK_BYTES = 10 * 1024 * 1024;
 
 // 점검용 가짜 모델: 설정의 모델 이름을 이걸로 바꾸면 OpenAI를 부르지 않고 작은 회색 시험 이미지를 돌려줌 (비용 0, 실제 이미지 아님)
@@ -18,7 +19,8 @@ export const TEST_MODEL = 'gf-test-fake';
 const TEST_IMAGE_B64 = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA0JCgsKCA0LCgsODg0PEyAVExISEyccHhcgLikxMC4pLSwzOko+MzZGNywtQFdBRkxOUlNSMj5aYVpQYEpRUk//2wBDAQ4ODhMREyYVFSZPNS01T09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT09PT0//wAARCABaAKADASIAAhEBAxEB/8QAGQABAQEBAQEAAAAAAAAAAAAABAMFAgEG/8QALhAAAQMDAwIFAwQDAAAAAAAAAAIEgQEzsQMRQiExBRITIlEUQZEGcaHwMmHh/8QAFgEBAQEAAAAAAAAAAAAAAAAAAAEC/8QAGBEBAQEBAQAAAAAAAAAAAAAAAAERMUH/2gAMAwEAAhEDEQA/AN4Y3spnIMY3spnJGU3fCSbe8mcFHfCSbe8mcAMM80DPBTG9lM5Ju+ElG9lM5Ju+EgTb3kzgYDb3kzgYBnjG9lM5BjG9lM5Am74STb3kzgo74STb3kzgBhnmgZ4KY3spnJN3wko3spnJN3wkCbe8mcDAbe8mcDAM8Y3spnIMY3spnIE3fCSbe8mcFHfCSbe8mcAMM80DPBTG9lM5Ju+ElG9lM5Ju+EgTb3kzgYY2s+rouEaLfT9ZwrsnfpTp9zr6LxRz7nD70PulGlTtv9q7bdv3qDVxjeymcmF9G90/dovqqV22XTpt/Ixh4kr1UtHul6OrWntrv7V9Qaa74STb3kzgo74STb3kzgBhnmgZ4KY3spnJN3wko3spnJN3wkCbe8mcDAbe8mcDAM8Y3spnIMY3spnIE3fCSbe8mcFHfCSbe8mcAMM80DPBTG9lM5BeNOPpmvnp/lXdKf3Gt7KZyZXj3VywRXqlWpXdNe1eqQXjrwlpRutK17q1l9Vqr1r+xrg295M4GAjPOtdjpPmSdPU6KpvVC6d01ORjeymcgZbFzqazf0XFa1126qoXvXetfjr+aQMb3kzgzqe39Qukp6Jqila0p2rXZPX+a/k0W95M4BDDPNAzwUxvZTOSbvhJRvZTOSbvhIE295M4GA295M4GAZ4xvZTOQYxvZTOQJu+Ek295M4KO+Ek295M4AYZ5oGeCmN7KZyZv6g01V0NLW06e/RV5qV+KdP8An4NJvZTOSTylFUSlVKVpXelaV+4PEWWonWrp6iK+1VN6fgefPITq+FuvV0UK1Wqt6rRTrVHTv/Z+TV0PFWOundLhCK7U3ouvlrT894BKmL0VUS3opVaUTSla1rWvSlDMW9a6dN1a6K07e2vmwST9R4x5NJKV6LJPVSq02rqde1P7/v4oDXjGinDhw/XSu2qqqdPem1fLT+PikVNJveTOD3V0tPR0tLS0k0ShNK0pSh43vJnADDPNAzwUxvZTOSbvhJRvZTOSbvhIE295M4GA295M4GAZ4xvZTOQYxvZTOQJu+Ek295M4KO+Ek295M4AYZ5oGeCmN7KZyTd8JKN7KZyTd8JAm3vJnB1r+GsnCvNqt0VVvWtap9ta1r87dzlveTOBgGKhg001bp0E1r2926sms3spnIMY3spnIIm74STb3kzgo74STb3kzgBhnmgZ4KY3spnJN3wko3spnJN3wkCbe8mcDAbe8mcDAM8Y3spnIMY3spnIE3fCSbe8mcFHfCSbe8mcAMM80DPBTG9lM5Ju+ElG9lM5Ju+EgTb3kzgYDb3kzgYBnjG9lM5BjG9lM5Am74STb3kzgo74STb3kzgBhnmgZ4KY3spnJN3wko3spnJN3wkCbe8mcDAbe8mcDAP/Z';
 
 // 키처럼 생긴 글자는 오류 메시지·기록에 남기지 않음
-export const scrub = (s, n = 300) => String(s ?? '').replace(/sk-[A-Za-z0-9_-]{8,}/g, '[가림]').replace(/[A-Za-z0-9_-]{40,}/g, '[가림]').slice(0, n);
+// Google API 키(AIza… 39자)는 길이 규칙에 안 걸려서 따로 (1.5.0 검토)
+export const scrub = (s, n = 300) => String(s ?? '').replace(/sk-[A-Za-z0-9_-]{8,}/g, '[가림]').replace(/AIza[0-9A-Za-z_-]{30,}/g, '[가림]').replace(/[A-Za-z0-9_-]{40,}/g, '[가림]').slice(0, n);
 
 export function b64ToBytes(b64) {
   const bin = atob(String(b64 || ''));
@@ -599,8 +601,8 @@ async function linkExisting(d, link, image) {
 // ───────── 서버 일꾼 시간 (Supabase Edge Functions: 일꾼 하나가 켜진 뒤 무료 150초·유료 400초까지 일함) ─────────
 // 품질별로 OpenAI 응답을 기다릴 수 있어야 하는 시간 — 이만큼 남아 있어야 시작함 (모자라면 돈이 나가기 전에 '잠깐 뒤에')
 export const NEED_MS = { low: 60000, medium: 75000, high: 100000, xhigh: 115000, max: 115000 };
-// Gemini: 품질 칸 = 해상도 (보통 1K · 높음 2K · 최고 4K). 생각 단계가 있어 넉넉하게 (실서버에서 재 본 값 아님 — 예상)
-export const NEED_MS_GEMINI = { medium: 75000, high: 95000, max: 115000 };
+// Gemini: 품질 칸 = 해상도 (보통 1K · 높음 2K — 4K는 저장 한도 때문에 안 씀). 생각 단계가 있어 넉넉하게 (실서버에서 재 본 값 아님 — 예상)
+export const NEED_MS_GEMINI = { medium: 75000, high: 95000 };
 export const needMsFor = (quality, mode, wallMs, provider) =>
   Math.min(((provider === 'gemini' ? NEED_MS_GEMINI[quality] : NEED_MS[quality]) ?? 115000) + (mode === 'edit' ? 10000 : 0), wallMs - 30000);
 // '잠깐 뒤에 다시'까지 기다릴 초: 일꾼 시간의 절반이 지나기 전이면 그 뒤 (그때부터 새 요청은 새 일꾼이 받는 경우가 많음 —
@@ -762,7 +764,8 @@ export async function saveUploaded(d, a) {
   const desc = String(a.description || (a.slot && a.slot.text) || '').slice(0, 500);
   // 카드뉴스 배경으로 쓴 이미지의 출처를 같이 남김 (Pexels 사진가·AI 여부가 사라지지 않게)
   const bg = kind === 'card' && a.bg ? a.bg : null;
-  const bgNote = bg ? (bg.kind === 'ai' ? 'AI 생성 이미지' : bg.provider === 'pexels' ? `Pexels 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
+  // 1.5.0: 실제 사진을 참고한 AI 합성 배경은 따로 밝힘
+  const bgNote = bg ? (bg.kind === 'ai' ? (bg.composite ? 'AI 합성 이미지 (실제 사진 참고)' : 'AI 생성 이미지') : bg.provider === 'pexels' ? `Pexels 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
   const img = {
     origin_post_id: a.post ? a.post.id : '', origin_slot_index: a.slot ? a.slot.index ?? '' : '', origin_slot_key: a.slot ? a.slot.key : '',
     kind, provider: kind === 'card' ? 'cardnews' : 'upload', purpose: a.purpose || '', description: desc, alt_text: altTextFor(desc),
@@ -770,7 +773,7 @@ export async function saveUploaded(d, a) {
     license: kind === 'card' ? '카드뉴스 (앱에서 직접 만듦)' + (bgNote ? ' · 배경: ' + bgNote : '') : '직접 올림 (사용 권한 확인함)',
     rights_confirmed: kind === 'card' ? !bg || !!bg.rights_confirmed || bg.kind !== 'upload' : true,
     source_url: bg ? bg.source_url || '' : '', author_name: bg ? bg.author_name || '' : '', author_url: bg ? bg.author_url || '' : '',
-    attribution_text: bg ? bg.attribution_text || (bg.kind === 'ai' ? '배경: AI로 만든 예시 이미지' : '') : '',
+    attribution_text: bg ? bg.attribution_text || (bg.kind === 'ai' ? (bg.composite ? '배경: 실제 사진을 참고해 AI로 만든 연출 이미지' : '배경: AI로 만든 예시 이미지') : '') : '',
   };
   const r = await d.rpc('image_save', { img, link, gen: null, fin: null });
   if (r.error) { await d.remove([path]); return { ok: false, status: 500, code: 'server', error: r.error }; }

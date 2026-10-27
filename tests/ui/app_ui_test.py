@@ -70,7 +70,7 @@ RATIO_SIZE = {'16:9': '1536x864', '4:3': '1280x960', '1:1': '1024x1024', '4:5': 
 
 
 KLEIN_SIZE = {'16:9': '1024x576', '4:3': '1024x768', '1:1': '1024x1024', '4:5': '816x1024', '9:16': '576x1024'}
-GEMINI_RES = {'medium': '1K', 'high': '2K', 'max': '4K'}
+GEMINI_RES = {'medium': '1K', 'high': '2K'}  # 1.5.0 검토: 4K는 저장 한도(25MB) 때문에 앱에서 뺐음
 # 1.5.0 모델 등록표 (images.js 와 같은 것만): 공급자, 종료된 모델
 PROVIDER_OF = {'cf-flux-2-klein-4b': 'cloudflare', 'cf-flux-1-schnell': 'cloudflare', 'gpt-image-2.5-flare': 'openai', 'gpt-image-2.5-sunburst': 'openai',
                'gpt-image-2': 'openai', 'gpt-image-1.5': 'openai', 'gpt-image-1-mini': 'openai', 'gpt-image-1': 'openai',
@@ -188,6 +188,7 @@ class Mock:
         self.images, self.slots, self.gens, self.decks, self.polls = [], [], [], {}, {}
         self.min_est = None   # 서버 쪽 예상 비용이 더 크다고 답하게 (estimate_changed 시험)
         self.busy_left = 0    # 이 횟수만큼 server_busy 로 답하게 (서버 일꾼 시간 부족 시험)
+        self.gen_errors = []  # 생성 요청마다 하나씩 꺼냄: None 이면 보통대로, (상태, 본문)이면 그 오류로 답함 (묶음 중간 오류 시험)
         self.gen_missing = False  # 생성 전용 서버(blog-gen)가 아직 없는 것처럼 (Supabase 404)
         self.gen_hits = 0         # 그때 생성 전용 서버로 온 요청 수
         self.gen_boot_error = False  # 생성 전용 서버가 올라가 있지만 켜지지 못하는 것처럼 (Supabase 503 BOOT_ERROR)
@@ -659,6 +660,10 @@ class Mock:
                 return 200, {'generation': dup, 'duplicate': True}
             if any(g['status'] == '생성 중' for g in self.gens):
                 return 409, {'error': 'image_busy'}
+            if self.gen_errors:
+                e = self.gen_errors.pop(0)
+                if e:
+                    return e
             if self.busy_left > 0:
                 self.busy_left -= 1
                 return 503, {'error': 'server_busy', 'retry_after': 1}
@@ -1360,7 +1365,18 @@ def main():
             sec.get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
-            assert body['image_daily_limit'] == 3 and body['image_gen_model'] == 'gpt-image-2.5-flare' and body['image_prices']['image_output_per_m'] == 30, body
+            # 1.5.0 검토: 생성·편집 모델은 바꿨을 때만 보냄 (저장된 모델이 종료돼도 한도·예산 같은 다른 설정은 저장되게)
+            assert body['image_daily_limit'] == 3 and 'image_gen_model' not in body and 'image_edit_model' not in body and body['image_prices']['image_output_per_m'] == 30, body
+            # 바꾼 모델은 보냄 (편집 모델은 안 바꿨으니 안 보냄)
+            page.wait_for_timeout(500)  # 저장 뒤 다시 불러오기가 끝나게
+            sec = page.locator('#sec-images')
+            gen_sel = sec.locator('label', has_text='생성 모델').first.locator('select')
+            gen_sel.select_option('cf-flux-2-klein-4b')
+            expect(gen_sel).to_have_value('cf-flux-2-klein-4b')
+            with page.expect_response(lambda r: r.request.method == 'POST' and r.url.split('?')[0].endswith('/settings')):
+                sec.get_by_role('button', name='저장', exact=True).click()
+            body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
+            assert body['image_gen_model'] == 'cf-flux-2-klein-4b' and 'image_edit_model' not in body, body
             no_overflow('설정 > 이미지')
             shot('16-settings-images')
             html = page.content() + json.dumps(page.evaluate('() => Object.values(localStorage)'), ensure_ascii=False)
@@ -1662,10 +1678,12 @@ def main():
             # Gemini 모드: 품질 칸이 해상도, 크기는 비율·해상도, 공급자 사용량 화면 안내
             mode.select_option('gemini_hq')
             q = sheet.locator('select[name=quality]')
-            assert q.locator('option').all_inner_texts() == ['1K (보통)', '2K (높음)', '4K (최고)'], q.locator('option').all_inner_texts()
+            assert q.locator('option').all_inner_texts() == ['1K (보통)', '2K (높음)'], q.locator('option').all_inner_texts()  # 4K 없음 (저장 한도)
             expect(q).to_have_value('high')
             expect(sheet.locator('.costbox')).to_contain_text('4:3 · 2K')
-            expect(sheet.locator('.costbox')).to_contain_text('예상 $0.13')
+            # 1.5.0 검토 뒤: 장당 $0.134 + 설명 토큰 + 생각·글 출력 약 1,000토큰(추정) × $12/100만 → 약 $0.147 (예전 $0.13x)
+            expect(sheet.locator('.costbox')).to_contain_text('예상 $0.147')
+            expect(sheet.locator('.costbox')).to_contain_text('생각·글 출력 약 1,000토큰(추정)')
             expect(sheet.locator('.costbox')).to_contain_text('Google Gemini API 사용량 화면')
             expect(sheet.locator('.costbox')).to_contain_text('계산 근거:')
             no_overflow('AI 만들기 창 (1.5.0)')
@@ -1867,7 +1885,7 @@ def main():
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
             assert body['image_modes']['gemini_hq'] == {'model': 'gemini-nano-banana-2.1', 'quality': 'high'}, body['image_modes']
-            assert body['image_modes']['free_draft']['model'] == 'cf-flux-2-klein-4b' and body['image_gen_model'] == 'gpt-image-2.5-flare', '다른 모드·기본 모델은 그대로'
+            assert body['image_modes']['free_draft']['model'] == 'cf-flux-2-klein-4b' and 'image_gen_model' not in body, '다른 모드는 그대로, 안 바꾼 기본 모델은 안 보냄'
             assert body['image_review_model'] == 'gemini-3.5-flash-lite' and body['image_request_cap_usd'] == 0.5
             assert 'gemini-nano-banana-2.1' in body['image_prices'] and 'gemini-2.5-flash-image' not in body['image_prices'], list(body['image_prices'])
             html = page.content() + json.dumps(page.evaluate('() => Object.values(localStorage)'), ensure_ascii=False)
@@ -1875,6 +1893,96 @@ def main():
             no_overflow('설정 > 이미지 (1.5.0)')
             shot('34-settings-images-150')
         check('1.5.0 설정 > 이미지: 공급자마다 키·연결 확인(만들지 않고)·실제 생성 기록을 따로, 모드·검수 모델·한 번 상한 저장, 키는 화면에 없음', t_studio_settings_150)
+
+        # 1.5.0 검토 뒤: 후보 묶음의 두 번째 요청이 오류면 — 만든 장은 고를 수 있게 남기고, 멈춘 이유·보내지 않은 장을 알려줌 (세 번째는 안 보냄)
+        def t_studio_batch_stop():
+            reload_keys()
+            open_p8()
+            open_ai(0)
+            sheet.get_by_role('button', name='3장 비교').click()
+            go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ \(3장\) · 만들기'))
+            expect(go).to_be_enabled()
+            mock.gen_errors = [None, (429, {'error': 'image_budget'})]
+            n0 = len(gen_bodies())
+            try:
+                go.click()
+                expect(sheet).to_contain_text('3장 중 1장만 만들었어', timeout=40000)
+            finally:
+                mock.gen_errors = []
+            expect(sheet).to_contain_text('남은 1장은 보내지 않았어 (그 장은 돈이 안 나가)')
+            expect(sheet).to_contain_text('이번 달 이미지 예산을 넘게 돼서 멈췄어')
+            expect(sheet.get_by_role('button', name=re.compile('이걸로 쓰기'))).to_have_count(1)
+            reqs = gen_bodies()[n0:]
+            assert [r['batch']['index'] for r in reqs] == [0, 1] and reqs[0]['batch']['id'] == reqs[1]['batch']['id'], reqs  # 세 번째 장은 보내지 않음
+            no_overflow('후보 묶음 중간에 멈춤')
+            sheet_shot('35-studio-batch-stop')
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            # 두 번째 장에서 서버가 바쁘면(일꾼 시간 부족 503): 진행 창이 열려 있는 동안 기다렸다가 같은 요청 번호로 다시 보내고 묶음을 끝까지
+            open_p8()
+            open_ai(0)
+            sheet.get_by_role('button', name='2장 비교').click()
+            go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ \(2장\) · 만들기'))
+            expect(go).to_be_enabled()
+            mock.gen_errors = [None, (503, {'error': 'server_busy', 'retry_after': 1})]
+            n0 = len(gen_bodies())
+            try:
+                go.click()
+                expect(sheet).to_contain_text('후보 2장', timeout=40000)
+            finally:
+                mock.gen_errors = []
+            reqs = gen_bodies()[n0:]
+            assert [r['batch']['index'] for r in reqs] == [0, 1, 1] and reqs[1]['request_key'] == reqs[2]['request_key'], reqs  # 바쁨 뒤에는 같은 번호로 한 번 더
+            expect(sheet.get_by_role('button', name=re.compile('이걸로 쓰기'))).to_have_count(2)
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+        check('1.5.0 후보 묶음 중간 오류: 만든 장은 고를 수 있게, 멈춘 이유와 보내지 않은 장(돈 안 나감)을 알려주고 다음 장은 안 보냄. 서버가 바쁘면 진행 창에서 기다렸다 같은 번호로', t_studio_batch_stop)
+
+        # 1.5.0 검토 뒤: '다시 만들기'는 그 이미지의 참고 사진(역할)·이미지 종류를 되살림. 이 글 이미지에서 못 찾은 참고 사진은 빠졌다고 알려줌
+        def t_studio_regen_restore():
+            close_sheet()
+            # 진짜 제품 사진(직접 올린 사진)을 '대상 모양 유지'로 넣어 만든 AI 합성 이미지 (앞 시험에서 만든 것)
+            comp = next(i for i in mock.images if i['kind'] == 'ai' and i.get('composite') and not i.get('deleted_at')
+                        and any(r['role'] == 'subject' and r.get('kind') == 'upload' for r in (i.get('ref_images') or [])))
+            up_id = next(r['image_id'] for r in comp['ref_images'] if r['role'] == 'subject' and r.get('kind') == 'upload')
+            comp['ref_images'] = [r for r in comp['ref_images'] if r['image_id'] == up_id] + [{'image_id': '00000000-0000-4000-8000-0000000000aa', 'role': 'style', 'kind': 'upload'}]
+            comp['preset'] = 'product_still'
+            key1 = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])[1]['key']  # 구성품 자리 (실제 상품이 보여야 하는 자리)
+            mock.link(P8, key1, comp['id'])
+            reload_keys()
+            open_p8()
+            page.locator('section.studio .slot').nth(1).get_by_role('button', name='다시 만들기').click()
+            roles = sheet.locator('select[aria-label="참고 사진 역할"]')
+            expect(roles).to_have_count(1)
+            expect(roles).to_have_value('subject')
+            expect(sheet.locator('select[name=preset]')).to_have_value('product_still')
+            expect(sheet).to_contain_text('전에 쓴 참고 사진 1장은 이 글 이미지에서 찾지 못해서 빠졌어')
+            expect(sheet).to_contain_text("결과는 'AI 합성'으로 표시되고")
+            go = sheet.get_by_role('button', name=re.compile(r'· 만들기$'))
+            expect(go).to_be_enabled()
+            n0 = len(gen_bodies())
+            go.click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=20000)
+            req = gen_bodies()[n0]
+            assert req['refs'] == [{'image_id': up_id, 'role': 'subject'}] and req['preset'] == 'product_still' and 'generic_ok' not in req, req
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+        check("1.5.0 다시 만들기: 그 이미지의 참고 사진(대상 모양 유지)·이미지 종류를 되살리고, 못 찾은 참고 사진은 빠졌다고 알려줌", t_studio_regen_restore)
+
+        # 1.5.0 검토 뒤: 설정의 검수 모델이 '끔'이고 무료(Cloudflare) 키가 없으면, 검수 창은 유료 모델을 미리 고르지 않음
+        def t_studio_review_no_paid_default():
+            reload_keys(cloudflare=False)
+            open_p8()
+            page.locator('section.studio .slot').nth(0).get_by_role('button', name='미리보기·내려받기').click()
+            sheet.get_by_role('button', name='AI 검수 (참고용)').click()
+            sel = sheet.get_by_label('검수할 AI')
+            expect(sel).to_have_value('')
+            expect(sheet.get_by_role('button', name='AI 검수 받기')).to_be_disabled()
+            n_rv = len([c for c in mock.calls if c['path'].endswith('/review')])
+            sel.select_option('gemini-3.5-flash-lite')
+            expect(sheet).to_contain_text('예상 $')
+            expect(sheet.get_by_role('button', name='AI 검수 받기')).to_be_enabled()
+            assert len([c for c in mock.calls if c['path'].endswith('/review')]) == n_rv, '고르기만 해서는 검수를 보내지 않음'
+            sheet.get_by_role('button', name='닫기').first.click()
+            reload_keys()
+        check('1.5.0 AI 검수 창: 설정이 끔이고 무료 키가 없으면 유료 모델을 미리 고르지 않음 (고른 뒤 예상 비용을 보고 눌러야 시작)', t_studio_review_no_paid_default)
 
         # 검색 노출 점검 (1.3.0 → 1.3.1): 앱 권장 기준·내 기록·실측 데이터 없음 구분, 주력 주제는 게시한 글만·키워드·제목 근거, 하루 발행량은 고른 값 그대로
         def t_seo_helper():

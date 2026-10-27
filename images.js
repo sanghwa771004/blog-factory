@@ -481,8 +481,10 @@ export function recommendPreset({ post, slot, text, purpose } = {}) {
 // ── 원고에서 읽는 맥락 (있을 때만) ──
 // [찾을 말, 한국어, 영어, 한국을 뜻하는지]
 const SEASON_AFTER = '(?=철|맞이|날|시즌|에|이|의|은|엔|을|도|용|\\s|$|[,.·)!?~])';
+// '봄'은 '써 봄'·'해 봄'처럼 말끝에도 쓰여서, 뒤에 계절을 뜻하는 말이 붙을 때만 (1.5.0 검토)
+const SPRING_AFTER = '(?=철|맞이|날|시즌|나들이|에|이|의|은|엔|을|도|용|과|·|,|\\s(?:시즌|철|나들이|날씨|맞이|코디|대청소|이사|신상|분위기|풍경|햇살|꽃|여행))';
 const CTX_SEASON = [
-  [new RegExp(`(?<![가-힣])봄${SEASON_AFTER}|벚꽃|꽃샘추위`), '봄', 'spring'],
+  [new RegExp(`(?<![가-힣])봄${SPRING_AFTER}|올봄|초봄|늦봄|이른\\s?봄|벚꽃|꽃샘추위`), '봄', 'spring'],
   [new RegExp(`(?<![가-힣])여름${SEASON_AFTER}|한여름|폭염|무더위|열대야`), '여름', 'summer'],
   [new RegExp(`(?<![가-힣])가을${SEASON_AFTER}|단풍`), '가을', 'autumn'],
   [new RegExp(`(?<![가-힣])겨울${SEASON_AFTER}|한겨울|한파|첫눈|동파`), '겨울', 'winter'],
@@ -493,13 +495,15 @@ const CTX_SEASON = [
   [/연말|송년|새해|신년/, '연말연시', 'year-end holidays'],
   [/환절기/, '환절기', 'change of seasons'],
 ];
+// 앞에 다른 글자가 붙은 말('대비가 오히려'·'준비가')·눈을 뜻하는 말('눈길을 끄는'·'눈이 오래')은 날씨로 안 봄 (1.5.0 검토)
+const COME = '(?:오(?:는|면|고|던|니|기|다|자|길|네|겠)|와|온|올\\s?때|내리)';
 const CTX_WEATHER = [
-  [/비\s?(오는|내리는|올\s?때|소식)|비가\s?(오|내리)|빗(물|방울|길|소리)|폭우|소나기/, '비', 'rain'],
-  [/눈\s?(오는|내리는|올\s?때)|눈이\s?(오|내리|쌓)|폭설|함박눈|첫눈|눈길|눈사람/, '눈', 'snow'],
+  [new RegExp(`(?<![가-힣])비\\s?(?:오는|내리는|올\\s?때|소식)|(?<![가-힣])비가\\s?${COME}|빗(?:물|방울|소리)|빗길|폭우|소나기`), '비', 'rain'],
+  [new RegExp(`(?<![가-힣])눈\\s?(?:오는|내리는|올\\s?때)|(?<![가-힣])눈이\\s?(?:${COME}|쌓)|폭설|함박눈|첫눈|눈\\s?덮인|설경|눈사람`), '눈', 'snow'],
   [/맑은\s?날|화창/, '맑음', 'clear sky'],
   [/흐린\s?날/, '흐림', 'overcast sky'],
   [/미세먼지|황사/, '미세먼지', 'hazy air'],
-  [/습한|습기|눅눅/, '습함', 'humid air'],
+  [/(?<![가-힣])(?:습한|눅눅한|후텁지근한)\s?(?:날|날씨|여름)/, '습함', 'humid air'],   // '습기'·'제습기'는 날씨가 아님 — 날씨로 말할 때만
   [/추운\s?날|영하|강추위|쌀쌀/, '추운 날씨', 'cold weather'],
   [/더운\s?날|무더운/, '더운 날씨', 'hot weather'],
 ];
@@ -510,7 +514,7 @@ const CTX_TIME = [
   [/오후/, '오후', 'afternoon'],
   [/해\s?질\s?녘|노을|석양/, '해 질 녘', 'sunset'],
   [/저녁/, '저녁', 'evening'],
-  [/(?<![가-힣])밤(에|중|새|늦게|시간|사이)?(?![가-힣])|야간|한밤/, '밤', 'night'],
+  [/(?<![가-힣])밤(?:에|중|새|늦게|시간|사이|마다)(?![가-힣])|(?:늦은|깊은)\s?밤|야간|한밤/, '밤', 'night'],   // '밤 껍질'(먹는 밤)은 아님
 ];
 const CTX_PLACE = [
   [/원룸/, '원룸', 'a small one-room studio apartment', true],
@@ -526,8 +530,8 @@ const CTX_PLACE = [
   [/현관|신발장/, '현관', 'an entryway'],
   [/창가|창문|창틀|창밖/, '창가', 'by a window'],
   [/책상/, '책상', 'at a desk'],
-  [/사무실|회사|오피스(?!텔)/, '사무실', 'an office'],
-  [/카페/, '카페', 'a cafe'],
+  [/사무실|회사\s?(?:책상|자리|사무실)|회사에서|오피스(?!텔)/, '사무실', 'an office'],   // 'A회사 제품'은 장소가 아님
+  [/카페(?!인)/, '카페', 'a cafe'],   // 카페인은 아님
   [/식당|음식점/, '식당', 'a restaurant'],
   [/편의점/, '편의점', 'a convenience store', true],
   [/대형\s?마트|(?<![가-힣])마트/, '마트', 'a supermarket'],
@@ -537,14 +541,14 @@ const CTX_PLACE = [
   [/길거리|골목|거리\s?(풍경|에서)/, '거리', 'a street'],
   [/공원/, '공원', 'a park'],
   [/캠핑/, '캠핑장', 'a campsite'],
-  [/차\s?안|차량\s?(안|내부)|운전석|자동차\s?안/, '차 안', 'inside a car'],
+  [/(?<![가-힣])(?:차|차량|자동차)\s?(?:안|내부)(?:에서|에|쪽)?(?![가-힣])|운전석/, '차 안', 'inside a car'],   // 주차 안내·자동차 안전은 아님
   [/주차장/, '주차장', 'a parking lot'],
   [/교실|학교/, '학교', 'a school'],
   [/도서관/, '도서관', 'a library'],
   [/헬스장|체육관/, '헬스장', 'a gym'],
   [/매장|진열대/, '매장', 'a store'],
 ];
-const CTX_KOREA = /한국|국내|우리나라|서울|부산|대구|인천|광주|대전|울산|제주/;
+const CTX_KOREA = /한국|국내|우리나라|(?<![가-힣])(?:서울|부산(?![물하])|대구(?![탕살알포지])|인천|광주|대전(?!쟁)|울산|제주)/;   // 부산물·대구탕은 아님
 const hitsOf = (list, text) => {
   const out = [];
   for (const [re, ko, en, kr] of list) if (re.test(text) && !out.some((x) => x.ko === ko)) out.push({ ko, en, kr: !!kr });
@@ -553,7 +557,7 @@ const hitsOf = (list, text) => {
 // 원고에서 계절·날씨·시간·장소를 읽음. 장소는 사진 자리 설명·소제목·제목에서만(앞뒤 문장은 다른 이야기일 때가 많아서 뺌),
 // 계절·날씨·시간은 가장 가까운 곳(사진 자리 → 소제목 → 제목 → 앞뒤 문장) 한 곳에서. from = 어디서 읽었는지
 export function readContext({ post, slot, text } = {}) {
-  const sceneText = stripOwnMark(text != null && String(text).trim() ? text : (slot && slot.text) || '');
+  const sceneText = stripSlotMarks(text != null && String(text).trim() ? text : (slot && slot.text) || '');
   const src = [
     ['사진 자리', sceneText],
     ['소제목', (slot && slot.heading) || ''],
@@ -637,26 +641,31 @@ export const SCENE_LABELS = {
 // 다른 비율로 잘려서 쓰이는 용도: 대표 이미지는 목록 썸네일(정사각형에 가깝게)로 잘리는 경우가 많아서 주인공을 가운데 쪽에
 const CROP_NOTE = { blog_cover: '목록 썸네일로 정사각형에 가깝게 잘려도 주인공이 보이게, 주인공은 가운데 60% 안에' };
 /** @param {{ post?: any, slot?: any, text?: string, style?: string, preset?: string, purpose?: string, ratio?: string, extra?: string, mode?: string, hide?: any[], refs?: any[], channel?: string, size?: string, overrides?: any }} [o] */
+const SCENE_NONE = /^(없음|없어|빼|-|—|x|none)$/i;
 export function buildScene({ post, slot, text, style, preset, purpose, ratio, extra, mode, hide, refs, channel, size, overrides } = {}) {
   const pid = presetOf(preset || style);
   const P = PRESETS[pid];
   const pu = PURPOSES[purpose] ? purpose : 'blog_body';
   const r = ratioOf(pu, ratio);
   const sc = (s, n) => clip(sanitizeContext(s, hide), n);
-  const sceneText = clip(stripOwnMark(text != null && String(text).trim() ? text : (slot && slot.text) || ''), 300);
+  const sceneText = clip(stripSlotMarks(text != null && String(text).trim() ? text : (slot && slot.text) || ''), 300);
   const c = readContext({ post, slot, text: sceneText });
   const o = overrides && typeof overrides === 'object' ? overrides : {};
   const has = (k) => typeof o[k] === 'string' && o[k].trim() !== '';
-  const line = (k, d, n = 300) => (has(k) ? clip(o[k], n) : d);
-  const list = (k, d) => (Array.isArray(o[k]) ? o[k].map((x) => clip(x, 120)).filter(Boolean).slice(0, 8) : d);
+  // 칸을 비우면 기본값, '없음'(또는 '-')이라고 쓰면 그 칸을 뺌 — 원고에서 잘못 읽은 계절·장소를 지울 수 있게 (1.5.0 검토). 주 피사체는 못 뺌
+  const none = (k) => has(k) && k !== 'subject' && SCENE_NONE.test(o[k].trim());
+  const line = (k, d, n = 300) => (none(k) ? '' : has(k) ? clip(o[k], n) : d);
+  const list = (k, d) => (Array.isArray(o[k]) ? (o[k].length === 1 && SCENE_NONE.test(String(o[k][0]).trim()) ? [] : o[k].map((x) => clip(x, 120)).filter(Boolean).slice(0, 8)) : d);
   const heading = slot && slot.heading ? sc(slot.heading, 120) : '';
   const isEdit = mode === 'edit';
   const timeItems = [...c.season.items, ...c.weather.items, ...c.time.items];
   const roleList = (refs || []).filter((x) => x && REF_ROLES[x.role]).slice(0, 14).map((x) => ({ role: x.role, image_id: x.image_id || '', label: clip(x.label || '', 80) }));
   const notes = [];
   if (!isEdit) {
-    if (!has('setting') && !c.place.items.length) notes.push('장소: 원고에 없어서 정하지 않음 (지어내지 않음)');
-    if (!has('time') && !timeItems.length) notes.push('계절·날씨·시간: 원고에 없어서 넣지 않음');
+    if (none('setting')) notes.push('장소: 직접 뺐어');
+    else if (!has('setting') && !c.place.items.length) notes.push('장소: 원고에 없어서 정하지 않음 (지어내지 않음)');
+    if (none('time')) notes.push('계절·날씨·시간: 직접 뺐어');
+    else if (!has('time') && !timeItems.length) notes.push('계절·날씨·시간: 원고에 없어서 넣지 않음');
     if (!c.korea && !(o.locale === 'KR')) notes.push('지역: 원고에 한국을 뜻하는 말이 없어서 나라를 정하지 않음');
   }
   const composition = [P.composition, CROP_NOTE[pu]].filter(Boolean).join('. ');
@@ -666,7 +675,7 @@ export function buildScene({ post, slot, text, style, preset, purpose, ratio, ex
     subject: line('subject', sceneText),
     setting: line('setting', c.place.items.map((x) => x.ko).join(' · '), 200),
     setting_en: has('setting') ? '' : c.place.items.map((x) => x.en).join(', '),
-    setting_from: has('setting') ? '직접 적음' : c.place.from,
+    setting_from: none('setting') ? '직접 뺌' : has('setting') ? '직접 적음' : c.place.from,
     time: line('time', timeItems.map((x) => x.ko).join(' · '), 120),
     time_en: has('time') ? '' : timeItems.map((x) => x.en).join(', '),
     camera: line('camera', P.camera, 200), light: line('light', P.light, 200), color: line('color', P.color, 200),
@@ -703,11 +712,11 @@ export function promptFromScene(s) {
     L.push(s.setting ? `Setting (from the post, Korean): ${s.setting}${s.setting_en ? ` (${s.setting_en})` : ''}` : 'Setting: the post names no specific place — keep the surroundings simple and plausible for the subject.');
     L.push(s.time ? `Season, weather and time (from the post, Korean): ${s.time}${s.time_en ? ` (${s.time_en})` : ''}` : 'Season, weather and time: not stated in the post — do not add a particular season, weather or time of day.');
     L.push(s.locale === 'KR' ? 'Location: South Korea, as the post implies — everyday Korean surroundings.' : 'Location: not stated — do not add a particular country, city or culture-specific details.');
-    L.push(`Camera (Korean): ${s.camera}`);
-    L.push(`Light (Korean): ${s.light}`);
-    L.push(`Color (Korean): ${s.color}`);
-    L.push(`Materials and texture (Korean): ${s.materials}`);
-    L.push(`Composition (Korean): ${s.composition}`);
+    if (s.camera) L.push(`Camera (Korean): ${s.camera}`);
+    if (s.light) L.push(`Light (Korean): ${s.light}`);
+    if (s.color) L.push(`Color (Korean): ${s.color}`);
+    if (s.materials) L.push(`Materials and texture (Korean): ${s.materials}`);
+    if (s.composition) L.push(`Composition (Korean): ${s.composition}`);
   }
   L.push(`Format: ${s.platform.label} — aspect ratio ${s.platform.ratio}${s.platform.size ? ` (${s.platform.size})` : ''}.`);
   if (s.must_show.length) { L.push('Must show:'); for (const x of s.must_show) L.push('- ' + x); }
@@ -776,25 +785,31 @@ const OWN_PHOTO = /직접\s*(찍|촬영)/;
 export const isOwnPhotoSlot = (text) => OWN_PHOTO.test(String(text || ''));
 // '(직접 찍기)' 표시만 뺀 설명 (검색어·대체 텍스트·AI에 보내는 장면 설명에는 표시를 안 넣음)
 export const stripOwnMark = (text) => String(text || '').replace(/\(\s*직접\s*(찍기|촬영)\s*\)\s*/g, '').trim();
+// 대체 텍스트·검색어·AI에 보내는 장면 설명에서는 '(제품 사진)' 표시도 뺌 (1.5.0 — 자동 작가가 다는 표시. 판단에는 표시를 남긴 글을 씀)
+export const stripSlotMarks = (text) => stripOwnMark(text).replace(/\(\s*제품\s*사진\s*\)\s*/g, '').trim();
 export function slotRisk(text) {
   if (isOwnPhotoSlot(text)) return { real: true, word: '직접 찍기', msg: "'직접 찍기'로 표시한 자리야. 네가 찍은 사진이 들어가야 다른 글과 달라져 — 휴대폰으로 찍어서 '파일 올리기'로 넣어줘." };
   const m = firstHit(REAL_NEEDED, String(text || ''));
   return m ? { real: true, word: m[1], msg: `'${m[1]}'처럼 실제 상품·화면이 보여야 하는 자리야. AI로 만들면 실제와 다르게 보일 수 있어서, 직접 찍은 사진이나 쓸 수 있는 공식 이미지를 권해.` } : { real: false };
 }
+// 진짜 사진으로 보는 이미지 종류 (직접 올린 사진·Pexels 사진). AI·카드뉴스는 아님
+export const REAL_KINDS = ['upload', 'stock'];
 // AI로 만들어도 되는 자리인지 (1.5.0 — 서버와 화면이 같은 판단)
 // slotText: 본문의 사진 자리 설명 (사용자가 고친 설명이 아니라 본문 그대로 — '(직접 찍기)' 표시를 지워서 넘어가지 않게)
 // text: 고친 설명·추가 요청, refs: [{role}] 참고 이미지, genericOk: '특정 제품 모양이 꼭 필요하지 않아 — 일반 장면으로' 확인
 // - '직접 찍기' 자리: 막음 (실제로 해본 것처럼 보이는 사진을 AI로 만들지 않음 — 참고 사진을 넣어도 마찬가지)
 // - 실제 상품·화면이 보여야 하는 자리: 대상 모양 유지 참고 사진(진짜 제품 사진)이 있으면 'AI 합성'으로 만들고,
 //   없으면 사용자가 '일반 장면이어도 돼'라고 확인했을 때만 (그때는 특정 제품처럼 보이지 않게 만듦). 몰래 일반 물건으로 바꿔 그리지 않음
-/** @param {string} slotText @param {{ text?: string, refs?: any[], genericOk?: boolean }} [o] */
-export function aiGate(slotText, { text = '', refs = [], genericOk = false } = {}) {
+// refs: [{role, kind}] — kind 가 upload·stock(진짜 사진)인 '대상 모양 유지'만 셈 (AI 이미지를 대상으로 넣어도 실제 제품 사진이 아님 — 1.5.0 검토)
+// baseComposite: 고치는 이미지가 이미 'AI 합성(실제 사진 참고)'이면 그 합성을 이어서 고치는 것으로 봄
+/** @param {string} slotText @param {{ text?: string, refs?: any[], genericOk?: boolean, baseComposite?: boolean }} [o] */
+export function aiGate(slotText, { text = '', refs = [], genericOk = false, baseComposite = false } = {}) {
   if (isOwnPhotoSlot(slotText)) {
     return { ok: false, code: 'own_photo_slot', msg: "'직접 찍기' 자리는 네가 찍은 사진만 넣어 (AI로 만들면 실제로 해본 것처럼 보여서). 휴대폰으로 찍어서 '파일 올리기'로 넣거나, 본문에서 '(직접 찍기)'를 지워 일반 사진 자리로 바꿔줘." };
   }
   const r = slotRisk(`${stripOwnMark(slotText)} ${text || ''}`);
   if (!r.real) return { ok: true };
-  if ((refs || []).some((x) => x && x.role === 'subject')) return { ok: true, composite: true, word: r.word };
+  if (baseComposite || (refs || []).some((x) => x && x.role === 'subject' && REAL_KINDS.includes(String(x.kind || '')))) return { ok: true, composite: true, word: r.word };
   if (genericOk) return { ok: true, generic: true, word: r.word };
   return { ok: false, code: 'real_photo_needed', word: r.word, msg: `'${r.word}'처럼 실제 제품 모양이 보여야 하는 자리야. 진짜 제품 사진을 '참고 사진(대상 모양 유지)'으로 넣거나, 직접 찍은 사진을 올려줘. 특정 제품이 아니어도 되면 '일반 장면으로 만들게'를 체크해줘.` };
 }
@@ -879,16 +894,18 @@ const MODEL_FAMILIES = [
   { id: 'gpt-image-1', re: /^gpt-image-1(-\d{4}-\d{2}-\d{2})?$/, flexible: false, qualities: Q3, deprecated: true, retired: '2026-10-23', edit: true, refsMax: 16, label: 'GPT Image 1 (종료됨)', checked: '2026-10-27',
     prices: { image_output_per_m: 40, image_input_per_m: 10, text_input_per_m: 5 },
     perImage: per({ low: 0.011, medium: 0.042, high: 0.167 }, { low: 0.016, medium: 0.063, high: 0.25 }), url: 'https://developers.openai.com/api/docs/models/gpt-image-1' },
-  // Google Gemini API — 비율(aspectRatio)과 해상도(imageSize)로 고름. 품질 칸: 보통=1K · 높음=2K · 최고=4K. 생각(thinking) 토큰은 글 출력 값으로 청구됨
+  // Google Gemini API — 비율(aspectRatio)과 해상도(imageSize)로 고름. 품질 칸: 보통=1K · 높음=2K. 생각(thinking) 토큰은 글 출력 값으로 청구됨
+  // 4K 는 앱에서 뺐어: 결과 형식을 고를 수 없고(generateContent 는 outputMimeType 을 받지 않음 — SDK 문서) PNG 이면 4K 한 장이 저장 한도(25MB)를 넘을 수 있어서.
+  // 넘으면 돈은 나가고 저장은 못 하니까, 만들기 전에 막는 쪽으로 (가격표에는 4K 값을 남겨 둠)
   // 3 Pro Image (GA, preview 이름은 2026-06-25 종료): 참고 사진은 물건 6장(정확하게)·인물 5장·스타일 3장까지 → 앱은 6장까지만
   { id: 'gemini-3-pro-image', re: /^gemini-3-pro-image$/, provider: 'gemini', aspect: true, aspects: GEMINI_ASPECTS, flexible: false,
-    qualities: ['medium', 'high', 'max'], imageSizes: { medium: '1K', high: '2K', max: '4K' }, qualityLabels: { medium: '1K (보통)', high: '2K (높음)', max: '4K (최고)' },
+    qualities: ['medium', 'high'], imageSizes: { medium: '1K', high: '2K' }, qualityLabels: { medium: '1K (보통)', high: '2K (높음)' },
     edit: true, refsMax: 6, label: 'Gemini 3 Pro Image', checked: '2026-10-27', maxInlineBytes: 18 * 1024 * 1024,
     gemini: { text_input_per_m: 2, image_input_per_image: 0.0011, image_output_per_m: 120, text_output_per_m: 12, per_image: { '1K': 0.134, '2K': 0.134, '4K': 0.24 } },
     url: 'https://ai.google.dev/gemini-api/docs/image-generation' },
   // Nano Banana 2.1 (2026-10-06, Google이 새 프로젝트에 권함): 참고 사진은 물건 10장·인물 4장까지. 넣는 이미지 토큰 수는 문서로 확인 못 해서 넉넉히 1,120토큰으로 셈
   { id: 'gemini-nano-banana-2.1', re: /^gemini-nano-banana-2\.1$/, provider: 'gemini', aspect: true, aspects: GEMINI_ASPECTS, flexible: false,
-    qualities: ['medium', 'high', 'max'], imageSizes: { medium: '1K', high: '2K', max: '4K' }, qualityLabels: { medium: '1K (보통)', high: '2K (높음)', max: '4K (최고)' },
+    qualities: ['medium', 'high'], imageSizes: { medium: '1K', high: '2K' }, qualityLabels: { medium: '1K (보통)', high: '2K (높음)' },
     edit: true, refsMax: 10, label: 'Gemini Nano Banana 2.1', checked: '2026-10-27', maxInlineBytes: 18 * 1024 * 1024,
     gemini: { text_input_per_m: 1.5, image_input_per_image: 0.00168, image_output_per_m: 30, text_output_per_m: 7.5, per_image: { '1K': 0.0336, '2K': 0.0504, '4K': 0.113 } },
     url: 'https://ai.google.dev/gemini-api/docs/image-generation' },
@@ -1017,6 +1034,8 @@ export function geminiPrices(caps, prices) {
   };
 }
 const inImages = (mode, refs) => Math.max(0, Number(refs) || 0) + (mode === 'edit' ? 1 : 0);
+// Gemini 이미지 모델은 생각(thinking)을 늘 해서 글 출력 값으로 청구되는 토큰이 더 있음 — 양은 문서에 없어서 넉넉히 1,000토큰으로 셈 (예상치, 1.5.0 검토)
+export const GEMINI_THINK_TOKENS_EST = 1000;
 /** @param {{ quality?: string, size?: string, promptChars?: number, promptTokens?: number, mode?: string, prices?: any, model?: string, refs?: number }} [o] */
 export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode = 'generate', prices, model, refs = 0 } = {}) {
   const tokens = Math.max(0, promptTokens != null ? promptTokens : promptChars); // promptChars 만 주면 글자 수 = 토큰 수로 아주 넉넉히
@@ -1030,7 +1049,7 @@ export function estimateUsd({ quality, size, promptChars = 0, promptTokens, mode
     const sz = caps.imageSizes ? caps.imageSizes[quality] : '';
     const out = g && g.per_image[sz];
     if (out == null) return null;
-    return roundUsd(out + (tokens * g.text_input_per_m) / 1e6 + nIn * g.image_input_per_image);
+    return roundUsd(out + (tokens * g.text_input_per_m) / 1e6 + nIn * g.image_input_per_image + (GEMINI_THINK_TOKENS_EST * g.text_output_per_m) / 1e6);
   }
   if (!caps || caps.settingsPrices) {
     const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
@@ -1059,7 +1078,7 @@ export function costBasis({ quality, size, promptTokens = 0, mode = 'generate', 
   if (caps && caps.provider === 'gemini') {
     const g = geminiPrices(caps, prices);
     const sz = caps.imageSizes ? caps.imageSizes[quality] : '';
-    return `이미지 1장 ${n$(g.per_image[sz] ?? 0)}${sz ? ` (${sz})` : ''} + 설명 약 ${tok}토큰 × $${g.text_input_per_m}/100만${nIn ? ` + 넣는 이미지 ${nIn}장 × ${n$(g.image_input_per_image)}` : ''} — Gemini 가격 페이지 ${g.checked_at} 확인값`;
+    return `이미지 1장 ${n$(g.per_image[sz] ?? 0)}${sz ? ` (${sz})` : ''} + 설명 약 ${tok}토큰 × $${g.text_input_per_m}/100만${nIn ? ` + 넣는 이미지 ${nIn}장 × ${n$(g.image_input_per_image)}` : ''} + 생각·글 출력 약 ${GEMINI_THINK_TOKENS_EST.toLocaleString('en-US')}토큰(추정) × $${g.text_output_per_m}/100만 — Gemini 가격 페이지 ${g.checked_at} 확인값`;
   }
   if (!caps || caps.settingsPrices) {
     const t = OUTPUT_TOKENS[size] && OUTPUT_TOKENS[size][quality];
@@ -1082,8 +1101,9 @@ export function usageUsd(usage, prices, model) {
     if (caps.provider === 'gemini') {
       const g = geminiPrices(caps, prices);
       const det = Array.isArray(usage.candidatesTokensDetails) ? usage.candidatesTokensDetails : [];
-      const outImg = det.filter((x) => x && x.modality === 'IMAGE').reduce((a, x) => a + n(x.tokenCount), 0);
       const outAll = n(usage.candidatesTokenCount);
+      // 출력 토큰을 이미지·글로 나눈 내역이 없으면 전부 이미지 값으로 (더 비싼 쪽 — 예산을 적게 세지 않게, 1.5.0 검토)
+      const outImg = det.length ? det.filter((x) => x && x.modality === 'IMAGE').reduce((a, x) => a + n(x.tokenCount), 0) : outAll;
       const outText = Math.max(0, outAll - outImg) + n(usage.thoughtsTokenCount);
       const inTok = n(usage.promptTokenCount);
       if (!inTok && !outAll) return null;
@@ -1320,7 +1340,7 @@ export function captionHint(img) {
   if (img.kind === 'upload' && img.source_type === 'external') return '사진: 외부 제공 이미지';
   return '';
 }
-export const altTextFor = (text) => clip(stripOwnMark(text).replace(/\s*(사진|이미지)$/, ''), 120);
+export const altTextFor = (text) => clip(stripSlotMarks(text).replace(/\s*(사진|이미지)$/, ''), 120);
 // 내려받을 파일 이름: 본문 자리는 '키워드-01-blog_body.jpg' (사진 순서), 본문 밖 자리는 '키워드-cover.jpg'
 export function fileNameFor(post, n, purpose, ext) {
   const base = String((post && (post.keyword || (post.titles && post.titles[0]))) || '글공장')
@@ -1338,7 +1358,7 @@ export function searchSuggestions(post, slot) {
     const t = clip(String(s || '').replace(/[[\]#*]/g, ' ').replace(/\s*(하는|있는|된)?\s*(모습|사진|이미지|장면)$/, '').trim(), 40);
     if (t && !out.includes(t)) out.push(t);
   };
-  if (slot) add(stripOwnMark(slot.text));
+  if (slot) add(stripSlotMarks(slot.text));
   if (post) add(post.keyword);
   if (slot && slot.heading) add(slot.heading);
   return out.slice(0, 4);

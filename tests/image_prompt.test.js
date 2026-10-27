@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   PRESETS, STYLES, IMAGE_TYPES, presetOf, validPreset, recommendPreset, readContext, buildScene, promptFromScene, buildPrompt,
   TEXT_RULES, PROMPT_RULES, REF_ROLES, SCENE_EDITABLE, aiGate, parseSlots, originLabel, captionHint, originOf,
+  stripSlotMarks, altTextFor, searchSuggestions, slotRisk, REAL_KINDS,
 } from '../images.js';
 
 const post = { titles: ['원룸 전기히터 고르는 법'], keyword: '원룸 전기히터' };
@@ -185,7 +186,12 @@ describe("지시서 1: 실제 제품·사용 인증 사진을 AI로 지어내지
   test('실제 제품 모양이 필요한 자리: 진짜 제품 사진(대상 모양 유지)을 넣으면 AI 합성으로, 아니면 일반 장면 확인이 있어야', () => {
     assert.deepEqual([aiGate(real.text).ok, aiGate(real.text).code], [false, 'real_photo_needed']);
     assert.match(aiGate(real.text).msg, /참고 사진\(대상 모양 유지\)/);
-    assert.deepEqual([aiGate(real.text, { refs: [{ role: 'subject' }] }).ok, aiGate(real.text, { refs: [{ role: 'subject' }] }).composite], [true, true]);
+    // 1.5.0 검토 뒤: '대상 모양 유지' 참고 사진이 진짜 사진(직접 올림·Pexels)일 때만 — AI 이미지를 넣어도 실제 제품 사진이 아님
+    assert.deepEqual([aiGate(real.text, { refs: [{ role: 'subject', kind: 'upload' }] }).ok, aiGate(real.text, { refs: [{ role: 'subject', kind: 'upload' }] }).composite], [true, true]);
+    assert.equal(aiGate(real.text, { refs: [{ role: 'subject', kind: 'stock' }] }).composite, true);
+    assert.equal(aiGate(real.text, { refs: [{ role: 'subject', kind: 'ai' }] }).code, 'real_photo_needed', 'AI 이미지를 대상으로 넣어도 실제 상품 자리는 못 채움');
+    assert.equal(aiGate(real.text, { refs: [{ role: 'subject' }] }).ok, false, '종류를 모르면 진짜 사진으로 안 봄');
+    assert.equal(aiGate(real.text, { baseComposite: true }).composite, true, '이미 AI 합성인 이미지를 고치는 건 그 합성을 이어서');
     assert.equal(aiGate(real.text, { refs: [{ role: 'style' }] }).ok, false, '구도 참고만으로는 제품 모양이 안 정해짐');
     assert.deepEqual([aiGate(real.text, { genericOk: true }).ok, aiGate(real.text, { genericOk: true }).generic], [true, true]);
     assert.equal(aiGate(plain.text).ok, true);
@@ -201,5 +207,64 @@ describe("지시서 1: 실제 제품·사용 인증 사진을 AI로 지어내지
   });
   test('규칙은 늘 붙음 (가격·인증·실존 인물·후기 사진처럼 보이게 하지 않기)', () => {
     for (const k of Object.keys(PRESETS)) for (const r of PROMPT_RULES) assert.ok(P(k).includes(r), `${k}: ${r}`);
+  });
+});
+
+describe('1.5.0 검토 뒤: 다른 뜻으로 쓰인 낱말을 계절·날씨·장소로 읽지 않음 (지시서 1 — 원고에 없는 것을 지어내지 않기)', () => {
+  const ctx = (text, before = '', after = '') => readContext({ post: { titles: [''] }, slot: { text, heading: '', before, after }, text });
+  const ko = (c) => [...c.season.items, ...c.weather.items, ...c.time.items].map((x) => x.ko);
+  test('검토에서 나온 잘못 읽은 예: 대비가 오히려 · 눈길이 가는 · 캠핑 장비가 오래 · 주차 안내 · 자동차 안전 · 부산물 · 써 봄 · 밤 껍질 · 카페인 · A회사 · 제습기의 습기', () => {
+    for (const [text, before, after] of [
+      ['책상 위 키보드', '가격 대비가 오히려 좋아요', '눈길이 가는 디자인'],
+      ['캠핑 의자', '캠핑 장비가 오래 가는 비결', ''],
+      ['거실 소파', '눈길을 끄는 거실 인테리어', ''],
+      ['눈이 편한 모니터', '눈이 오래 피로하지 않게', ''],
+      ['써 봄', '그냥 한번 써 봄.', ''],
+      ['밤 껍질 까는 도구', '군밤', ''],
+      ['제습기 물통', '제습기는 습기를 잡아요', '가습기와 달라요'],
+    ]) assert.deepEqual(ko(ctx(text, before, after)), [], text);
+    assert.deepEqual(ctx('주차 안내 표지판 앞 차량', '주차 안내를 봐요', '자동차 안전 점검').place.items, []);
+    assert.deepEqual(ctx('카페인 없는 차').place.items, []);
+    assert.deepEqual(ctx('A회사 제습기').place.items, []);
+    assert.equal(ctx('부산물 정리').korea, false);
+    assert.equal(ctx('대구탕 끓이기').korea, false);
+  });
+  test('진짜로 적힌 계절·날씨·시간·장소는 그대로 읽음', () => {
+    assert.deepEqual(ko(ctx('비 오는 날 창가')), ['비']);
+    assert.deepEqual(ko(ctx('비가 오는 날 우산')), ['비']);
+    assert.deepEqual(ko(ctx('눈이 오는 거리')), ['눈']);
+    assert.deepEqual(ko(ctx('봄철 베란다 정리')), ['봄']);
+    assert.deepEqual(ko(ctx('올봄 신상 원피스')), ['봄']);
+    assert.deepEqual(ko(ctx('밤에 쓰는 무드등')), ['밤']);
+    assert.deepEqual(ko(ctx('습한 날 빨래 말리기')), ['습함']);
+    assert.deepEqual(ctx('차 안에서 쓰는 방향제').place.items.map((x) => x.ko), ['차 안']);
+    assert.deepEqual(ctx('회사 책상 정리').place.items.map((x) => x.ko), ['책상', '사무실']);
+    assert.equal(ctx('부산 해운대 카페').korea, true);
+  });
+  test("장면 설계서에서 잘못 읽은 칸은 '없음'으로 뺄 수 있음 (빈칸은 기본값) — 주 피사체는 못 뺌", () => {
+    const sl = { text: '비 오는 날 창가 제습기', heading: '' };
+    const sc = buildScene({ post: { titles: ['원룸 제습기'] }, slot: sl, text: sl.text, preset: 'product_still', overrides: { time: '없음', setting: '-', light: '없음', subject: '없음', avoid: ['없음'] } });
+    assert.deepEqual([sc.time, sc.time_en, sc.setting, sc.light, sc.subject, sc.avoid], ['', '', '', '', '없음', []]);
+    assert.ok(sc.notes.includes('계절·날씨·시간: 직접 뺐어') && sc.notes.includes('장소: 직접 뺐어'));
+    const pr = promptFromScene(sc);
+    assert.match(pr, /Season, weather and time: not stated in the post — do not add/);
+    assert.match(pr, /Setting: the post names no specific place/);
+    assert.ok(!/Light \(Korean\)/.test(pr), '뺀 칸은 지시문에서도 빠짐');
+    const sc2 = buildScene({ post: { titles: ['원룸 제습기'] }, slot: sl, text: sl.text, preset: 'product_still', overrides: { time: '' } });
+    assert.equal(sc2.time, '비', '빈칸은 원고 기본값');
+  });
+});
+
+describe("1.5.0 검토 뒤: 자동 작가의 '(제품 사진)' 표시는 대체 텍스트·검색어·AI 장면 설명에 안 나오고, 판단에는 그대로 씀", () => {
+  test('표시 빼기 · 판단은 그대로', () => {
+    assert.equal(stripSlotMarks('(직접 찍기) 제습기 물통 (제품 사진)'), '제습기 물통');
+    assert.equal(altTextFor('제습기 버튼 부분 (제품 사진)'), '제습기 버튼 부분');
+    const sl = parseSlots('[이미지: 제습기 버튼 부분 (제품 사진)]')[0];
+    assert.ok(searchSuggestions({ titles: ['제습기'] }, sl).every((q) => !q.includes('제품 사진')), searchSuggestions({ titles: ['제습기'] }, sl).join('|'));
+    const sc = buildScene({ post: { titles: ['제습기'] }, slot: sl, preset: 'product_still' });
+    assert.ok(!sc.subject.includes('(제품 사진)') && !sc.goal.includes('(제품 사진)'));
+    assert.equal(slotRisk(sl.text).real, true, '판단에는 표시를 남긴 글');
+    assert.equal(aiGate(sl.text).code, 'real_photo_needed');
+    assert.deepEqual(REAL_KINDS, ['upload', 'stock']);
   });
 });

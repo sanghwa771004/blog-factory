@@ -426,7 +426,7 @@ export function createStudio(ui) {
       row2.append(risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)));
     } else {
       row2.append(btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
-        img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => genSheet(p, s, { prev: genOf(d, img) }), { disabled: running }) : null,
+        img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => genSheet(p, s, { prev: genOf(d, img), prevImg: img }), { disabled: running }) : null,
         btn(row.used_at ? '사용 완료 취소' : '사용 완료', 'sm ghost', (ev) => markUsed(p, s, !row.used_at, ev.currentTarget)),
         btn('빼기', 'sm ghost', (ev) => { if (confirmBox(ev.currentTarget, '연결을 뺄까?')) unlink(p, s, ev.currentTarget); }));
     }
@@ -457,11 +457,13 @@ export function createStudio(ui) {
     const t = (d.costs && d.costs.totals) || {};
     const gens = d.generations || [];
     const st = settings();
-    const box = det('img-cost:' + p.id, `이미지 생성 비용 — ${t.count || 0}번 (비용 반영 ${t.billed || 0}번) · ${usd(t.usd || 0)}${t.krw != null && Number(t.usd) > 0 ? ' ≈ ' + L.won(t.krw) : ''}${Number(t.n_actual || 0) < Number(t.billed || 0) ? ' (예상 포함)' : ''}`, false, '');
+    const box = det('img-cost:' + p.id, `이미지 생성 비용 — ${t.count || 0}번 (비용 반영 ${t.billed || 0}번)${Number(t.reviews || 0) ? ` + AI 검수 ${t.reviews}번` : ''} · ${usd(t.usd || 0)}${t.krw != null && Number(t.usd) > 0 ? ' ≈ ' + L.won(t.krw) : ''}${Number(t.n_actual || 0) < Number(t.billed || 0) || Number(t.review_usd || 0) > 0 ? ' (예상 포함)' : ''}`, false, '');
     const inner = h('div', { class: 'stack', style: 'margin-top:8px' });
-    inner.append(h('p', { class: 'hint' }, "예상: 요청 전에 공식 가격표로 계산한 값 · 사용량 기준: OpenAI가 알려준 사용량(토큰) × 가격 · 청구액 확인: OpenAI 사용량 화면에서 확인해 직접 넣은 금액. 앱은 실제 청구액을 직접 가져오지 못해."),
+    inner.append(h('p', { class: 'hint' }, "예상: 요청 전에 공식 가격표로 계산한 값 · 사용량 기준: 공급자(OpenAI·Gemini)가 알려준 사용량(토큰) × 가격 · 청구액 확인: 공급자 사용량 화면에서 확인해 직접 넣은 금액. 앱은 실제 청구액을 직접 가져오지 못해."),
       h('p', { class: 'hint' }, st.image_fx_krw ? `원화는 환율 ${L.fmtNum(st.image_fx_krw)}원/달러 기준 (${st.image_fx_date || '날짜 없음'}${st.image_fx_source ? ' · ' + st.image_fx_source : ''}). 기록마다 그때 환율로 계산해.` : '환율을 아직 안 넣어서 원화로 바꾸지 않았어 (설정 > 이미지).'));
-    if (t.uncertain) inner.append(h('p', { class: 'notice' }, `청구됐는지 확인이 필요한 기록이 ${t.uncertain}개 있어. OpenAI 사용량 화면에서 확인하고 청구액을 넣어줘.`));
+    if (t.uncertain) inner.append(h('p', { class: 'notice' }, `청구됐는지 확인이 필요한 생성 기록이 ${t.uncertain}개 있어. 그 공급자 사용량 화면(OpenAI·Google AI Studio)에서 확인하고 아래에서 청구액을 넣어줘.`));
+    // AI 검수는 청구액을 넣는 칸이 없어서 '확인 필요'는 예상 비용으로 남음 — 생성 기록과 따로 알려줌 (1.5.0 검토)
+    if (t.review_uncertain) inner.append(h('p', { class: 'hint' }, `AI 검수 ${t.review_uncertain}번은 청구됐는지 몰라서 예상 비용으로 셈했어 (검수는 청구액을 따로 넣지 않아).`));
     if (!gens.length) inner.append(h('p', { class: 'hint' }, '이 글로 만든 AI 이미지가 아직 없어.'));
     for (const g of gens.slice(0, 30)) {
       const c = genCost(g);
@@ -569,18 +571,19 @@ export function createStudio(ui) {
     img.ref_small_path = (j && j.image && j.image.ref_small_path) || 'ok';
     return img;
   }
-  // 모드 고르기 목록: 설정의 모드 4가지(+ 설정의 기본 모델이 어느 모드와도 다르면 그 모델). 고치기는 고치기가 되는 모델만
+  // 모드 고르기 목록: 설정의 모드 4가지. 설정의 모델·기본 품질과 똑같은 모드가 없으면 '설정의 기본값'을 맨 앞에 두고 그걸로 시작
+  // (설정은 낮음인데 '보통' 모드로 시작하는 것처럼, 사용자가 고르지 않은 더 비싼 값으로 시작하지 않게 — 1.5.0 검토). 고치기는 고치기가 되는 모델만
   function modeChoices(st, mode) {
     const all = IMG.resolveModes(st).filter((m) => mode !== 'edit' || m.caps.edit);
     const dflt = String((mode === 'edit' ? st.image_edit_model : st.image_gen_model) || '');
     const out = all.map((m) => ({ ...m }));
-    if (dflt && !out.some((m) => m.model === dflt)) {
-      const caps = IMG.modelCaps(dflt === TEST_MODEL ? 'gpt-image-2.5-flare' : dflt);
-      out.unshift({ id: 'settings', label: mode === 'edit' ? '설정의 편집 모델' : '설정의 생성 모델', model: dflt, quality: st.image_quality || 'medium', caps, paid: !caps.free && dflt !== TEST_MODEL });
+    const cm = dflt === TEST_MODEL ? 'gpt-image-2.5-flare' : dflt;
+    const q0 = dflt ? IMG.normQuality(cm, String(st.image_quality || 'medium')) : '';
+    if (dflt && !out.some((m) => m.model === dflt && m.quality === q0)) {
+      const caps = IMG.modelCaps(cm);
+      out.unshift({ id: 'settings', label: mode === 'edit' ? '설정의 편집 모델' : '설정의 기본값', model: dflt, quality: q0, caps, paid: !caps.free && dflt !== TEST_MODEL });
     }
-    // 설정의 모델과 기본 품질이 둘 다 같은 모드 → 모델만 같은 모드 → 첫 모드 (설정을 몰래 다른 모델로 바꾸지 않음)
-    const q0 = String(st.image_quality || '');
-    const pick = out.find((m) => m.model === dflt && m.quality === IMG.normQuality(m.model, q0)) || out.find((m) => m.model === dflt) || out[0];
+    const pick = out.find((m) => m.model === dflt && m.quality === q0) || out[0];
     return { list: out, pick: pick ? pick.id : '' };
   }
   function genSheet(p, s, o = {}) {
@@ -601,7 +604,17 @@ export function createStudio(ui) {
       text: o.text != null ? o.text : mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
       quality: '', count: 1, refs: (o.refs || []).slice(), scene: {},
     };
-    if (prev && Array.isArray(prev.refs)) for (const r of prev.refs) { const im = (d.images || []).find((x) => x.id === r.image_id); if (im && !f.refs.some((y) => y.image.id === im.id)) f.refs.push({ image: im, role: r.role }); }
+    // 다시 만들기: 그 이미지에 남은 참고 사진(역할)·이미지 종류를 되살림 (생성 기록에는 없어서 이미지 기록에서 — 1.5.0 검토)
+    const prevImg = o.prevImg || null;
+    let lostRefs = 0;
+    if (prevImg && Array.isArray(prevImg.ref_images)) {
+      for (const r of prevImg.ref_images) {
+        const im = (d.images || []).find((x) => x.id === r.image_id && !x.deleted_at);
+        if (im && !f.refs.some((y) => y.image.id === im.id)) f.refs.push({ image: im, role: IMG.REF_ROLES[r.role] ? r.role : 'style' });
+        else if (!im) lostRefs++;
+      }
+    }
+    if (prevImg && prevImg.preset && IMG.PRESETS[prevImg.preset]) f.preset = prevImg.preset;
     // 설정의 용도별 기본 비율 (없으면 용도의 첫 비율)
     const prefRatio = (pu) => { const r = (st.image_ratio_prefs || {})[pu]; return IMG.PURPOSES[pu].ratios.includes(r) ? r : IMG.PURPOSES[pu].ratios[0]; };
     f.ratio = base ? IMG.defaultRatio(base, f.purpose) : prefRatio(f.purpose);
@@ -641,6 +654,9 @@ export function createStudio(ui) {
     const goBtn = btn('만들기', 'wide', () => submit());
     const usage = () => (dataOf(p.id) || {}).usage || null;
     const refsOut = () => f.refs.map((r) => ({ image_id: r.image.id, role: r.role }));
+    const gateRefs = () => f.refs.map((r) => ({ role: r.role, kind: r.image.kind }));
+    // 고친 장면 칸 중 '그려 달라는' 칸만 (넣지 말 것·지역 빼고) — 서버 sceneUserText 와 같은 범위
+    const sceneUserText = () => Object.entries(f.scene).filter(([k, v]) => k !== 'avoid' && k !== 'locale' && v != null).map(([, v]) => (Array.isArray(v) ? v.join(' ') : String(v))).join(' ').trim();
     // 장면 설계서 칸 (고칠 수 있는 것만). 빈칸이면 원고·프리셋의 기본값
     const sceneInputs = {};
     const sceneField = (k, multi) => {
@@ -659,6 +675,16 @@ export function createStudio(ui) {
         el.value = f.scene[k] == null ? '' : Array.isArray(f.scene[k]) ? f.scene[k].join('\n') : f.scene[k];
       }
     };
+    if (prevImg && prevImg.scene && typeof prevImg.scene === 'object' && mode !== 'edit') {
+      const base0 = IMG.buildScene({ post: p, slot: s, text: clean(f.text), preset: f.preset, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide, refs: refsOut(), channel: p.channel_id });
+      for (const k of IMG.SCENE_EDITABLE) {
+        if (k === 'locale') { if (prevImg.scene.locale !== base0.locale) f.scene.locale = prevImg.scene.locale === 'KR' ? 'KR' : 'none'; continue; }
+        const v = prevImg.scene[k];
+        if (v == null || JSON.stringify(v) === JSON.stringify(base0[k])) continue;
+        f.scene[k] = Array.isArray(v) ? v.slice(0, 8) : String(v) === '' ? '없음' : String(v);
+      }
+    }
+    const scene0 = JSON.stringify(f.scene); // 처음 채운 장면 칸 (이것과 같으면 '적던 내용'이 아님)
     const update = () => {
       f.modeId = modeSel.value; f.preset = presetSel.value; f.purpose = purposeSel.value; f.text = textTa.value; f.extra = extraTa.value;
       const m = cur(), c = caps();
@@ -688,7 +714,8 @@ export function createStudio(ui) {
         }),
         maxRefs && f.refs.length < maxRefs ? h('div', { class: 'go' }, btn('보관함에서 참고 사진 고르기', 'sm ghost', () => refPicker(p, f.refs, () => { form(); update(); })),
           btn('참고 사진 올리기', 'sm ghost', () => refUpload(p, f.refs, () => { form(); update(); }))) : null,
-        f.refs.length > maxRefs ? h('p', { class: 'badbox' }, `이 모델은 참고 사진을 ${maxRefs}장까지만 받아. ${f.refs.length - maxRefs}장을 빼줘.`) : null);
+        f.refs.length > maxRefs ? h('p', { class: 'badbox' }, `이 모델은 참고 사진을 ${maxRefs}장까지만 받아. ${f.refs.length - maxRefs}장을 빼줘.`) : null,
+        lostRefs ? h('p', { class: 'notice' }, `전에 쓴 참고 사진 ${lostRefs}장은 이 글 이미지에서 찾지 못해서 빠졌어 (지웠거나 다른 글 이미지일 수 있어). 필요하면 다시 골라줘.`) : null);
       const size = IMG.sizeFor(f.purpose, f.ratio, capsModel(), f.quality);
       const sc = IMG.buildScene({ post: p, slot: s, text: clean(f.text), preset: f.preset, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide, refs: refsOut(), size: IMG.sizeLabel(size), channel: p.channel_id, overrides: f.scene });
       fillScene(sc);
@@ -703,16 +730,19 @@ export function createStudio(ui) {
       const est = clientEst == null ? null : sEst != null && sEst > clientEst ? sEst : clientEst;
       lastEst = est;
       lastTotal = est == null ? null : IMG.roundUsd(est * f.count);
-      const risks = IMG.promptRisk(f.text + '\n' + f.extra, brands);
+      const sceneTxt = sceneUserText();
+      const risks = IMG.promptRisk(f.text + '\n' + f.extra + (sceneTxt ? '\n' + sceneTxt : ''), brands);
       const blocks = IMG.blocksOf(risks);
-      const gate = s.n ? IMG.aiGate(s.text, { text: f.text + ' ' + f.extra, refs: refsOut(), genericOk: genericChk.checked }) : { ok: true };
-      const sr = IMG.slotRisk(f.text + ' ' + f.extra);
+      const gateText = [f.text, f.extra, sceneTxt].join(' ');
+      const gate = s.n ? IMG.aiGate(s.text, { text: gateText, refs: gateRefs(), genericOk: genericChk.checked, baseComposite: !!(base && base.composite) }) : { ok: true };
+      const sr = IMG.slotRisk(gateText);
       const own = gate.code === 'own_photo_slot';
-      const realNeeded = !own && s.n && IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${f.text} ${f.extra}`).real && !refsOut().some((r) => r.role === 'subject');
+      const realNeeded = !own && s.n && IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).real && !gate.composite;
       genericText.textContent = ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (특정 제품처럼 보이지 않게 — 실제 구성품·라벨·화면은 직접 찍은 사진이나 진짜 제품 사진 참고로)';
       put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)),
         own ? h('p', { class: 'badbox' }, gate.msg) : '',
-        !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${f.text} ${f.extra}`).msg || sr.msg) : '',
+        !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).msg || sr.msg) : '',
+        !own && realNeeded && f.refs.some((r) => r.role === 'subject' && !IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "AI로 만든 이미지는 '대상 모양 유지'로 넣어도 진짜 제품 사진이 아니라서 실제 상품 자리를 채우지 못해. 직접 올린 사진이나 Pexels 사진을 넣어줘.") : '',
         !own && realNeeded ? genericRow : '',
         gate.composite ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성'으로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼.") : '');
       const u = usage();
@@ -772,7 +802,7 @@ export function createStudio(ui) {
       h('button', { type: 'button', class: 'copy', onclick: () => { textTa.value = textTa.value.trim() ? textTa.value.trim() + ' / ' + t : t; update(); } }, t))) : null;
     const form = () => {
       const sceneDet = det('gen-scene', '장면 설계서 (고칠 수 있어)', false, 'plain');
-      sceneDet.append(h('p', { class: 'hint' }, '비워 둔 칸은 원고와 이미지 종류의 기본값을 써. 원고에 없는 계절·날씨·장소는 넣지 않아.'), sceneBox,
+      sceneDet.append(h('p', { class: 'hint' }, "비워 둔 칸은 원고와 이미지 종류의 기본값을 써 (흐린 글씨). 원고에 없는 계절·날씨·장소는 넣지 않아. 잘못 읽은 칸은 '없음'이라고 쓰면 빼."), sceneBox,
         sceneField('subject'), sceneField('setting'), sceneField('time'), field(IMG.SCENE_LABELS.locale, localeSel), sceneField('camera'), sceneField('light'), sceneField('color'),
         sceneField('materials'), sceneField('composition'), sceneField('must_show', true), sceneField('avoid', true),
         h('div', { class: 'go' }, btn('기본값으로', 'sm ghost', () => { f.scene = {}; for (const el of Object.values(sceneInputs)) el.value = ''; localeSel.value = ''; update(); })));
@@ -794,17 +824,20 @@ export function createStudio(ui) {
         mode === 'edit' ? null : h('p', { class: 'legend' }, '몇 장 만들까'), mode === 'edit' ? null : countSeg,
         riskBox, promptDet,
         costBox, msg, goBtn,
-        mode === 'edit' ? null : h('div', { class: 'go' }, btn('여러 모델로 비교하기', 'sm ghost', () => compareSheet(p, s, { ...f, refs: f.refs.slice() }))),
+        mode === 'edit' ? null : h('div', { class: 'go' }, btn('여러 모델로 비교하기', 'sm ghost', () => compareSheet(p, s, { ...f, refs: f.refs.slice(), scene: { ...f.scene }, genericOk: genericChk.checked }))),
         h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 같은 요청은 한 번만 보내고, 여러 장이면 한 장씩 차례로 만들어.'));
       // 처음 채워 둔 설명·더 원하는 것을 고쳤으면 창 밖을 눌러도 안 닫힘 (안 고쳤으면 그냥 닫힘)
-      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && clean(extraTa.value) === clean(f0.extra) && !Object.keys(f.scene).length);
+      if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && clean(extraTa.value) === clean(f0.extra) && JSON.stringify(f.scene) === scene0);
     };
-    // 창을 닫거나 다른 창을 열면(=만들기 버튼이 화면에서 사라지면) 기다리던 다시 보내기를 멈춤 — 사용자가 누르지 않은 생성이 시작되지 않게
-    const alive = () => goBtn.isConnected;
+    // 창을 닫거나 다른 창을 열면(=지금 보이는 만들기 버튼이나 진행 창이 화면에서 사라지면) 기다리던 다시 보내기를 멈춤 — 사용자가 누르지 않은 생성이 시작되지 않게.
+    // 첫 장은 만들기 버튼, 두 번째 장부터는 진행 창의 상태 줄을 봄 (1.5.0 검토)
+    let liveEl = null;
+    const alive = () => (liveEl || goBtn).isConnected;
+    const say = (node) => (liveEl && liveEl.isConnected ? put(liveEl, node) : put(msg, node));
     const wait = async (sec) => {
       for (let t = Math.max(1, Math.round(sec)); t > 0; t--) {
         if (!alive()) return false;
-        put(msg, h('p', { class: 'hint' }, `서버가 다른 일을 마무리하는 중이야. ${t}초 뒤에 같은 요청으로 다시 보낼게 (돈은 아직 안 나갔어). 창을 닫으면 멈춰.`));
+        say(h('span', null, `서버가 다른 일을 마무리하는 중이야. ${t}초 뒤에 같은 요청으로 다시 보낼게 (돈은 아직 안 나갔어). 창을 닫으면 멈춰.`));
         await sleep(1000);
       }
       return alive();
@@ -818,6 +851,7 @@ export function createStudio(ui) {
     });
     const submit = async () => {
       if (busy) return;
+      liveEl = null;
       busy = true; update();
       put(msg, h('p', { class: 'hint' }, '보내는 중…'));
       batch = f.count > 1 ? { id: newUuid(), keys: Array.from({ length: f.count }, () => newKey()), done: [] } : { id: null, keys: [newKey()], done: [] };
@@ -872,11 +906,11 @@ export function createStudio(ui) {
           return;
         }
       }
-      if (!j) { busy = false; update(); return; }
-      if (!alive() && i === 0) {
+      if (!j) { busy = false; if (i > 0 && alive()) { showBatch(); return; } update(); return; }
+      if (!alive()) {
         busy = false;
-        // 보낸 뒤에 창을 닫았어도 서버는 이미 받아서 만들고 있음 → 이미지 칸에 '만드는 중'이 보이게 새로 받음
-        if (j.generation && j.generation.status === '생성 중') toast('창을 닫았지만 서버에서 만드는 중이야. 끝나면 사진 자리에서 볼 수 있어.', 4000);
+        // 보낸 뒤에 창을 닫았어도 서버는 이미 받아서 만들고 있음 → 이미지 칸에 '만드는 중'이 보이게 새로 받음 (남은 장은 안 만듦)
+        if (j.generation && j.generation.status === '생성 중') toast(i > 0 ? `창을 닫았지만 ${i + 1}번째 장은 서버에서 만드는 중이야. 남은 장은 안 만들어.` : '창을 닫았지만 서버에서 만드는 중이야. 끝나면 사진 자리에서 볼 수 있어.', 4000);
         refresh(p.id);
         return;
       }
@@ -887,10 +921,13 @@ export function createStudio(ui) {
       const t0 = Date.now();
       const timer = h('b', { class: 'num' }, '0초');
       let stop = false;
+      const statusLine = h('p', { class: 'hint' });
       openSheet(`${slotName(s)} — AI ${mode === 'edit' ? '고치기' : '만들기'}`,
         h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, f.count > 1 ? `${i + 1}/${f.count}장 만드는 중… ` : '만드는 중… '), timer),
         h('p', { class: 'hint' }, f.count > 1 ? '한 장씩 차례로 만들어. 이 창을 닫으면 지금 만드는 장까지만 서버에서 끝내고, 남은 장은 만들지 않아 (돈도 안 나가).' : '보통 20초~1분, 길면 2분까지 걸려. 이 창을 닫아도 서버에서 계속 만들고, 끝나면 사진 자리에서 고를 수 있어.'),
+        statusLine,
         results.length ? h('div', { class: 'grid3' }, results.filter((r) => r.image).map((r) => thumb(r.image, null))) : null);
+      liveEl = statusLine; // 다음 장을 보내는 동안(서버가 바쁨 등) 이 창이 열려 있는지·안내를 여기로
       ui.setSheetOnClose(() => { stop = true; busy = false; refresh(p.id); });
       const tick = setInterval(() => { if (!timer.isConnected) { clearInterval(tick); return; } timer.textContent = Math.round((Date.now() - t0) / 1000) + '초'; }, 1000);
       const poll = async () => {
@@ -938,7 +975,8 @@ export function createStudio(ui) {
         ok.length ? h('p', { class: 'hint' }, '같은 설명으로 만든 후보야. 마음에 드는 걸 골라서 연결해 (안 고른 건 보관함에 남아). 앱이 대신 고르지 않아.') : null,
         ...ok.map((r) => resultCard(r.generation, r.image, false)),
         ...failed.map((r) => h('p', { class: 'badbox' }, r.generation ? `못 만든 장: ${r.generation.error_message || '이유 없음'}` : ui.errText(r.error))),
-        results.length < f.count ? h('p', { class: 'notice' }, `${f.count}장 중 ${results.length}장에서 멈췄어 (남은 장은 만들지 않았고 돈도 안 나갔어).`) : null,
+        // 다 못 만들었으면 몇 장 만들었는지·보내지 않은 장(돈 안 나감)을 알려줌. 못 만든 장의 이유는 위 빨간 칸에 (1.5.0 검토)
+        ok.length < f.count ? h('p', { class: 'notice' }, `${f.count}장 중 ${ok.length}장만 만들었어.${f.count > results.length ? ` 남은 ${f.count - results.length}장은 보내지 않았어 (그 장은 돈이 안 나가).` : ''}`) : null,
         h('div', { class: 'go' }, btn('다시 만들기', 'sm ghost', () => { busy = false; form(); update(); }), btn('보관함에만 두고 닫기', 'sm ghost', closeSheet)));
       ui.setSheetOnClose(() => refresh(p.id));
     };
@@ -1052,12 +1090,14 @@ export function createStudio(ui) {
     const st = settings();
     const keys = (dataOf(p.id) || {}).keys || {};
     const opts = IMG.REVIEW_MODELS.map((m) => ({ ...m, ok: keyOk(keys, m.provider) }));
-    const pick0 = opts.find((m) => m.id === st.image_review_model && m.ok) || opts.find((m) => m.ok && m.free) || opts.find((m) => m.ok) || opts[0];
-    const sel = h('select', { value: pick0 ? pick0.id : '' }, opts.map((m) => opt(m.id, `${m.label}${m.free ? ' (무료)' : ' (유료)'}${m.ok ? '' : ' — 키 없음'}`)));
+    // 처음 고른 것: 설정의 검수 모델 → 키가 있는 무료 모델 → 없으면 아무것도 안 고름 (유료 모델을 대신 고르지 않음 — 1.5.0 검토)
+    const pick0 = opts.find((m) => m.id === st.image_review_model && m.ok) || opts.find((m) => m.ok && m.free) || null;
+    const sel = h('select', { value: pick0 ? pick0.id : '', 'aria-label': '검수할 AI' }, pick0 ? null : opt('', '검수할 AI를 골라줘'), opts.map((m) => opt(m.id, `${m.label}${m.free ? ' (무료)' : ' (유료)'}${m.ok ? '' : ' — 키 없음'}`)));
+    sel.value = pick0 ? pick0.id : '';
     const costLine = h('p', { class: 'hint' });
     const out = h('div', { class: 'stack' });
     const goB = btn('AI 검수 받기', 'wide', () => go());
-    const nImgs = 1 + ((img.ref_images || []).length || 0);
+    const nImgs = 1 + Math.min(3, (img.ref_images || []).length || 0); // 서버도 참고 사진은 3장까지만 같이 보냄
     const upd = () => {
       const m = opts.find((x) => x.id === sel.value);
       const est = m ? IMG.estimateReviewUsd(m.id, nImgs) : null;
@@ -1104,8 +1144,9 @@ export function createStudio(ui) {
       const q = IMG.normQuality(m.model, m.quality);
       const size = IMG.sizeFor(f0.purpose, f0.ratio, m.model, q);
       const sc = IMG.buildScene({ post: p, slot: s, text: clean(f0.text), preset: f0.preset, purpose: f0.purpose, ratio: f0.ratio, extra: clean(f0.extra), hide, refs: refsOut(), size: IMG.sizeLabel(size), channel: p.channel_id, overrides: f0.scene });
-      const est = IMG.estimateUsd({ quality: q, size, promptTokens: IMG.estimateTokens(IMG.promptFromScene(sc)), prices: prices(), model: m.model, refs: refsOut().length });
-      return { m, q, size, est, ok: keyOk(keys, m.caps.provider), refsOk: refsOut().length <= (m.caps.refsMax || 0) };
+      const tokens = IMG.estimateTokens(IMG.promptFromScene(sc));
+      const est = IMG.estimateUsd({ quality: q, size, promptTokens: tokens, prices: prices(), model: m.model, refs: refsOut().length });
+      return { m, q, size, est, tokens, ok: keyOk(keys, m.caps.provider), refsOk: refsOut().length <= (m.caps.refsMax || 0) };
     });
     const update = () => {
       put(list, ...modes.map((m) => {
@@ -1118,12 +1159,18 @@ export function createStudio(ui) {
       rows = plan();
       const total = rows.reduce((a, r) => a + (r.est == null ? NaN : r.est), 0);
       const u = (dataOf(p.id) || {}).usage || null;
-      put(costBox, ...rows.map((r) => h('span', null, `${r.m.caps.label}: ${IMG.qualityLabel(r.m.model, r.q)} · ${IMG.sizeLabel(r.size)} · ${r.m.caps.free ? '무료' : r.est == null ? '계산 못 함' : '예상 ' + usd(r.est)}${r.refsOk ? '' : ' · 참고 사진을 못 받는 모델(빼고 비교 안 됨)'}`)),
+      put(costBox, ...rows.flatMap((r) => [
+          h('span', null, `${r.m.caps.label} (${r.m.model}): ${IMG.qualityLabel(r.m.model, r.q)} · ${IMG.sizeLabel(r.size)} · ${r.m.caps.free ? '무료' : r.est == null ? '계산 못 함' : '예상 ' + usd(r.est)}${r.refsOk ? '' : ' · 참고 사진을 못 받는 모델(빼고 비교 안 됨)'}`),
+          h('span', { class: 'hint' }, `계산 근거: ${IMG.costBasis({ quality: r.q, size: r.size, promptTokens: r.tokens, prices: prices(), model: r.m.model, refs: refsOut().length })}`)]),
         h('b', { class: 'num' }, Number.isFinite(total) ? `합계 예상 ${usd(IMG.roundUsd(total))}` : '합계를 계산하지 못했어'),
         u ? h('span', { class: 'hint' }, `${usageLine(u)} · 남은 예산 ${usd(Math.max(0, Number(u.budget_usd) - Number(u.month_usd)))}`) : null,
         h('span', { class: 'hint' }, '같은 설명·비율·참고 사진으로 한 번씩 만들어. 한두 번 비교로 어느 모델이 늘 낫다고 단정할 수는 없어.'));
+      // 실제 상품 자리·'직접 찍기' 자리는 만들기 창과 같은 판단 (서버도 다시 확인)
+      const sceneTxt = Object.entries(f0.scene || {}).filter(([k, v]) => k !== 'avoid' && k !== 'locale' && v != null).map(([, v]) => (Array.isArray(v) ? v.join(' ') : String(v))).join(' ');
+      const gate = s.n ? IMG.aiGate(s.text, { text: [f0.text, f0.extra, sceneTxt].join(' '), refs: (f0.refs || []).map((r) => ({ role: r.role, kind: r.image.kind })), genericOk: !!f0.genericOk }) : { ok: true };
       let why = '';
-      if (rows.length < 2) why = '비교할 모드를 2~3개 골라줘 (키가 있는 것만).';
+      if (!gate.ok) why = gate.msg || IMAGE_ERR[gate.code] || '이 자리는 AI로 만들 수 없어.';
+      else if (rows.length < 2) why = '비교할 모드를 2~3개 골라줘 (키가 있는 것만).';
       else if (rows.some((r) => !r.refsOk)) why = '참고 사진을 못 받는 모델이 있어. 그 모델을 빼거나 참고 사진을 빼고 비교해줘.';
       else if (!Number.isFinite(total)) why = '예상 비용을 계산하지 못한 모델이 있어.';
       else if (u && Number(u.today) + rows.length > Number(u.daily_limit)) why = '오늘 만들 수 있는 횟수가 모자라.';
@@ -2027,7 +2074,7 @@ export function createStudio(ui) {
       h('h3', null, '기본 모델'), field('생성 모델', f.gen), field('편집 모델 (고쳐서 만들기)', f.edit),
       h('p', { class: 'hint' }, `앱이 아는 모델만 고를 수 있어 (모르는 이름은 다른 공급자로 보내지 않고 막아). 가격·옵션 확인: OpenAI ${IMG.PROVIDERS.openai.checked} · Gemini ${IMG.PROVIDERS.gemini.checked} · Cloudflare ${IMG.PROVIDERS.cloudflare.checked}.`),
       h('div', { class: 'go' }, btn(`무료 모델로 (${IMG.FREE_MODEL})`, 'sm', () => { f.gen.value = IMG.FREE_MODEL; ui.markDirty(); toast('생성 모델을 무료 모델로 바꿨어. 저장을 눌러줘.'); })),
-      field('기본 품질', f.quality, '모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내. Gemini는 품질 칸이 해상도야 (보통 1K · 높음 2K · 최고 4K).'),
+      field('기본 품질', f.quality, '모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내. Gemini는 품질 칸이 해상도야 (보통 1K · 높음 2K). 4K는 결과 파일이 저장 한도를 넘을 수 있어서 안 써.'),
       h('h3', null, '모드 (AI로 만들기에서 고름)'),
       h('p', { class: 'hint' }, '만들 때마다 모드를 고르고, 고른 모드의 실제 모델 이름·예상 비용을 보여준 뒤에만 만들어. 무료 모드에서 유료 모델로 저절로 바뀌지 않아.'),
       ...modeRows.map((r) => r.el),
@@ -2068,8 +2115,11 @@ export function createStudio(ui) {
           prices[g.fid] = { per_image: per, text_input_per_m: t, image_input_per_image: ii, image_output_per_m: base.image_output_per_m, text_output_per_m: base.text_output_per_m,
             checked_at: g.at.value || null, source: IMG.PROVIDERS.gemini.source };
         }
+        // 생성·편집 모델은 바꿨을 때만 보냄 — 저장된 모델이 종료됐어도(서버가 새로 저장을 막음) 예산·한도 같은 다른 설정은 저장되게 (1.5.0 검토)
+        const changedModel = (el, cur) => (el.value !== String(cur || '') ? el.value : undefined);
         const body = {
-          image_gen_model: f.gen.value, image_edit_model: f.edit.value, image_quality: f.quality.value, image_daily_limit: Math.round(daily), image_monthly_budget_usd: budget,
+          image_gen_model: changedModel(f.gen, st.image_gen_model), image_edit_model: changedModel(f.edit, st.image_edit_model),
+          image_quality: f.quality.value, image_daily_limit: Math.round(daily), image_monthly_budget_usd: budget,
           image_request_cap_usd: cap, image_review_model: f.review.value,
           image_modes: Object.fromEntries(modeRows.map((r) => [r.m.id, { model: r.ms.value, quality: r.qs.value }])),
           image_ratio_prefs: Object.fromEntries(ratioSel.map(([k, , el]) => [k, el.value])),
@@ -2091,14 +2141,17 @@ export function createStudio(ui) {
     const kp = (label, value, sub) => h('div', { class: 'kpi' }, h('span', null, label), value == null ? h('b', { class: 'none' }, '데이터 없음') : h('b', null, value), sub ? h('small', null, sub) : null);
     const after = net != null && t.krw != null ? net - Number(t.krw) : null;
     // 청구액을 다 확인한 게 아니면 '예상 포함'이라고 밝힘 (예상과 실제 청구액은 다를 수 있음)
-    const est = Number(t.n_actual || 0) < Number(t.billed || 0);
+    // 1.5.0: AI 검수 비용도 같은 합계에 들어감 (검수만 있어도 '데이터 없음'이 아님) — 검수 몫은 따로 보여줌
+    const est = Number(t.n_actual || 0) < Number(t.billed || 0) || Number(t.review_usd || 0) > 0;
+    const any = Number(t.count || 0) > 0 || Number(t.reviews || 0) > 0;
     return h('div', { class: 'stack' },
       h('div', { class: 'kpis' },
-        kp(est ? '이미지 생성 비용 (예상 포함)' : '이미지 생성 비용', t.count ? `${usd(t.usd)}${krwText && Number(t.usd) > 0 ? ' ≈ ' + krwText : ''}` : null, t.count ? `비용 반영 ${t.billed}번 / 기록 ${t.count}번` : null),
+        kp(est ? '이미지 비용 (예상 포함)' : '이미지 비용', any ? `${usd(t.usd)}${krwText && Number(t.usd) > 0 ? ' ≈ ' + krwText : ''}` : null,
+          any ? `생성: 비용 반영 ${t.billed || 0}번 / 기록 ${t.count || 0}번${Number(t.reviews || 0) ? ` · AI 검수 ${t.reviews}번 ${usd(t.review_usd || 0)} 포함` : ''}` : null),
         kp('청구액 확인', t.count ? `${t.n_actual || 0}건` : null, t.count ? `사용량 기준 ${t.n_usage || 0}건 · 확인 필요 ${t.uncertain || 0}건` : null),
         after != null ? kp(est ? '이미지 비용(예상 포함)까지 뺀 순수익' : '이미지 비용까지 뺀 확정 기준 순수익', L.won(after), '확정 수익 − 비용 − 이미지 비용(원화)') : null),
       h('p', { class: 'hint' }, '이미지 생성 비용은 위 실적의 비용과 따로 셈해 (두 번 더하지 않아). 실적 입력의 비용 칸에는 이미지 비용을 넣지 마.'),
-      h('p', { class: 'hint' }, `예상·사용량 기준 금액은 계산값이고, OpenAI 사용량 화면에서 확인해 넣은 것만 청구액으로 표시해.${st.image_fx_krw ? '' : ' 환율을 넣으면 원화로도 보여줘 (설정 > 이미지).'}${t.fx_missing ? ` 환율이 없는 기록 ${t.fx_missing}건이 있어서 원화 합계는 비워뒀어.` : ''}`));
+      h('p', { class: 'hint' }, `예상·사용량 기준 금액은 계산값이고, 공급자 사용량 화면(OpenAI·Google AI Studio)에서 확인해 넣은 것만 청구액으로 표시해. AI 검수 비용은 사용량 기준(없으면 예상)으로만 셈해.${st.image_fx_krw ? '' : ' 환율을 넣으면 원화로도 보여줘 (설정 > 이미지).'}${t.fx_missing ? ` 환율이 없는 기록 ${t.fx_missing}건이 있어서 원화 합계는 비워뒀어.` : ''}`));
   }
   const postCost = (ic, key) => ((ic && ic.by_post) || []).find((x) => x.key === key) || null;
 

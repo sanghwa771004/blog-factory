@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   openaiImage, geminiImage, classifyGeminiError, geminiPickImage, GEMINI_URL, cloudflareImage, cfRulesFor, runGeneration, bytesToB64, NOT_COUNTED,
-  reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, needMsFor, TEST_MODEL,
+  reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, needMsFor, TEST_MODEL, scrub, MAX_AI_BYTES, NEED_MS_GEMINI, saveUploaded,
 } from '../supabase/functions/blog-app/image_service.js';
 import { modelCaps, sizeFor, estimateUsd, usageUsd, REVIEW_CHECKS, estimateReviewUsd, roundUsd, refsLimit } from '../images.js';
 
@@ -115,15 +115,21 @@ describe('Gemini 이미지 (generateContent)', () => {
     const none = await geminiImage({ fetchImpl: fakeFetch(() => ({ json: { candidates: [{ content: { parts: [{ text: '못 그려' }] }, finishReason: 'STOP' }] } })), key: 'k', model: PRO, prompt: 'p', size: '1:1@1K' });
     assert.equal(none.code, 'gemini_no_image');
   });
-  test('비용: 예상(해상도별 장당 + 설명 토큰 + 넣는 이미지) / 사용량 기준(이미지 출력·글 출력·생각 토큰을 따로)', () => {
-    assert.equal(estimateUsd({ quality: 'high', size: '16:9@2K', promptTokens: 1000, model: PRO }), 0.136);
-    assert.equal(estimateUsd({ quality: 'max', size: '16:9@4K', promptTokens: 0, model: PRO }), 0.24);
-    assert.equal(estimateUsd({ quality: 'high', size: '16:9@2K', promptTokens: 0, model: PRO, refs: 2 }), 0.1362);
+  test('비용: 예상(해상도별 장당 + 설명 토큰 + 넣는 이미지 + 생각 토큰 추정) / 사용량 기준(이미지 출력·글 출력·생각 토큰을 따로)', () => {
+    // 1.5.0 검토 뒤: 생각(thinking)·글 출력 약 1,000토큰 × $12 (= $0.012) 을 예상에 더함 (문서에 양이 없어서 추정)
+    // 2K $0.134 + 설명 1000 × $2 + 생각 1000 × $12 (100만 토큰당)
+    assert.equal(estimateUsd({ quality: 'high', size: '16:9@2K', promptTokens: 1000, model: PRO }), 0.148);
+    assert.equal(estimateUsd({ quality: 'max', size: '16:9@4K', promptTokens: 0, model: PRO }), null, '4K 는 저장 한도 때문에 앱에서 뺐음 (못 받는 품질)');
+    assert.equal(estimateUsd({ quality: 'high', size: '16:9@2K', promptTokens: 0, model: PRO, refs: 2 }), 0.1482);
     assert.equal(estimateUsd({ quality: 'low', size: '16:9@2K', model: PRO }), null, '못 받는 품질');
     // 입력 900 × $2 + 이미지 1120 × $120 + (글 60 + 생각 200) × $12 (100만 토큰당)
     assert.equal(usageUsd(GUSAGE, null, PRO), 0.13932);
-    // 설정에서 가격을 고치면 그 값
-    assert.equal(estimateUsd({ quality: 'high', size: '16:9@2K', promptTokens: 0, model: PRO, prices: { 'gemini-3-pro-image': { per_image: { '2K': 0.2 } } } }), 0.2);
+    // 출력을 이미지·글로 나눈 내역이 없으면 출력 전부를 이미지 값으로 (적게 세지 않게): 900 × $2 + 1180 × $120 + 생각 200 × $12
+    assert.equal(usageUsd({ promptTokenCount: 900, candidatesTokenCount: 1180, thoughtsTokenCount: 200 }, null, PRO), 0.1458);
+    // 설정에서 가격을 고치면 그 값 (+ 생각 토큰 추정)
+    assert.equal(estimateUsd({ quality: 'high', size: '16:9@2K', promptTokens: 0, model: PRO, prices: { 'gemini-3-pro-image': { per_image: { '2K': 0.2 } } } }), 0.212);
+    assert.deepEqual(modelCaps(PRO).qualities, ['medium', 'high']);
+    assert.equal(sizeFor('blog_body', '4:3', PRO, 'max'), '4:3@2K', '4K 를 고른 예전 값은 2K 로');
   });
 });
 
@@ -378,5 +384,41 @@ describe('추가 확인: 무료 모델 참고 사진·Gemini 402·한 번에 보
     assert.deepEqual([refsLimit('gemini-3-pro-image', 'generate'), refsLimit('gemini-3-pro-image', 'edit')], [6, 5]);
     assert.deepEqual([refsLimit('gemini-nano-banana-2.1', 'generate'), refsLimit('cf-flux-2-klein-4b', 'generate'), refsLimit('cf-flux-2-klein-4b', 'edit')], [10, 4, 3]);
     assert.deepEqual([refsLimit('cf-flux-1-schnell', 'generate'), refsLimit('my-new-model', 'generate')], [0, 0]);
+  });
+});
+
+describe('1.5.0 검토 뒤 확인', () => {
+  test('오류 문구에서 Google API 키(AIza… 39자)도 가림 — 다른 길이 규칙에 안 걸려도', () => {
+    const k = 'AIza' + 'Q'.repeat(20) + '_-' + '7'.repeat(13); // 진짜 키 아님 (모양만 같게 만든 39자)
+    assert.equal(k.length, 39);
+    const out = scrub(`잘못된 요청: key=${k} 를 확인`);
+    assert.ok(!out.includes(k) && !out.includes('AIza'), out);
+    assert.match(out, /\[가림\]/);
+    assert.equal(scrub('AIza는 그냥 글자'), 'AIza는 그냥 글자', '짧은 글자는 그대로');
+  });
+  test('받는 이미지 한도 25MB (저장소 버킷 017과 같게) · Gemini 품질은 1K·2K만 (4K는 저장 한도 때문에 뺌)', () => {
+    assert.equal(MAX_AI_BYTES, 25 * 1024 * 1024);
+    assert.deepEqual(Object.keys(NEED_MS_GEMINI).sort(), ['high', 'medium']);
+    for (const m of ['gemini-3-pro-image', 'gemini-nano-banana-2.1']) {
+      assert.deepEqual(modelCaps(m).qualities, ['medium', 'high'], m);
+      assert.equal(estimateUsd({ quality: 'max', size: '1:1@4K', model: m }), null, m + ' 4K 예상 없음');
+    }
+    const sql = readFileSync(join(ROOT, 'supabase', 'migrations', '017_image_studio_1_5_0.sql'), 'utf8');
+    assert.match(sql, /file_size_limit = 26214400/);
+    assert.equal(26214400, MAX_AI_BYTES, '버킷 한도와 서버 한도가 같음');
+  });
+  test('카드뉴스 배경이 실제 사진을 참고한 AI 합성이면 출처 칸에도 그렇게 (그냥 AI 이미지와 구분)', async () => {
+    const save = async (bg) => {
+      const d = fakeDeps();
+      const r = await saveUploaded(d, { kind: 'card', bytes: fx('tiny.png'), declaredMime: 'image/png', bg });
+      assert.equal(r.ok, true, JSON.stringify(r));
+      return d.log.rpc.find((x) => x.name === 'image_save').args.img;
+    };
+    const comp = await save({ kind: 'ai', provider: 'openai', composite: true, rights_confirmed: false });
+    assert.match(comp.license, /배경: AI 합성 이미지 \(실제 사진 참고\)/);
+    assert.equal(comp.attribution_text, '배경: 실제 사진을 참고해 AI로 만든 연출 이미지');
+    const ai = await save({ kind: 'ai', provider: 'openai', composite: false });
+    assert.match(ai.license, /배경: AI 생성 이미지/);
+    assert.equal(ai.attribution_text, '배경: AI로 만든 예시 이미지');
   });
 });
