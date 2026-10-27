@@ -594,7 +594,8 @@ export function createStudio(ui) {
     const purpose0 = (prev && prev.purpose) || (s.row && s.row.purpose) || IMG.slotPurpose(s.key);
     const rec = IMG.recommendPreset({ post: p, slot: s, purpose: purpose0 });
     const f = {
-      modeId: (prev && choices.list.find((m) => m.model === prev.model) || {}).id || o.modeId || choices.pick,
+      // 다시 만들기: 전에 쓴 모델·품질과 같은 모드 → 모델만 같은 모드 (없으면 설정과 같은 모드)
+      modeId: (prev && (choices.list.find((m) => m.model === prev.model && m.quality === prev.quality) || choices.list.find((m) => m.model === prev.model)) || {}).id || o.modeId || choices.pick,
       purpose: IMG.PURPOSES[purpose0] ? purpose0 : 'blog_body', ratio: '',
       preset: prev && prev.style ? IMG.presetOf(prev.style) : rec.id,
       text: o.text != null ? o.text : mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
