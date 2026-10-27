@@ -1353,7 +1353,7 @@ def main():
         def t_img_settings_money_library():
             goto_hash('settings/images')
             sec = page.locator('#sec-images')
-            expect(sec).to_contain_text('키 연결됨')
+            expect(sec).to_contain_text('키 있음')  # 1.5.0: 연결 확인 전에는 '연결됨'이라고 하지 않고 '키 있음'
             expect(sec).to_contain_text('OPENAI_API_KEY')
             daily = sec.locator('label', has_text='하루 생성 한도').locator('input')
             daily.fill('3')
@@ -1853,11 +1853,11 @@ def main():
             goto_hash('settings/images')
             sec = page.locator('#sec-images')
             gem = sec.locator('.item', has_text='Google Gemini')
-            expect(gem).to_contain_text('키 연결됨 · 확인 전')
+            expect(gem).to_contain_text('키 있음 · 연결 확인 전')
             expect(gem).to_contain_text('연결 확인: 아직 안 함')
             gem.get_by_role('button', name='연결 확인').click()
             expect(page.locator('#toast')).to_contain_text('연결 확인됨 (이미지는 만들지 않았어)')
-            expect(sec.locator('.item', has_text='Google Gemini')).to_contain_text('키 연결됨 · 확인됨')
+            expect(sec.locator('.item', has_text='Google Gemini')).to_contain_text('키 있음 · 연결 확인됨')
             assert [c for c in mock.calls if c['path'] == 'images/providers/check'][-1]['body'] == {'provider': 'gemini'}
             row = sec.locator('.stack', has=page.locator('b', has_text='Gemini 고품질 생성')).last
             row.locator('label', has_text='모델').locator('select').select_option('gemini-nano-banana-2.1')

@@ -31,7 +31,7 @@ do $$ begin
   end if;
   if not exists (select 1 from pg_constraint where conname = 'post_images_v150_checks') then
     alter table public.post_images add constraint post_images_v150_checks check (
-      jsonb_typeof(ref_images) = 'array' and jsonb_array_length(ref_images) <= 14
+      jsonb_typeof(ref_images) = 'array' and jsonb_array_length(ref_images) <= 16  -- OpenAI edits 가 받는 최대 장수 (앱의 모델 표 refsMax 와 같게)
       and (scene is null or jsonb_typeof(scene) = 'object') and length(preset) <= 30
       and (parent_image_id is null or parent_image_id <> id) and length(ref_small_path) <= 200);
   end if;
@@ -50,7 +50,7 @@ create index if not exists image_generations_batch_idx on public.image_generatio
 do $$ begin
   if not exists (select 1 from pg_constraint where conname = 'image_generations_v150_checks') then
     alter table public.image_generations add constraint image_generations_v150_checks check (
-      jsonb_typeof(refs) = 'array' and jsonb_array_length(refs) <= 14
+      jsonb_typeof(refs) = 'array' and jsonb_array_length(refs) <= 16
       and (scene is null or jsonb_typeof(scene) = 'object') and length(preset) <= 30
       and batch_kind in ('', 'candidates', 'compare')
       and (batch_index is null or batch_index between 0 and 2)

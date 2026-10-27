@@ -321,3 +321,62 @@ test('서버 일꾼 시간: Gemini는 해상도별로 넉넉히', () => {
   assert.equal(needMsFor('medium', 'generate', 150000, 'gemini'), 75000);
   assert.equal(needMsFor('medium', 'generate', 150000), 75000);
 });
+
+describe('추가 확인: 무료 모델 참고 사진·Gemini 402·한 번에 보내는 크기·종료된 모델·참고 사진 수', () => {
+  const cfOk = (url) => (url.includes('llama') ? { json: { success: true, result: { response: 'A white dehumidifier on a wooden desk' } } } : { json: { success: true, result: { image: bytesToB64(JPG) } } });
+  test('FLUX.2 klein: 참고 사진은 input_image_0.. 로, 4장 넘거나 512px 이상이면 부르기 전에 거절 (schnell 은 못 받음)', async () => {
+    const small = fx('tiny.jpg'); // 64x48
+    const f = fakeFetch(cfOk);
+    const r = await cloudflareImage({ fetchImpl: f, accountId: 'a', token: 't', model: 'cf-flux-2-klein-4b', prompt: 'B', quality: 'medium', size: '1024x768',
+      images: [{ bytes: small, mime: 'image/jpeg' }, { bytes: fx('tiny.png'), mime: 'image/png' }] });
+    assert.equal(r.ok, true);
+    const form = f.calls[1].init.body;
+    assert.deepEqual([form.get('input_image_0').type, form.get('input_image_1').type, form.get('input_image_2')], ['image/jpeg', 'image/png', null]);
+    assert.deepEqual([form.get('width'), form.get('height')], ['1024', '768']);
+    const g = fakeFetch(() => ({ json: {} }));
+    const five = Array.from({ length: 5 }, () => ({ bytes: small, mime: 'image/jpeg' }));
+    assert.equal((await cloudflareImage({ fetchImpl: g, accountId: 'a', token: 't', model: 'cf-flux-2-klein-4b', prompt: 'B', size: '1024x768', images: five })).code, 'refs_unsupported');
+    assert.equal((await cloudflareImage({ fetchImpl: g, accountId: 'a', token: 't', model: 'cf-flux-2-klein-4b', prompt: 'B', size: '1024x768', images: [{ bytes: JPG, mime: 'image/jpeg' }] })).code, 'ref_small_missing', '1280x960 원본은 못 보냄');
+    assert.equal((await cloudflareImage({ fetchImpl: g, accountId: 'a', token: 't', model: 'cf-flux-1-schnell', prompt: 'B', size: '1024x1024', images: [{ bytes: small, mime: 'image/jpeg' }] })).code, 'refs_unsupported', 'schnell 은 참고 사진 못 받음');
+    assert.equal(g.calls.length, 0);
+  });
+  test('생성 흐름(무료 모델): 저장소의 작은 사본(small)만 받아 JPEG로 보내고 원본 경로는 안 받음 — 결과는 청구 없음, 사본이 없으면 공급자를 안 부름', async () => {
+    const f = fakeFetch(cfOk);
+    const d = fakeDeps({ fetchImpl: f, download: (p) => ({ ok: true, bytes: p.startsWith('small/') ? fx('tiny.jpg') : JPG }) });
+    const r = await runGeneration(d, { ...GEN, model: 'cf-flux-2-klein-4b', size: '1024x768', quality: 'medium' },
+      { keys: { cf: { accountId: 'a', token: 't' } }, refs: [{ path: 'up/a.png', small: 'small/2026/10/a.jpg', mime: 'image/png', role: 'subject', id: 'r1', kind: 'upload' }], composite: true, type: 'photo' });
+    assert.equal(r.ok, true);
+    assert.deepEqual(d.log.download, ['small/2026/10/a.jpg']);
+    assert.equal(f.calls[1].init.body.get('input_image_0').type, 'image/jpeg', '작은 사본은 JPEG');
+    const save = d.log.rpc.find((x) => x.name === 'image_save').args;
+    assert.deepEqual([save.fin.cost_status, save.fin.usage_usd, save.img.provider, save.img.composite], ['청구 없음', 0, 'cloudflare', true]);
+    const g = fakeFetch(() => ({ json: {} }));
+    const d2 = fakeDeps({ fetchImpl: g });
+    const r2 = await runGeneration(d2, { ...GEN, model: 'cf-flux-2-klein-4b', size: '1024x768', quality: 'medium' },
+      { keys: { cf: { accountId: 'a', token: 't' } }, refs: [{ path: 'up/a.jpg', small: '', mime: 'image/jpeg', role: 'subject', id: 'r1' }] });
+    assert.deepEqual([r2.code, g.calls.length, d2.log.download.length], ['bad_ref_image', 0, 0]);
+  });
+  test('Gemini: 402(미리 낸 크레딧 다 씀)는 한도 오류·청구 없음, 한 번에 보낼 크기(약 18MB)를 넘으면 부르기 전에 거절', async () => {
+    const e = classifyGeminiError(402, { error: { status: 'PAYMENT_REQUIRED', message: 'prepay credits depleted' } });
+    assert.deepEqual([e.code, e.billed], ['gemini_quota', 'no']);
+    const big = new Uint8Array(14 * 1024 * 1024); // base64 로 4/3 → 약 18.7MB
+    const f = fakeFetch(() => gemOk());
+    const r = await geminiImage({ fetchImpl: f, key: 'k', model: PRO, prompt: 'p', size: '1:1@1K', images: [{ bytes: big, mime: 'image/jpeg' }] });
+    assert.deepEqual([r.code, r.billed, f.calls.length], ['refs_too_big', 'no', 0]);
+    assert.ok(NOT_COUNTED.has('refs_too_big') && NOT_COUNTED.has('gemini_quota'));
+  });
+  test('종료된 모델(gpt-image-1)은 어느 공급자도 부르지 않고 실패 (청구 없음·횟수 안 셈)', async () => {
+    const f = fakeFetch(() => ({ json: {} }));
+    const d = fakeDeps({ fetchImpl: f });
+    const r = await runGeneration(d, { ...GEN, model: 'gpt-image-1', size: '1024x1024', quality: 'medium' }, { keys: { openai: 'sk' } });
+    assert.deepEqual([r.ok, r.code, f.calls.length], [false, 'model_retired', 0]);
+    const fin = d.log.rpc.find((x) => x.name === 'image_gen_fail').args.fin;
+    assert.deepEqual([fin.provider_called, fin.cost_status], [false, '청구 없음']);
+  });
+  test('참고 사진 수: 모델마다 다르고, 고치기면 고칠 이미지가 한 장을 씀', () => {
+    assert.deepEqual([refsLimit('gpt-image-2.5-flare', 'generate'), refsLimit('gpt-image-2.5-sunburst', 'edit')], [16, 15]);
+    assert.deepEqual([refsLimit('gemini-3-pro-image', 'generate'), refsLimit('gemini-3-pro-image', 'edit')], [6, 5]);
+    assert.deepEqual([refsLimit('gemini-nano-banana-2.1', 'generate'), refsLimit('cf-flux-2-klein-4b', 'generate'), refsLimit('cf-flux-2-klein-4b', 'edit')], [10, 4, 3]);
+    assert.deepEqual([refsLimit('cf-flux-1-schnell', 'generate'), refsLimit('my-new-model', 'generate')], [0, 0]);
+  });
+});

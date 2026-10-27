@@ -35,7 +35,7 @@ export const IMAGE_ERR = {
   too_big: '파일이 너무 커.',
   storage_failed: '파일을 저장하지 못했어. 다시 해줘.',
   stock_bad_image: 'Pexels 사진 파일을 읽지 못했어. 다른 사진을 골라줘.',
-  real_photo_needed: '실제 상품·화면이 보여야 하는 자리야. 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.',
+  real_photo_needed: "실제 상품·화면이 보여야 하는 자리야. 진짜 제품 사진을 참고 사진('대상 모양 유지')으로 넣거나, 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.",
   openai_unsupported_option: '이 모델이 그 크기·품질을 지원하지 않아. 설정 > 이미지에서 모델이나 품질을 바꿔줘.',
   openai_spend_limit: 'OpenAI에 걸어둔 사용 한도(Spend limit)에 닿았어. OpenAI 설정의 Limits에서 한도를 올리거나 다음 달까지 기다려줘.',
   timeout: '응답이 너무 늦어. 다시 눌러줘 (같은 요청이면 두 번 만들지 않아).',
@@ -405,7 +405,9 @@ export function createStudio(ui) {
     card.append(h('div', { class: 'split' }, h('b', null, slotName(s)), chips));
     if (s.n) card.append(h('p', { class: 'slot-t' }, s.text || '(설명 없음)'));
     const risk = s.n ? IMG.slotRisk(s.text) : { real: false };
-    if (risk.real && (!img || img.kind === 'ai')) card.append(h('p', { class: 'notice' }, risk.msg));
+    // 진짜 제품 사진을 참고한 AI 합성은 '실제 사진을 권해' 대신 원본과 비교하라고 (1.5.0)
+    if (risk.real && img && img.kind === 'ai' && img.composite) card.append(h('p', { class: 'notice' }, "진짜 제품 사진을 참고한 'AI 합성'이야. 참고한 사진과 모양·글자·버튼이 같은지 확인하고, 실제로 써본 사진처럼 쓰지 마."));
+    else if (risk.real && (!img || img.kind === 'ai')) card.append(h('p', { class: 'notice' }, risk.msg));
     if (img) {
       card.append(thumb(img, () => previewSheet(p, s)), h('span', { class: 'hint' }, imageLine(img, d)));
       if (s.n && img.description && IMG.descriptionMismatch(s.text, img.description)) card.append(h('p', { class: 'notice' }, '이 이미지 설명이 사진 자리 설명과 많이 달라. 맞는 이미지인지 확인해줘.'));
@@ -721,7 +723,7 @@ export function createStudio(ui) {
       const keyGood = isTest() || keyOk(d.keys, c.provider);
       put(modeInfo,
         h('span', { class: 'hint' }, `${prov ? prov.label : '공급자 모름'} · ${model || '(모델 없음)'}${c.status === 'preview' ? ' · 미리보기(preview) 모델' : ''}${c.deprecated ? ' · 이전 모델' : ''}`),
-        h('span', { class: 'chip ' + (keyGood ? 'v-ok' : 'v-no') }, isTest() ? '점검용 (실제 생성 아님)' : keyGood ? (c.free ? '연결됨 · 무료' : '키 있음') : '키 없음'));
+        h('span', { class: 'chip ' + (keyGood ? 'v-ok' : 'v-no') }, isTest() ? '점검용 (실제 생성 아님)' : keyGood ? (c.free ? '키 있음 · 무료' : '키 있음') : '키 없음'));
       const basis = isTest() ? '점검용 가짜 모델 — 비용 없음' : IMG.costBasis({ quality: f.quality, size, promptTokens: IMG.estimateTokens(prompt), mode, prices: prices(), model, refs: f.refs.length });
       put(costBox,
         h('span', null, `공급자·모델: ${prov ? prov.label : '?'} · ${model}`),
@@ -1154,15 +1156,29 @@ export function createStudio(ui) {
           confirm_usd: r.est, generic_ok: f0.genericOk || undefined, batch: { id: batchId, kind: 'compare', index: i, total: todo.length }, reserve_usd: reserve };
         put(msg, h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, `${i + 1}/${todo.length} ${r.m.caps.label} 만드는 중…`)));
         let j = null;
-        try { j = await sendGenerate(body); } catch (e) { results.push({ m: r.m, error: e }); continue; }
+        // 서버가 바쁘면(돈 나가기 전) 알려준 초만큼 기다렸다 같은 요청 번호로 다시 (최대 3번, 창을 닫으면 멈춤)
+        let err = null;
+        for (let attempt = 0; attempt < 4 && !j; attempt++) {
+          try { j = await sendGenerate(body); err = null; } catch (e) {
+            err = e;
+            if (e && e.code === 'auth') return;
+            if (!(e && e.code === 'server_busy' && attempt < 3 && goB.isConnected)) break;
+            put(msg, h('p', { class: 'hint' }, `서버가 다른 일을 마무리하는 중이야. ${Math.max(1, Math.round(Number(e.retry_after) || 3))}초 뒤에 같은 요청으로 다시 보낼게 (돈은 아직 안 나갔어).`));
+            await sleep(Math.max(1, Number(e.retry_after) || 3) * 1000);
+            if (!goB.isConnected) break;
+          }
+        }
+        if (!j) { results.push({ m: r.m, error: err || { code: 'server_busy' } }); continue; }
         let g = j.generation, img = null;
-        for (let t = 0; t < 80 && g.status === '생성 중'; t++) {
+        for (let t = 0; t < 80 && g.status === '생성 중' && goB.isConnected; t++) {
           await sleep(t < 20 ? 3000 : 5000);
           try { const x = await api('/images/generations/' + g.id); g = x.generation; img = x.image; if (C[p.id] && C[p.id].data) C[p.id].data.usage = x.usage; } catch (e) { if (e && e.code === 'auth') return; }
         }
         results.push({ m: r.m, generation: g, image: img });
       }
       busy = false;
+      // 창을 닫았거나 다른 창을 열었으면 결과 창을 다시 띄우지 않음 (서버는 보낸 장까지 끝냄 — 사진 자리·보관함에서 볼 수 있어)
+      if (!goB.isConnected) { refresh(p.id); toast('모델 비교: 보낸 장까지만 만들고 멈췄어. 결과는 보관함에 있어.', 4000); return; }
       showResults();
     };
     const evalBox = (img, g) => {
@@ -1891,7 +1907,7 @@ export function createStudio(ui) {
         ps.last_success ? `실제 생성 성공: ${L.fmtTime(ps.last_success.at)} (${ps.last_success.model})` : '실제 생성 성공 기록 없음',
         ps.last_failure ? `마지막 실패: ${L.fmtTime(ps.last_failure.at)} (${ps.last_failure.code})` : '',
       ].filter(Boolean).join(' · '));
-      const badge = hasKey ? (chk && chk.ok ? '키 연결됨 · 확인됨' : '키 연결됨 · 확인 전') : '키 없음';
+      const badge = hasKey ? (chk && chk.ok ? '키 있음 · 연결 확인됨' : '키 있음 · 연결 확인 전') : '키 없음';
       return h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, title), h('small', null, env), line),
         h('div', { class: 'stack' }, h('span', { class: 'badge ' + (hasKey ? (chk && chk.ok ? 'v-ok' : 'v-unk') : 'v-no') }, badge),
           hasKey ? btn('연결 확인', 'sm ghost', async (ev) => {
@@ -1902,8 +1918,8 @@ export function createStudio(ui) {
     const loadStatus = () => api('/images/config').then((j) => {
       put(status,
         ...PROV_ROWS.map(([id, title, env]) => provRow(id, title, env, j)),
-        ...j.providers.map((x) => h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${x.label} (실제 사진 검색)`), h('small', null, 'Supabase Secrets: PEXELS_API_KEY')), h('span', { class: 'badge ' + (x.connected ? 'v-ok' : 'v-no') }, x.connected ? '키 연결됨' : '키 없음'))),
-        h('p', { class: 'hint' }, "'키 연결됨'은 서버에 키가 있다는 뜻이야. '연결 확인'은 이미지를 만들지 않고 키·모델을 공급자에 물어본 결과고(돈 안 듦), 실제로 만들어 본 기록은 따로 보여줘."),
+        ...j.providers.map((x) => h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${x.label} (실제 사진 검색)`), h('small', null, 'Supabase Secrets: PEXELS_API_KEY')), h('span', { class: 'badge ' + (x.connected ? 'v-ok' : 'v-no') }, x.connected ? '키 있음' : '키 없음'))),
+        h('p', { class: 'hint' }, "'키 있음'은 서버에 키가 있다는 뜻일 뿐이야. '연결 확인'은 이미지를 만들지 않고 키·모델을 공급자에 물어본 결과고(돈 안 듦), 실제로 만들어 본 기록은 따로 보여줘."),
         h('p', { class: 'hint' }, `${usageLine(j.usage)} · 보관함 ${L.fmtNum(j.usage.image_count || 0)}장 · ${fmtBytes(Number(j.usage.storage_bytes || 0))} (멈추는 선 ${fmtBytes(j.storage_limit)})`),
         j.settings.image_gen_model === j.test_model || j.settings.image_edit_model === j.test_model ? h('p', { class: 'notice' }, '점검용 가짜 모델(gf-test-fake)로 돼 있어. 실제로 쓰려면 아래에서 모델을 골라줘.') : null);
     }).catch((e) => put(status, h('p', { class: 'hint' }, ui.errText(e))));
@@ -1985,7 +2001,7 @@ export function createStudio(ui) {
       h('li', null, '(선택) Gemini: aistudio.google.com 에 로그인 → Get API key → Create API key. 이미지 모델은 결제가 연결된 프로젝트에서만 쓸 수 있어 (Google AI Studio의 결제 설정). 키를 Supabase Secrets 에 GEMINI_API_KEY 이름으로 넣어.'),
       h('li', null, 'Pexels: 지금(2026-10-22 확인)은 새 키 발급이 멈춰 있어. 다시 열리면 pexels.com/api → Get Started 로 받아 (무료, 시간당 200번·월 20,000번). 그 전까지는 직접 올리기를 써.'),
       h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 이름대로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
-      h('li', null, "이 화면을 다시 열어 '키 연결됨'이 보이면 '연결 확인'을 눌러 봐 (이미지를 만들지 않아서 돈이 안 들어). 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).")),
+      h('li', null, "이 화면을 다시 열어 '키 있음'이 보이면 '연결 확인'을 눌러 봐 (이미지를 만들지 않아서 돈이 안 들어). 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).")),
       h('div', { class: 'go' }, h('a', { class: 'copy', href: 'https://supabase.com/dashboard/project/oxewhsqmdkiasckvnyua/functions/secrets', target: '_blank', rel: 'noopener noreferrer' }, 'Supabase Secrets 열기 ↗'),
         h('a', { class: 'copy', href: 'https://dash.cloudflare.com/profile/api-tokens', target: '_blank', rel: 'noopener noreferrer' }, 'Cloudflare 토큰 ↗'),
         h('a', { class: 'copy', href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI 키 ↗'),

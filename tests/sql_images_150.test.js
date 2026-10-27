@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { freshDb, one, all, val, longBody, MIGRATIONS_DIR } from './helpers/db.js';
+import { KNOWN_MODELS, modelCaps } from '../images.js';
 
 const KEY = (n) => `v150-key-${String(n).padStart(4, '0')}-abcdef`;
 const begin = (db, p) => val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ model: 'gpt-image-2.5-flare', size: '1024x1024', quality: 'medium', est_usd: 0.0132, provider: 'openai', ...p })]);
@@ -126,6 +127,16 @@ describe('017 — 생성 시작: 공급자·참고 사진·장면 설계서·묶
       { provider: 'gemini', status: '실패', error_code: 'timeout', cost_status: '확인 필요', auto_cost_status: '확인 필요' },
     ]);
     await failGen(db, n.id, { cost_status: '청구 없음', provider_called: false });
+  });
+  test('참고 사진 수: 앱 모델 표의 가장 큰 수(OpenAI 16장)까지 받고, 그보다 많으면 거절', async () => {
+    await db.query(`update public.image_generations set provider_called = false`);
+    const max = Math.max(...KNOWN_MODELS.map((m) => modelCaps(m).refsMax));
+    assert.equal(max, 16, 'DB 검사(16)와 모델 표가 같아야 함');
+    const refs = (n) => Array.from({ length: n }, (_, i) => ({ image_id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, role: 'style' }));
+    const g = await begin(db, { request_key: KEY(50), refs: refs(16) });
+    assert.equal(g.refs.length, 16);
+    await failGen(db, g.id);
+    await assert.rejects(begin(db, { request_key: KEY(51), refs: refs(17) }), /check/);
   });
 });
 
