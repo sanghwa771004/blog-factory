@@ -481,13 +481,16 @@ export function recommendPreset({ post, slot, text, purpose } = {}) {
 // ── 원고에서 읽는 맥락 (있을 때만) ──
 // [찾을 말, 한국어, 영어, 한국을 뜻하는지]
 const SEASON_AFTER = '(?=철|맞이|날|시즌|에|이|의|은|엔|을|도|용|\\s|$|[,.·)!?~])';
-// '봄'은 '써 봄'·'해 봄'처럼 말끝에도 쓰여서, 뒤에 계절을 뜻하는 말이 붙을 때만 (1.5.0 검토)
-const SPRING_AFTER = '(?=철|맞이|날|시즌|나들이|에|이|의|은|엔|을|도|용|과|·|,|\\s(?:시즌|철|나들이|날씨|맞이|코디|대청소|이사|신상|분위기|풍경|햇살|꽃|여행))';
+// '봄'은 '써 봄'·'해 봄'·'먹어 봄'처럼 말끝에도 쓰여서, 뒤에 계절을 뜻하는 말이 붙을 때만, 그리고 앞 낱말이 '써·해·먹어'처럼
+// 동사(…해 봄)가 아닐 때만 (1.5.0 검토). '올해 봄'·'새 봄'처럼 앞 낱말이 이름씨면 계절
+const SPRING_AFTER = '(?=철|맞이|날|시즌|나들이|에|이|의|은|엔|을|도|용|과|·|,|\\s(?:시즌|철|나들이|날씨|맞이|코디|대청소|이사|신상|분위기|풍경|햇살|햇볕|꽃|여행|감성|소풍|피크닉|산책|패션|아우터|코트|재킷|자켓|원피스|인테리어|바람|비|하늘|데이트|축제|정원|가드닝|휴가|방학|새\\s?학기|학기|캠핑|등산|드라이브|향기|컬러|색|메이크업|네일|알레르기|환절기|미세먼지))';
+const VERB_BEFORE_SPRING = '(?<!(?:(?<![가-힣])(?:써|해|봐|가|사|와|줘|타|켜|꺼|돼|쳐|져|펴|자)|[가-힣](?:어|아|여|워|셔|라|러|려))\\s)';
 const CTX_SEASON = [
-  [new RegExp(`(?<![가-힣])봄${SPRING_AFTER}|올봄|초봄|늦봄|이른\\s?봄|벚꽃|꽃샘추위`), '봄', 'spring'],
-  [new RegExp(`(?<![가-힣])여름${SEASON_AFTER}|한여름|폭염|무더위|열대야`), '여름', 'summer'],
-  [new RegExp(`(?<![가-힣])가을${SEASON_AFTER}|단풍`), '가을', 'autumn'],
-  [new RegExp(`(?<![가-힣])겨울${SEASON_AFTER}|한겨울|한파|첫눈|동파`), '겨울', 'winter'],
+  [new RegExp(`(?<![가-힣])${VERB_BEFORE_SPRING}봄${SPRING_AFTER}|봄(?:비|바람|꽃|볕|밤)|올봄|초봄|늦봄|이른\\s?봄|벚꽃|꽃샘추위`), '봄', 'spring'],
+  // 여름·가을·겨울은 다른 뜻으로 거의 안 쓰여서 붙은 말과 상관없이 ('가을비'·'여름휴가'·'겨울바람'도)
+  [/여름|폭염|무더위|열대야/, '여름', 'summer'],
+  [/가을|단풍/, '가을', 'autumn'],
+  [/겨울|한파|첫눈|동파/, '겨울', 'winter'],
   [/김장/, '김장철', 'early winter (kimchi-making season)', true],
   [/장마/, '장마철', 'rainy season'],
   [/크리스마스|성탄절/, '크리스마스', 'Christmas season'],
@@ -496,9 +499,10 @@ const CTX_SEASON = [
   [/환절기/, '환절기', 'change of seasons'],
 ];
 // 앞에 다른 글자가 붙은 말('대비가 오히려'·'준비가')·눈을 뜻하는 말('눈길을 끄는'·'눈이 오래')은 날씨로 안 봄 (1.5.0 검토)
-const COME = '(?:오(?:는|면|고|던|니|기|다|자|길|네|겠)|와|온|올\\s?때|내리)';
+// '와'·'온'은 뒤에 말끝이 올 때만 ('눈이 와서'·'비가 온 날'은 날씨, '눈이 온통'·'눈이 와닿는'은 아님)
+const COME = '(?:오(?:는|면|고|던|니|기|다|자|길|네|겠)|와(?=서|요|도|야|\\s|$|[,.!?~])|온(?=다|\\s|$|[,.!?~])|왔|올\\s?때|내리)';
 const CTX_WEATHER = [
-  [new RegExp(`(?<![가-힣])비\\s?(?:오는|내리는|올\\s?때|소식)|(?<![가-힣])비가\\s?${COME}|빗(?:물|방울|소리)|빗길|폭우|소나기`), '비', 'rain'],
+  [new RegExp(`(?<![가-힣])비\\s?(?:오는|내리는|올\\s?때|소식)|(?<![가-힣])비가\\s?${COME}|(?:봄|여름|가을|겨울|장맛|소낙|이슬|가랑|보슬|여우)비|빗(?:물|방울|소리)|빗길|폭우|소나기`), '비', 'rain'],
   [new RegExp(`(?<![가-힣])눈\\s?(?:오는|내리는|올\\s?때)|(?<![가-힣])눈이\\s?(?:${COME}|쌓)|폭설|함박눈|첫눈|눈\\s?덮인|설경|눈사람`), '눈', 'snow'],
   [/맑은\s?날|화창/, '맑음', 'clear sky'],
   [/흐린\s?날/, '흐림', 'overcast sky'],
@@ -514,7 +518,7 @@ const CTX_TIME = [
   [/오후/, '오후', 'afternoon'],
   [/해\s?질\s?녘|노을|석양/, '해 질 녘', 'sunset'],
   [/저녁/, '저녁', 'evening'],
-  [/(?<![가-힣])밤(?:에|중|새|늦게|시간|사이|마다)(?![가-힣])|(?:늦은|깊은)\s?밤|야간|한밤/, '밤', 'night'],   // '밤 껍질'(먹는 밤)은 아님
+  [/(?<![가-힣])밤(?:에|중|새|늦게|시간|사이|마다)(?![가-힣])|(?<![가-힣])밤\s?(?:산책|하늘|풍경|공기|바다|거리|드라이브|조명|야경|별|분위기|운전|외출)|(?:봄|여름|가을|겨울)\s?밤|(?:늦은|깊은|오늘)\s?밤|어젯밤|간밤|야간|야경|한밤/, '밤', 'night'],   // '밤 껍질'·'군밤'(먹는 밤)은 아님
 ];
 const CTX_PLACE = [
   [/원룸/, '원룸', 'a small one-room studio apartment', true],
@@ -541,7 +545,7 @@ const CTX_PLACE = [
   [/길거리|골목|거리\s?(풍경|에서)/, '거리', 'a street'],
   [/공원/, '공원', 'a park'],
   [/캠핑/, '캠핑장', 'a campsite'],
-  [/(?<![가-힣])(?:차|차량|자동차)\s?(?:안|내부)(?:에서|에|쪽)?(?![가-힣])|운전석/, '차 안', 'inside a car'],   // 주차 안내·자동차 안전은 아님
+  [/(?<![가-힣])(?:차|차량|자동차)\s?(?:안|내부)(?:에서|에|쪽|이|은|을|도|의)?(?![가-힣])|운전석/, '차 안', 'inside a car'],   // 주차 안내·자동차 안전은 아님
   [/주차장/, '주차장', 'a parking lot'],
   [/교실|학교/, '학교', 'a school'],
   [/도서관/, '도서관', 'a library'],
@@ -633,6 +637,17 @@ const objJosa = (w) => { const c = String(w || '').trim().slice(-1).charCodeAt(0
 // ── 장면 설계서 ──
 // 화면에서 고칠 수 있는 칸 (overrides 로 옴). 서버는 이 칸만 받고 길이를 자름
 export const SCENE_EDITABLE = ['subject', 'setting', 'time', 'camera', 'light', 'color', 'materials', 'composition', 'must_show', 'avoid', 'locale'];
+// '대상 모양 유지' 참고 사진이 있을 때 '꼭 보일 것'에 앱이 저절로 넣는 줄 (다시 만들기에서 사용자가 쓴 줄로 되살리지 않게 — 1.5.0 검토)
+export const SUBJECT_MUST_SHOW = '참고 사진 속 대상 (모양·색·버튼·인쇄 그대로)';
+// 사용자가 고친 장면 칸 → 금지 표현 검사에 쓰는 글: 그려 달라는 칸 전부 ('넣지 말 것'·지역은 빼고). 화면·서버 같은 범위
+export const sceneDrawText = (o) => Object.entries(o && typeof o === 'object' ? o : {})
+  .filter(([k, v]) => SCENE_EDITABLE.includes(k) && k !== 'avoid' && k !== 'locale' && v != null)
+  .map(([, v]) => (Array.isArray(v) ? v.join(' ') : String(v))).join('\n').trim();
+// 실제 상품 자리 판단에 쓰는 글: 주 피사체·꼭 보일 것만 (장소·구도·빛 칸의 '화면 왼쪽'·'카페 내부'·'소프트박스'는 상품을 그리라는 뜻이 아님)
+export const sceneGateText = (o) => {
+  const x = o && typeof o === 'object' ? o : {};
+  return [typeof x.subject === 'string' ? x.subject : '', ...(Array.isArray(x.must_show) ? x.must_show : [])].map((v) => String(v || '')).join(' ').trim();
+};
 export const SCENE_LABELS = {
   goal: '이미지의 목적', subject: '주 피사체와 행동', setting: '장소와 주변 환경', time: '계절·날씨·시간', camera: '카메라 각도와 거리',
   light: '광원과 그림자', color: '색감', materials: '소재와 질감', composition: '구도와 여백', platform: '대상 플랫폼·화면 비율',
@@ -681,7 +696,7 @@ export function buildScene({ post, slot, text, style, preset, purpose, ratio, ex
     camera: line('camera', P.camera, 200), light: line('light', P.light, 200), color: line('color', P.color, 200),
     materials: line('materials', P.materials, 200), composition: line('composition', composition, 300),
     platform: { purpose: pu, label: PURPOSES[pu].label, ratio: r, size: String(size || ''), channel: String(channel || '') },
-    must_show: list('must_show', roleList.some((x) => x.role === 'subject') ? ['참고 사진 속 대상 (모양·색·버튼·인쇄 그대로)'] : []),
+    must_show: list('must_show', roleList.some((x) => x.role === 'subject') ? [SUBJECT_MUST_SHOW] : []),
     avoid: list('avoid', [...P.avoid]),
     locale: o.locale === 'KR' ? 'KR' : o.locale === 'none' ? '' : c.korea ? 'KR' : '',
     refs: roleList,

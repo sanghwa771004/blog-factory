@@ -11,7 +11,7 @@ import {
   validApiSize, promptRisk, blocksOf, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
   CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
   presetOf, buildScene, promptFromScene, sizeLabel, aiGate, REF_ROLES, SCENE_EDITABLE, IMAGE_MODES, REVIEW_MODELS, reviewCaps, estimateReviewUsd, EVAL_CRITERIA, PRESETS, refsLimit, sniffImage,
-  GEMINI_PRICE_IDS,
+  GEMINI_PRICE_IDS, sceneDrawText, sceneGateText,
 } from "./images.js";
 import {
   BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter,
@@ -1280,9 +1280,10 @@ function cleanSceneOverrides(v: unknown): J {
   }
   return out;
 }
-// 사용자가 고친 장면 칸 중 '그려 달라는' 칸만 (넣지 말 것 목록·지역 선택은 빼고) — 금지 표현 검사·실제 상품 판단에 씀 (1.5.0 검토)
-const sceneUserText = (v: unknown) => Object.entries(cleanSceneOverrides(v)).filter(([k]) => k !== "avoid" && k !== "locale")
-  .map(([, x]) => (Array.isArray(x) ? x.join(" ") : String(x))).join("\n");
+// 사용자가 고친 장면 칸 중 '그려 달라는' 칸 (넣지 말 것 목록·지역 선택은 빼고) — 금지 표현 검사에 씀.
+// 실제 상품 자리 판단에는 주 피사체·꼭 보일 것만 씀 (장소·구도·빛 칸의 '화면 왼쪽'·'카페 내부'는 상품이 아님) — images.js 와 화면이 같은 범위 (1.5.0 검토)
+const sceneUserText = (v: unknown) => sceneDrawText(cleanSceneOverrides(v));
+const sceneSubjectText = (v: unknown) => sceneGateText(cleanSceneOverrides(v));
 const needs017 = (e: unknown, name: string) => { if (missingTable(e, name)) fail(409, "db_update_needed", { migration: "017" }); };
 const providersInfo = () => Object.entries(PHOTO_PROVIDERS).map(([id, p]) => ({ id, label: p.label, connected: !!(Deno.env.get(p.envKey) ?? ""), site: p.site, license_url: p.licenseUrl }));
 // 생성 기록을 화면에 보낼 때는 긴 프롬프트를 뺌 (이미지 정보에 따로 있음)
@@ -1588,10 +1589,10 @@ async function generateImage(c: Ctx) {
   }
   // AI로 만들어도 되는 자리인지 (images.js aiGate — 화면과 같은 판단): '직접 찍기' 자리는 막음,
   // 실제 상품·화면이 보여야 하는 자리는 진짜 제품 사진(직접 올림·Pexels)을 '대상 모양 유지'로 넣었거나, 고치는 이미지가 이미 AI 합성이거나,
-  // '일반 장면' 확인이 있어야 함. 고친 장면 칸(주 피사체·꼭 보일 것 등)도 같이 봄 (1.5.0 검토)
+  // '일반 장면' 확인이 있어야 함. 고친 장면 칸 중 주 피사체·꼭 보일 것도 같이 봄 (1.5.0 검토)
   const gateRefs = refs.map((r) => ({ role: r.role, kind: String(refRows.find((x) => x.id === r.image_id)?.kind ?? "") }));
   const gate = aiGate(isExtraKey(String(slot!.key)) ? "" : String(slot!.text ?? ""), {
-    text: [text, extra, sceneUserText(b.scene)].join(" "), refs: gateRefs, genericOk: b.generic_ok === true, baseComposite: base?.composite === true,
+    text: [text, extra, sceneSubjectText(b.scene)].join(" "), refs: gateRefs, genericOk: b.generic_ok === true, baseComposite: base?.composite === true,
   });
   if (!gate.ok) fail(400, String(gate.code), gate.word ? { word: gate.word } : {});
   // 무료 모델(FLUX.2 klein)은 512px보다 작은 사본만 받음 — 사본이 없는 이미지가 있으면 화면이 만들어 올린 뒤 다시 보냄 (돈 안 나감)
@@ -1771,7 +1772,9 @@ async function reviewImage(c: Ctx) {
   const m = reviewCaps(model) as J | null;
   if (!m) fail(400, model ? "review_model_unknown" : "review_model_off");
   if (!providerKeyOk(String(m!.provider))) fail(503, keyMissingCode(String(m!.provider)));
-  const refs = (Array.isArray(img.ref_images) ? img.ref_images : []) as J[];
+  // 고친 'AI 합성' 이미지는 자기 기록에 참고 사진이 없음 → 고치기 전 원본 쪽에서 찾아 같이 보냄 (원본과 같은지 보게 — 1.5.0 검토)
+  let refs = (Array.isArray(img.ref_images) ? img.ref_images : []) as J[];
+  if (!refs.length && img.composite === true) refs = await lineageRefs(img);
   const est = Number(estimateReviewUsd(model, 1 + Math.min(3, refs.length)));
   const seen = Number(b.confirm_usd);
   if (!(Number.isFinite(seen) && seen + Math.max(0.0005, est * 0.02) >= est)) fail(409, "estimate_changed", { est_usd: est, model });
@@ -1809,9 +1812,21 @@ async function reviewImage(c: Ctx) {
   if (!r.ok) return finish({ ok: false, error_code: r.code, error_message: scrub(r.message, 500), cost_status: m!.free || r.billed === "no" ? "청구 없음" : "확인 필요" });
   const usd = reviewUsageUsd(model, r.usage);
   const cost = m!.free ? "청구 없음" : usd != null ? "사용량 기준" : "예상";
-  const parsed = parseReview(String(r.text ?? ""));
+  const parsed = parseReview(String(r.text ?? ""), { refs: images.length - 1 });
   if (!parsed) return finish({ ok: false, error_code: "review_unreadable", error_message: "검수 답을 읽지 못했어. 다시 해줘.", usage: r.usage, usage_usd: usd, cost_status: cost });
   return finish({ ok: true, scores: { checks: parsed.checks }, summary: parsed.summary, uncertainty: parsed.uncertainty, suggestions: parsed.suggestions, usage: r.usage, usage_usd: usd, cost_status: cost });
+}
+// 고친 이미지의 참고 사진: 원본(parent_image_id)을 따라 올라가며 참고 사진이 있는 첫 이미지의 것 (최대 5단계, 지운 원본도 기록은 읽음)
+async function lineageRefs(img: J): Promise<J[]> {
+  let cur = img;
+  for (let i = 0; i < 5 && isUuid(cur.parent_image_id); i++) {
+    const { data, error } = await sb.from("post_images").select("id, parent_image_id, ref_images").eq("id", cur.parent_image_id).maybeSingle();
+    if (error || !data) break;
+    cur = data as J;
+    const r = (Array.isArray(cur.ref_images) ? cur.ref_images : []) as J[];
+    if (r.length) return r;
+  }
+  return [];
 }
 // 사용자 평가 (모델 비교·후보 고르기). AI 평가와 따로 저장 — 항목마다 1(아쉬움)~3(좋음), AI 티는 3 = 거의 없음
 async function evaluateImage(c: Ctx) {

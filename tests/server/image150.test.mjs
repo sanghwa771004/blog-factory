@@ -36,6 +36,8 @@ const images = {
   [UP]: img(UP),
   [UP_NORIGHTS]: img(UP_NORIGHTS, { rights_confirmed: false }),
   [UP_SMALL]: img(UP_SMALL, { ref_small_path: 'small/2026/10/old.jpg' }),
+  // AI 합성(AI)을 고친 이미지: 자기 기록에는 참고 사진이 없고 원본이 AI
+  [CHILD]: img(CHILD, { kind: 'ai', provider: 'openai', model: 'gpt-image-2.5-sunburst', storage_path: 'ai/child.jpg', ref_images: [], composite: true, parent_image_id: AI }),
 };
 const SETTINGS = { id: 1, image_gen_model: 'cf-flux-2-klein-4b', image_edit_model: 'gpt-image-2.5-sunburst', image_quality: 'medium', image_daily_limit: 20, image_monthly_budget_usd: 5,
   image_fx_krw: null, image_fx_date: null, image_fx_source: '', image_prices: {}, image_modes: {}, image_review_model: '', image_request_cap_usd: 1, image_ratio_prefs: {} };
@@ -396,6 +398,24 @@ describe('키 있는 서버 (시험용 가짜 키 — 서버는 바깥에 연결
     const one = await call('POST', 'images/generate', gen({ model: NB, quality: 'high', confirm_usd: est, reserve_usd: 9 }));
     assert.equal(one.status, 202, JSON.stringify(one.j));
     assert.ok(close(st.begins.at(-1).reserve_usd, est), '묶음이 아니면 이번 장 예상만 (화면 값은 안 씀)');
+  });
+  test('고친 장면 칸 중 장소·구도·빛은 제품 자리 판단에 안 씀 (화면 왼쪽·카페 내부·소프트박스) — 주 피사체·꼭 보일 것만', { skip }, async () => {
+    const r = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { setting: '카페 내부', composition: '디퓨저는 화면 왼쪽', light: '소프트박스 같은 부드러운 빛' } }));
+    assert.equal(r.status, 202, JSON.stringify(r.j));
+    const m = await call('POST', 'images/generate', gen({ model: 'gf-test-fake', scene: { must_show: ['제품 라벨'] } }));
+    assert.deepEqual([m.status, m.j.error], [400, 'real_photo_needed']);
+  });
+  test('AI 검수: 고친 AI 합성 이미지는 원본의 참고 사진까지 같이 보내서 예상도 그만큼 (자기 기록에 참고 사진이 없어도)', { skip }, async () => {
+    const a = await call('POST', `images/${AI}/review`, { model: 'gpt-5.6-luna' });
+    const c = await call('POST', `images/${CHILD}/review`, { model: 'gpt-5.6-luna' });
+    assert.deepEqual([c.status, c.j.error], [409, 'estimate_changed']);
+    assert.equal(c.j.est_usd, a.j.est_usd, '원본(참고 사진 1장)과 같은 장수');
+    images[CHILD].composite = false;
+    try {
+      const n = await call('POST', `images/${CHILD}/review`, { model: 'gpt-5.6-luna' });
+      assert.ok(n.j.est_usd < a.j.est_usd, '합성이 아니면 원본 쪽을 찾지 않음');
+    } finally { images[CHILD].composite = true; }
+    assert.equal(st.reviews.length, 0, '확인 전이라 검수는 시작하지 않음');
   });
   test('키 값은 응답에도, DB로 보낸 요청에도 없음', { skip }, async () => {
     const all = bodies.join('\n') + '\n' + JSON.stringify(srv.calls);

@@ -189,6 +189,7 @@ class Mock:
         self.min_est = None   # 서버 쪽 예상 비용이 더 크다고 답하게 (estimate_changed 시험)
         self.busy_left = 0    # 이 횟수만큼 server_busy 로 답하게 (서버 일꾼 시간 부족 시험)
         self.gen_errors = []  # 생성 요청마다 하나씩 꺼냄: None 이면 보통대로, (상태, 본문)이면 그 오류로 답함 (묶음 중간 오류 시험)
+        self.review_extra_imgs = 0  # 서버가 검수에 더 보내는 이미지 수 (고친 AI 합성의 원본 참고 사진처럼 화면이 모르는 것 — 예상 비용 다시 확인 시험)
         self.gen_missing = False  # 생성 전용 서버(blog-gen)가 아직 없는 것처럼 (Supabase 404)
         self.gen_hits = 0         # 그때 생성 전용 서버로 온 요청 수
         self.gen_boot_error = False  # 생성 전용 서버가 올라가 있지만 켜지지 못하는 것처럼 (Supabase 503 BOOT_ERROR)
@@ -601,7 +602,7 @@ class Mock:
             prov = REVIEW[model][0]
             if not self.keys.get(prov):
                 return 503, {'error': KEY_MISSING[prov]}
-            est = review_est(model, 1 + min(3, len(i.get('ref_images') or [])))
+            est = review_est(model, 1 + min(3, len(i.get('ref_images') or []) + self.review_extra_imgs))
             seen = body.get('confirm_usd')
             if not isinstance(seen, (int, float)) or seen + max(0.0005, est * 0.02) < est:
                 return 409, {'error': 'estimate_changed', 'est_usd': est, 'model': model}
@@ -1829,7 +1830,15 @@ def main():
             expect(sheet).to_contain_text('1번째 고침 · 지금 보는 이미지')
             expect(sheet).to_contain_text('원본')
             sheet.get_by_role('button', name='닫기').click()
-        check('1.5.0 고치기·수정 이력: 설정의 편집 모델, 예시 문장, 원본은 그대로·새 이미지가 원본을 가리킴, 미리보기에서 원본부터 이력', t_studio_edit_history)
+            # 다시 만들기(1.5.0 검토 뒤): 고친 이미지는 같은 원본을 같은 지시로 다시 고치는 창 — 새로 만들기 창에 지시를 사진 설명으로 넣지 않음
+            n1 = len(gen_bodies())
+            page.locator('section.studio .slot').nth(0).get_by_role('button', name='다시 만들기').click()
+            expect(sheet).to_contain_text('원본은 그대로 남고, 고친 이미지는 수정 이력으로 이어져')
+            expect(sheet.locator('textarea').first).to_have_value('조명만 더 자연스럽게 바꿔줘')
+            expect(sheet.get_by_role('button', name=re.compile(r'· 고치기$'))).to_be_visible()
+            assert len(gen_bodies()) == n1, '창만 열고 보내지 않음'
+            close_sheet()
+        check('1.5.0 고치기·수정 이력: 설정의 편집 모델, 예시 문장, 원본은 그대로·새 이미지가 원본을 가리킴, 미리보기에서 원본부터 이력, 다시 만들기는 같은 원본을 다시 고치는 창', t_studio_edit_history)
 
         def t_studio_compare():
             reload_keys(cloudflare=False)  # 비교 기본값이 서로 다른 두 모델(OpenAI·Gemini)이 되게
@@ -1954,7 +1963,7 @@ def main():
             expect(roles).to_have_count(1)
             expect(roles).to_have_value('subject')
             expect(sheet.locator('select[name=preset]')).to_have_value('product_still')
-            expect(sheet).to_contain_text('전에 쓴 참고 사진 1장은 이 글 이미지에서 찾지 못해서 빠졌어')
+            expect(sheet).to_contain_text('전에 쓴 참고 사진 1장은 찾지 못해서 빠졌어')  # 이 글에 없는 사진은 서버에 물어보고, 없으면(지움) 알려줌
             expect(sheet).to_contain_text("결과는 'AI 합성'으로 표시되고")
             go = sheet.get_by_role('button', name=re.compile(r'· 만들기$'))
             expect(go).to_be_enabled()
@@ -1978,11 +1987,24 @@ def main():
             n_rv = len([c for c in mock.calls if c['path'].endswith('/review')])
             sel.select_option('gemini-3.5-flash-lite')
             expect(sheet).to_contain_text('예상 $')
-            expect(sheet.get_by_role('button', name='AI 검수 받기')).to_be_enabled()
+            go = sheet.get_by_role('button', name='AI 검수 받기')
+            expect(go).to_be_enabled()
             assert len([c for c in mock.calls if c['path'].endswith('/review')]) == n_rv, '고르기만 해서는 검수를 보내지 않음'
-            sheet.get_by_role('button', name='닫기').first.click()
+            # 서버가 계산한 예상이 더 크면(고친 AI 합성의 원본 참고 사진 3장까지 보내는 경우 등 — 작은 차이 $0.0005는 넘어가니까 3장으로): 그 값을 보여주고, 다시 눌러야 시작
+            mock.review_extra_imgs = 3
+            try:
+                go.click()
+                expect(page.locator('#toast')).to_contain_text('예상 비용이 바뀌었어')
+                expect(go).to_be_enabled()
+                go.click()
+                expect(sheet).to_contain_text('품질을 보장하는 점수가 아니고 틀릴 수 있어')
+            finally:
+                mock.review_extra_imgs = 0
+            sent = [c['body'] for c in mock.calls if c['path'].endswith('/review')][n_rv:]
+            assert len(sent) == 2 and sent[0]['confirm_usd'] < sent[1]['confirm_usd'] and abs(sent[1]['confirm_usd'] - review_est('gemini-3.5-flash-lite', 4)) < 1e-9, sent
+            close_sheet()
             reload_keys()
-        check('1.5.0 AI 검수 창: 설정이 끔이고 무료 키가 없으면 유료 모델을 미리 고르지 않음 (고른 뒤 예상 비용을 보고 눌러야 시작)', t_studio_review_no_paid_default)
+        check('1.5.0 AI 검수 창: 설정이 끔이고 무료 키가 없으면 유료 모델을 미리 고르지 않음, 서버 예상이 더 크면 그 값을 보여주고 다시 눌러야 시작', t_studio_review_no_paid_default)
 
         # 검색 노출 점검 (1.3.0 → 1.3.1): 앱 권장 기준·내 기록·실측 데이터 없음 구분, 주력 주제는 게시한 글만·키워드·제목 근거, 하루 발행량은 고른 값 그대로
         def t_seo_helper():

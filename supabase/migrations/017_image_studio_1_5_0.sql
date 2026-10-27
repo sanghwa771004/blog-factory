@@ -29,6 +29,11 @@ do $$ begin
     alter table public.post_images add constraint post_images_provider_check
       check (provider in ('','openai','cloudflare','gemini','pexels','upload','cardnews'));
   end if;
+  -- 1.5.0 검토 전 초안(참고 사진 14장까지)으로 만든 검사가 남아 있으면 같은 이름으로 다시 걺 (16장으로 넓히기만 — 데이터는 그대로)
+  if exists (select 1 from pg_constraint where conname = 'post_images_v150_checks'
+             and pg_get_constraintdef(oid) like '%<= 14%') then
+    alter table public.post_images drop constraint post_images_v150_checks;
+  end if;
   if not exists (select 1 from pg_constraint where conname = 'post_images_v150_checks') then
     alter table public.post_images add constraint post_images_v150_checks check (
       jsonb_typeof(ref_images) = 'array' and jsonb_array_length(ref_images) <= 16  -- OpenAI edits 가 받는 최대 장수 (앱의 모델 표 refsMax 와 같게)
@@ -48,6 +53,10 @@ alter table public.image_generations
   add column if not exists batch_total int;
 create index if not exists image_generations_batch_idx on public.image_generations (batch_id) where batch_id is not null;
 do $$ begin
+  if exists (select 1 from pg_constraint where conname = 'image_generations_v150_checks'
+             and pg_get_constraintdef(oid) like '%<= 14%') then
+    alter table public.image_generations drop constraint image_generations_v150_checks;
+  end if;
   if not exists (select 1 from pg_constraint where conname = 'image_generations_v150_checks') then
     alter table public.image_generations add constraint image_generations_v150_checks check (
       jsonb_typeof(refs) = 'array' and jsonb_array_length(refs) <= 16

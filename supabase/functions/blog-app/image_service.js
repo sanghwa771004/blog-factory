@@ -384,15 +384,17 @@ export function reviewPrompt({ slotText = '', goal = '', type = 'photo', ratio =
     `이미지 종류: ${type}. 목표 비율: ${ratio || '(정하지 않음)'}${crops.length ? ` · 다른 비율로도 잘라 씀: ${crops.join(', ')}` : ''}`,
     '아래 항목마다 verdict(ok = 문제없음, issue = 문제 있음, unsure = 이미지로는 판단 어려움), reason(한국어 한 문장, 이미지에서 본 근거), confidence(0~1)를 줘.',
     ...REVIEW_CHECKS.filter(([k]) => keys.includes(k)).map(([k, label]) => `- ${k}: ${label}`),
-    composite ? '- 참고 사진과 비교해서 제품 모양·색·버튼·인쇄 글자가 바뀐 곳이 있으면 ref_match 에 구체적으로 적어.' : '',
+    composite && refs ? '- 참고 사진과 비교해서 제품 모양·색·버튼·인쇄 글자가 바뀐 곳이 있으면 ref_match 에 구체적으로 적어.' : '',
     '확실하지 않으면 unsure 로 두고 짐작으로 ok 를 주지 마. 점수는 품질 보증이 아니야.',
     'summary: 전체 의견 한두 문장. uncertainty: 이미지로 판단하기 어려운 점. suggestions: 고칠 점이 있으면 이미지 편집 AI에 그대로 줄 수 있는 짧은 한국어 요청 0~3개 (예: "배경은 그대로 두고 왼쪽 컵의 글자만 지워줘").',
     '답은 JSON 객체 하나만: {"checks":{...},"summary":"","uncertainty":"","suggestions":[]}',
   ].filter(Boolean).join('\n');
 }
 const VERDICTS = ['ok', 'issue', 'unsure'];
-// 모델 답에서 JSON을 꺼내 정리 (모양이 틀리면 null). 모르는 항목·긴 글은 버림
-export function parseReview(raw) {
+// 모델 답에서 JSON을 꺼내 정리 (모양이 틀리면 null). 모르는 항목·긴 글은 버림.
+// refs: 같이 보낸 참고 사진 수 — 0이면 '참고 사진과 같은지'(ref_match) 답은 버림 (비교할 사진이 없었으니까 — 1.5.0 검토)
+/** @param {unknown} raw @param {{ refs?: number | null }} [o] */
+export function parseReview(raw, { refs = null } = {}) {
   const t = String(raw || '');
   const a = t.indexOf('{'), b = t.lastIndexOf('}');
   if (a < 0 || b <= a) return null;
@@ -403,6 +405,7 @@ export function parseReview(raw) {
   for (const [k] of REVIEW_CHECKS) {
     const c = j.checks[k];
     if (!c || typeof c !== 'object') continue;
+    if (k === 'ref_match' && refs === 0) continue;
     const v = VERDICTS.includes(c.verdict) ? c.verdict : 'unsure';
     const conf = Number(c.confidence);
     checks[k] = { verdict: v, reason: scrub(c.reason || '', 300), confidence: Number.isFinite(conf) ? Math.min(1, Math.max(0, Math.round(conf * 100) / 100)) : null };

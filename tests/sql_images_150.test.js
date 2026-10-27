@@ -254,6 +254,31 @@ describe('017 — 저장·수정 이력·AI 검수·사용자 평가·비용 통
   });
 });
 
+describe('017 — 검토 전 초안으로 만든 검사(참고 사진 14장)가 남은 DB도 16장으로', () => {
+  test('예전 검사가 있으면 같은 이름으로 다시 걸어 넓히고, 다시 돌려도 그대로 (데이터는 안 건드림)', async () => {
+    const db = await freshDb();
+    // 검토 전 초안의 검사로 바꿔 둠 (14장) — 그 초안을 돌린 DB 흉내
+    await db.exec(`alter table public.post_images drop constraint post_images_v150_checks;
+      alter table public.post_images add constraint post_images_v150_checks check (jsonb_typeof(ref_images) = 'array' and jsonb_array_length(ref_images) <= 14
+        and (scene is null or jsonb_typeof(scene) = 'object') and length(preset) <= 30 and (parent_image_id is null or parent_image_id <> id) and length(ref_small_path) <= 200);
+      alter table public.image_generations drop constraint image_generations_v150_checks;
+      alter table public.image_generations add constraint image_generations_v150_checks check (jsonb_typeof(refs) = 'array' and jsonb_array_length(refs) <= 14
+        and (scene is null or jsonb_typeof(scene) = 'object') and length(preset) <= 30 and batch_kind in ('', 'candidates', 'compare')
+        and (batch_index is null or batch_index between 0 and 2) and (batch_total is null or batch_total between 1 and 3));`);
+    const def = (n) => val(db, `select pg_get_constraintdef(oid) from pg_constraint where conname = $1`, [n]);
+    assert.match(await def('post_images_v150_checks'), /<= 14/);
+    const before = await val(db, `select count(*)::int from public.post_images`);
+    await db.exec(SQL017);
+    for (const n of ['post_images_v150_checks', 'image_generations_v150_checks']) {
+      assert.match(await def(n), /<= 16/, n);
+      assert.ok(!/<= 14/.test(await def(n)), n);
+    }
+    await db.exec(SQL017);
+    assert.match(await def('post_images_v150_checks'), /<= 16/, '다시 돌려도 그대로');
+    assert.equal(await val(db, `select count(*)::int from public.post_images`), before, '데이터는 그대로');
+  });
+});
+
 describe('017 — 비공개 버킷 한 파일 한도 (Supabase storage 흉내)', () => {
   test('10MB → 25MB 로 넓히기만: 비공개·허용 형식은 그대로, 한도가 없거나 이미 더 크면 안 건드림', async () => {
     // 테스트용 Postgres 에는 storage 스키마가 없어서, 012 직전에 Supabase 와 같은 이름의 표를 만들어 둠

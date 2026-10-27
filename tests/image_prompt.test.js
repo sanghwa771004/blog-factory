@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   PRESETS, STYLES, IMAGE_TYPES, presetOf, validPreset, recommendPreset, readContext, buildScene, promptFromScene, buildPrompt,
   TEXT_RULES, PROMPT_RULES, REF_ROLES, SCENE_EDITABLE, aiGate, parseSlots, originLabel, captionHint, originOf,
-  stripSlotMarks, altTextFor, searchSuggestions, slotRisk, REAL_KINDS,
+  stripSlotMarks, altTextFor, searchSuggestions, slotRisk, REAL_KINDS, SUBJECT_MUST_SHOW, sceneDrawText, sceneGateText,
 } from '../images.js';
 
 const post = { titles: ['원룸 전기히터 고르는 법'], keyword: '원룸 전기히터' };
@@ -241,6 +241,22 @@ describe('1.5.0 검토 뒤: 다른 뜻으로 쓰인 낱말을 계절·날씨·�
     assert.deepEqual(ctx('회사 책상 정리').place.items.map((x) => x.ko), ['책상', '사무실']);
     assert.equal(ctx('부산 해운대 카페').korea, true);
   });
+  // 다시 확인(검토 뒤 고친 것을 따로 확인)에서 나온 것: '온통'·'와닿는'·'써 봄,'은 날씨·계절이 아니고, 붙여 쓴 '봄비'·'밤 산책'·'차 안이'는 읽음
+  test('다시 확인에서 나온 예: 눈이 온통 · 눈이 와닿는 · 비가 온통 · 써 봄, · 먹어 봄의 → 없음 / 봄비 · 가을비 · 밤 산책 · 여름밤 · 차 안이 · 봄 감성 · 봄 소풍 · 올해 봄 → 읽음', () => {
+    for (const t of ['눈이 온통 빨갛게 충혈될 때', '눈이 와닿는 디자인', '비가 온통 쏟아지듯 할인', '3일 써 봄, 장단점', '먹어 봄의 결과']) assert.deepEqual(ko(ctx(t)), [], t);
+    assert.deepEqual(ko(ctx('봄비 내리는 창가')), ['봄', '비']);
+    assert.deepEqual(ko(ctx('가을비 오는 날')), ['가을', '비']);
+    assert.deepEqual(ko(ctx('눈이 와서 미끄러운 길')), ['눈']);
+    assert.deepEqual(ko(ctx('비가 온 날 빨래')), ['비']);
+    assert.deepEqual(ko(ctx('밤 산책 코스')), ['밤']);
+    assert.deepEqual(ko(ctx('여름밤 베란다')), ['여름', '밤']);
+    assert.deepEqual(ko(ctx('봄 감성 인테리어')), ['봄']);
+    assert.deepEqual(ko(ctx('봄 소풍 도시락')), ['봄']);
+    assert.deepEqual(ko(ctx('올해 봄 신상')), ['봄']);
+    assert.deepEqual(ko(ctx('여름휴가 준비물')), ['여름']);
+    assert.deepEqual(ctx('차 안이 더울 때').place.items.map((x) => x.ko), ['차 안']);
+    assert.deepEqual(ctx('차 안은 좁아요').place.items.map((x) => x.ko), ['차 안']);
+  });
   test("장면 설계서에서 잘못 읽은 칸은 '없음'으로 뺄 수 있음 (빈칸은 기본값) — 주 피사체는 못 뺌", () => {
     const sl = { text: '비 오는 날 창가 제습기', heading: '' };
     const sc = buildScene({ post: { titles: ['원룸 제습기'] }, slot: sl, text: sl.text, preset: 'product_still', overrides: { time: '없음', setting: '-', light: '없음', subject: '없음', avoid: ['없음'] } });
@@ -252,6 +268,25 @@ describe('1.5.0 검토 뒤: 다른 뜻으로 쓰인 낱말을 계절·날씨·�
     assert.ok(!/Light \(Korean\)/.test(pr), '뺀 칸은 지시문에서도 빠짐');
     const sc2 = buildScene({ post: { titles: ['원룸 제습기'] }, slot: sl, text: sl.text, preset: 'product_still', overrides: { time: '' } });
     assert.equal(sc2.time, '비', '빈칸은 원고 기본값');
+  });
+});
+
+describe('1.5.0 검토 뒤: 고친 장면 칸 — 금지 표현은 그려 달라는 칸 전부, 실제 상품 자리 판단은 주 피사체·꼭 보일 것만', () => {
+  test("넣지 말 것·지역은 금지 검사에서 빼고, '화면 왼쪽'·'카페 내부'·'소프트박스'(장소·구도·빛 칸)는 상품 자리 판단에 안 씀", () => {
+    const o = { subject: '책상 위 제습기', setting: '카페 내부', composition: '디퓨저는 화면 왼쪽', light: '소프트박스 같은 부드러운 빛', must_show: ['물통'], avoid: ['로고', '글자'], locale: 'KR', unknown: '로고' };
+    assert.equal(sceneDrawText(o), '책상 위 제습기\n카페 내부\n디퓨저는 화면 왼쪽\n소프트박스 같은 부드러운 빛\n물통');
+    assert.equal(sceneGateText(o), '책상 위 제습기 물통');
+    const plain = '책상 위에 놓인 작은 흰색 제습기';
+    assert.equal(aiGate(plain, { text: sceneGateText(o) }).ok, true, '장소·구도·빛 칸 때문에 막히지 않음');
+    assert.equal(aiGate(plain, { text: sceneGateText({ subject: '제습기 버튼 클로즈업' }) }).code, 'real_photo_needed', '주 피사체는 봄');
+    assert.equal(aiGate(plain, { text: sceneGateText({ must_show: ['제품 라벨'] }) }).code, 'real_photo_needed', '꼭 보일 것도 봄');
+    assert.equal(sceneDrawText(null), '');
+    assert.equal(sceneGateText(undefined), '');
+  });
+  test("'대상 모양 유지' 참고 사진이 있을 때만 '꼭 보일 것'에 앱이 넣는 줄 (다시 만들기에서 사용자가 쓴 줄과 구분)", () => {
+    const sl = { text: '책상 위 제습기', heading: '' };
+    assert.deepEqual(buildScene({ post: { titles: ['제습기'] }, slot: sl, refs: [{ image_id: 'a', role: 'subject' }] }).must_show, [SUBJECT_MUST_SHOW]);
+    assert.deepEqual(buildScene({ post: { titles: ['제습기'] }, slot: sl, refs: [{ image_id: 'a', role: 'style' }] }).must_show, []);
   });
 });
 

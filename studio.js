@@ -282,6 +282,34 @@ export function createStudio(ui) {
   const dataOf = (id) => (C[id] && C[id].data) || null;
   const imgsOf = (id) => byId((dataOf(id) || {}).images);
   const genOf = (d, img) => (d && img && img.generation_id ? (d.generations || []).find((g) => g.id === img.generation_id) : null);
+  // 고친 'AI 합성' 이미지는 자기 기록에 참고 사진이 없음 → 고치기 전 원본 쪽(이 글 이미지 안)에서 찾음 (최대 5단계 — 서버 lineageRefs 와 같은 규칙)
+  const lineageRefs = (d, img) => {
+    const own = (img && img.ref_images) || [];
+    if (own.length || !img || !img.composite) return own;
+    const by = byId((d && d.images) || []);
+    let cur = img;
+    for (let i = 0; i < 5 && cur.parent_image_id && by[cur.parent_image_id]; i++) {
+      cur = by[cur.parent_image_id];
+      if ((cur.ref_images || []).length) return cur.ref_images;
+    }
+    return [];
+  };
+  // 다시 만들기 (1.5.0 검토 뒤): 고친 이미지는 같은 원본을 같은 지시로 다시 고치는 창을, 그 밖은 같은 설정으로 새로 만드는 창을 열어.
+  // 고친 원본이 이 글 이미지에 없으면 서버에 물어보고, 지워졌으면 새로 만들기 창으로 (그때 쓴 지시를 사진 설명으로 쓰지 않음)
+  async function regen(p, s, d, img) {
+    const prev = genOf(d, img);
+    if (prev && prev.mode === 'edit' && prev.base_image_id) {
+      let base = (d.images || []).find((x) => x.id === prev.base_image_id && !x.deleted_at) || null;
+      if (!base) {
+        try { base = (await api('/images/' + prev.base_image_id)).image || null; } catch (e) { if (e && e.code === 'auth') return; base = null; }
+      }
+      if (base) { genSheet(p, s, { base, prev, prevImg: img, text: String(prev.user_prompt || '').split('\n')[0] }); return; }
+      toast('고친 원본을 찾지 못해서(지웠을 수 있어) 새로 만들기 창으로 열어.', 4000);
+      genSheet(p, s, { prevImg: img });
+      return;
+    }
+    genSheet(p, s, { prev, prevImg: img });
+  }
   const keysOf = (id) => (dataOf(id) || {}).keys || {};
 
   // ── 작은 조각 ──
@@ -426,7 +454,7 @@ export function createStudio(ui) {
       row2.append(risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)));
     } else {
       row2.append(btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
-        img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => genSheet(p, s, { prev: genOf(d, img), prevImg: img }), { disabled: running }) : null,
+        img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => regen(p, s, d, img), { disabled: running }) : null,
         btn(row.used_at ? '사용 완료 취소' : '사용 완료', 'sm ghost', (ev) => markUsed(p, s, !row.used_at, ev.currentTarget)),
         btn('빼기', 'sm ghost', (ev) => { if (confirmBox(ev.currentTarget, '연결을 뺄까?')) unlink(p, s, ev.currentTarget); }));
     }
@@ -464,6 +492,7 @@ export function createStudio(ui) {
     if (t.uncertain) inner.append(h('p', { class: 'notice' }, `청구됐는지 확인이 필요한 생성 기록이 ${t.uncertain}개 있어. 그 공급자 사용량 화면(OpenAI·Google AI Studio)에서 확인하고 아래에서 청구액을 넣어줘.`));
     // AI 검수는 청구액을 넣는 칸이 없어서 '확인 필요'는 예상 비용으로 남음 — 생성 기록과 따로 알려줌 (1.5.0 검토)
     if (t.review_uncertain) inner.append(h('p', { class: 'hint' }, `AI 검수 ${t.review_uncertain}번은 청구됐는지 몰라서 예상 비용으로 셈했어 (검수는 청구액을 따로 넣지 않아).`));
+    if (Number(t.reviews || 0)) inner.append(h('p', { class: 'hint' }, `AI 검수 ${t.reviews}번 · ${usd(t.review_usd || 0)} (위 합계에 포함 — 사용량 기준, 없으면 예상)`));
     if (!gens.length) inner.append(h('p', { class: 'hint' }, '이 글로 만든 AI 이미지가 아직 없어.'));
     for (const g of gens.slice(0, 30)) {
       const c = genCost(g);
@@ -604,16 +633,20 @@ export function createStudio(ui) {
       text: o.text != null ? o.text : mode === 'edit' ? '' : prev ? prevLines[0] || s.text : s.text, extra: prev ? prevLines.slice(1).join(' ') : '',
       quality: '', count: 1, refs: (o.refs || []).slice(), scene: {},
     };
-    // 다시 만들기: 그 이미지에 남은 참고 사진(역할)·이미지 종류를 되살림 (생성 기록에는 없어서 이미지 기록에서 — 1.5.0 검토)
+    // 다시 만들기: 그 이미지에 남은 참고 사진(역할)·이미지 종류를 되살림 (생성 기록에는 없어서 이미지 기록에서 — 1.5.0 검토).
+    // 고친 'AI 합성' 이미지는 고치기 전 원본의 참고 사진으로. 이 글 이미지에 없는 사진(다른 글 보관함에서 고른 것)은 서버에 물어봄 — 받는 동안은 못 만듦
     const prevImg = o.prevImg || null;
-    let lostRefs = 0;
-    if (prevImg && Array.isArray(prevImg.ref_images)) {
-      for (const r of prevImg.ref_images) {
-        const im = (d.images || []).find((x) => x.id === r.image_id && !x.deleted_at);
-        if (im && !f.refs.some((y) => y.image.id === im.id)) f.refs.push({ image: im, role: IMG.REF_ROLES[r.role] ? r.role : 'style' });
-        else if (!im) lostRefs++;
-      }
+    let lostRefs = 0, refsPending = 0;
+    // 고치기 창(같은 원본을 다시 고침)은 그 고치기에 붙였던 참고 사진만 — 원본의 참고 사진은 원본에 이미 들어 있음
+    const prevRefs = !prevImg ? [] : base ? prevImg.ref_images || [] : lineageRefs(d, prevImg);
+    const missing = [];
+    for (const r of prevRefs) {
+      const role = IMG.REF_ROLES[r.role] ? r.role : 'style';
+      const im = (d.images || []).find((x) => x.id === r.image_id && !x.deleted_at);
+      if (im) { if (!f.refs.some((y) => y.image.id === im.id)) f.refs.push({ image: im, role }); } else missing.push({ id: r.image_id, role });
     }
+    // 진짜 제품 사진을 참고한 합성인데 그 사진을 못 찾은 경우 (고치기 창은 원본이 합성이라 괜찮음)
+    const lostComposite = !!(prevImg && prevImg.composite && !prevRefs.length && !base);
     if (prevImg && prevImg.preset && IMG.PRESETS[prevImg.preset]) f.preset = prevImg.preset;
     // 설정의 용도별 기본 비율 (없으면 용도의 첫 비율)
     const prefRatio = (pu) => { const r = (st.image_ratio_prefs || {})[pu]; return IMG.PURPOSES[pu].ratios.includes(r) ? r : IMG.PURPOSES[pu].ratios[0]; };
@@ -655,8 +688,7 @@ export function createStudio(ui) {
     const usage = () => (dataOf(p.id) || {}).usage || null;
     const refsOut = () => f.refs.map((r) => ({ image_id: r.image.id, role: r.role }));
     const gateRefs = () => f.refs.map((r) => ({ role: r.role, kind: r.image.kind }));
-    // 고친 장면 칸 중 '그려 달라는' 칸만 (넣지 말 것·지역 빼고) — 서버 sceneUserText 와 같은 범위
-    const sceneUserText = () => Object.entries(f.scene).filter(([k, v]) => k !== 'avoid' && k !== 'locale' && v != null).map(([, v]) => (Array.isArray(v) ? v.join(' ') : String(v))).join(' ').trim();
+    // 고친 장면 칸: 금지 표현 검사는 그려 달라는 칸 전부(넣지 말 것·지역 빼고), 실제 상품 자리 판단은 주 피사체·꼭 보일 것만 — 서버와 같은 범위 (images.js)
     // 장면 설계서 칸 (고칠 수 있는 것만). 빈칸이면 원고·프리셋의 기본값
     const sceneInputs = {};
     const sceneField = (k, multi) => {
@@ -676,13 +708,28 @@ export function createStudio(ui) {
       }
     };
     if (prevImg && prevImg.scene && typeof prevImg.scene === 'object' && mode !== 'edit') {
-      const base0 = IMG.buildScene({ post: p, slot: s, text: clean(f.text), preset: f.preset, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide, refs: refsOut(), channel: p.channel_id });
+      const base0 = IMG.buildScene({ post: p, slot: s, text: clean(f.text), preset: f.preset, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide, refs: [...refsOut(), ...missing.map((x) => ({ image_id: x.id, role: x.role }))], channel: p.channel_id });
       for (const k of IMG.SCENE_EDITABLE) {
         if (k === 'locale') { if (prevImg.scene.locale !== base0.locale) f.scene.locale = prevImg.scene.locale === 'KR' ? 'KR' : 'none'; continue; }
-        const v = prevImg.scene[k];
+        let v = prevImg.scene[k];
+        // '꼭 보일 것'의 '참고 사진 속 대상…' 줄은 앱이 저절로 넣은 것 — 사용자가 쓴 줄로 되살리지 않음 (지금 대상 사진이 있으면 다시 저절로 들어감)
+        if (k === 'must_show' && Array.isArray(v)) {
+          v = v.filter((x) => x !== IMG.SUBJECT_MUST_SHOW);
+          if ((base0.must_show || []).includes(IMG.SUBJECT_MUST_SHOW)) v = [IMG.SUBJECT_MUST_SHOW, ...v];
+        }
         if (v == null || JSON.stringify(v) === JSON.stringify(base0[k])) continue;
-        f.scene[k] = Array.isArray(v) ? v.slice(0, 8) : String(v) === '' ? '없음' : String(v);
+        f.scene[k] = Array.isArray(v) ? (v.length ? v.slice(0, 8) : ['없음']) : String(v) === '' ? '없음' : String(v);
       }
+    }
+    if (missing.length) {
+      refsPending = missing.length;
+      Promise.all(missing.map((x) => api('/images/' + x.id).then((j) => ({ x, im: (j && j.image) || null }), () => ({ x, im: null })))).then((rs) => {
+        for (const { x, im } of rs) {
+          if (im && !im.deleted_at) { if (!f.refs.some((y) => y.image.id === im.id)) f.refs.push({ image: im, role: x.role }); } else lostRefs++;
+        }
+        refsPending = 0;
+        if (goBtn.isConnected) update();
+      });
     }
     const scene0 = JSON.stringify(f.scene); // 처음 채운 장면 칸 (이것과 같으면 '적던 내용'이 아님)
     const update = () => {
@@ -715,7 +762,9 @@ export function createStudio(ui) {
         maxRefs && f.refs.length < maxRefs ? h('div', { class: 'go' }, btn('보관함에서 참고 사진 고르기', 'sm ghost', () => refPicker(p, f.refs, () => { form(); update(); })),
           btn('참고 사진 올리기', 'sm ghost', () => refUpload(p, f.refs, () => { form(); update(); }))) : null,
         f.refs.length > maxRefs ? h('p', { class: 'badbox' }, `이 모델은 참고 사진을 ${maxRefs}장까지만 받아. ${f.refs.length - maxRefs}장을 빼줘.`) : null,
-        lostRefs ? h('p', { class: 'notice' }, `전에 쓴 참고 사진 ${lostRefs}장은 이 글 이미지에서 찾지 못해서 빠졌어 (지웠거나 다른 글 이미지일 수 있어). 필요하면 다시 골라줘.`) : null);
+        refsPending ? h('p', { class: 'hint' }, `전에 쓴 참고 사진 ${refsPending}장을 불러오는 중…`) : null,
+        lostRefs ? h('p', { class: 'notice' }, `전에 쓴 참고 사진 ${lostRefs}장은 찾지 못해서 빠졌어 (지웠을 수 있어). 필요하면 다시 골라줘.`) : null,
+        lostComposite ? h('p', { class: 'notice' }, "이 이미지는 진짜 제품 사진을 참고한 'AI 합성'인데, 그때 쓴 제품 사진을 찾지 못했어. 같은 제품으로 만들려면 제품 사진을 다시 골라줘.") : null);
       const size = IMG.sizeFor(f.purpose, f.ratio, capsModel(), f.quality);
       const sc = IMG.buildScene({ post: p, slot: s, text: clean(f.text), preset: f.preset, purpose: f.purpose, ratio: f.ratio, extra: clean(f.extra), mode, hide, refs: refsOut(), size: IMG.sizeLabel(size), channel: p.channel_id, overrides: f.scene });
       fillScene(sc);
@@ -730,10 +779,12 @@ export function createStudio(ui) {
       const est = clientEst == null ? null : sEst != null && sEst > clientEst ? sEst : clientEst;
       lastEst = est;
       lastTotal = est == null ? null : IMG.roundUsd(est * f.count);
-      const sceneTxt = sceneUserText();
-      const risks = IMG.promptRisk(f.text + '\n' + f.extra + (sceneTxt ? '\n' + sceneTxt : ''), brands);
+      const sceneTxt = IMG.sceneDrawText(f.scene);
+      // 서버처럼 설명·더 원하는 것과 장면 칸을 따로 검사 (이어 붙이면 '…로고' + '없이…'가 '로고 없이'로 읽힘)
+      const risks = IMG.promptRisk(f.text + '\n' + f.extra, brands);
+      for (const r of sceneTxt ? IMG.promptRisk(sceneTxt, brands) : []) if (!risks.some((x) => x.code === r.code)) risks.push(r);
       const blocks = IMG.blocksOf(risks);
-      const gateText = [f.text, f.extra, sceneTxt].join(' ');
+      const gateText = [f.text, f.extra, IMG.sceneGateText(f.scene)].join(' ');
       const gate = s.n ? IMG.aiGate(s.text, { text: gateText, refs: gateRefs(), genericOk: genericChk.checked, baseComposite: !!(base && base.composite) }) : { ok: true };
       const sr = IMG.slotRisk(gateText);
       const own = gate.code === 'own_photo_slot';
@@ -777,6 +828,7 @@ export function createStudio(ui) {
       else if (!isTest() && !c.known) why = `앱이 모르는 모델이라(${model}) 만들 수 없어. 설정 > 이미지에서 목록에 있는 모델로 바꿔줘.`;
       else if (!keyGood) why = noKeyText(c.provider);
       else if (mode === 'edit' && !c.edit) why = '이 모델은 고치기(편집)를 못 해. 고치기가 되는 모드를 골라줘.';
+      else if (refsPending) why = '전에 쓴 참고 사진을 불러오는 중이야. 잠깐만.';
       else if (f.refs.length > maxRefs) why = f.refs.length && !maxRefs ? '이 모델은 참고 사진을 못 받아. 참고 사진을 빼거나 다른 모드를 골라줘.' : `참고 사진이 너무 많아 (${maxRefs}장까지).`;
       else if (!isTest() && c.provider && !c.usable) why = `공급자가 종료한 모델이야 (${c.retired}). 다른 모드를 골라줘.`;
       else if (!clean(f.text)) why = mode === 'edit' ? '바꿀 내용을 적어줘.' : '사진 설명을 적어줘.';
@@ -1088,7 +1140,8 @@ export function createStudio(ui) {
   }
   function reviewSheet(p, img, o = {}) {
     const st = settings();
-    const keys = (dataOf(p.id) || {}).keys || {};
+    const d = dataOf(p.id) || {};
+    const keys = d.keys || {};
     const opts = IMG.REVIEW_MODELS.map((m) => ({ ...m, ok: keyOk(keys, m.provider) }));
     // 처음 고른 것: 설정의 검수 모델 → 키가 있는 무료 모델 → 없으면 아무것도 안 고름 (유료 모델을 대신 고르지 않음 — 1.5.0 검토)
     const pick0 = opts.find((m) => m.id === st.image_review_model && m.ok) || opts.find((m) => m.ok && m.free) || null;
@@ -1097,17 +1150,27 @@ export function createStudio(ui) {
     const costLine = h('p', { class: 'hint' });
     const out = h('div', { class: 'stack' });
     const goB = btn('AI 검수 받기', 'wide', () => go());
-    const nImgs = 1 + Math.min(3, (img.ref_images || []).length || 0); // 서버도 참고 사진은 3장까지만 같이 보냄
+    // 서버도 참고 사진은 3장까지만 같이 보냄. 고친 'AI 합성' 이미지는 원본의 참고 사진을 같이 보냄 (서버 lineageRefs)
+    const nImgs = 1 + Math.min(3, lineageRefs(d, img).length || 0);
+    let serverEst = null; // 서버가 다르게 계산한 예상 {model, usd} — 화면 값보다 크면 그걸 보여주고 그걸로 확인을 보냄
     const upd = () => {
       const m = opts.find((x) => x.id === sel.value);
-      const est = m ? IMG.estimateReviewUsd(m.id, nImgs) : null;
-      costLine.textContent = m ? (m.free ? `무료 (${IMG.PROVIDERS[m.provider].free_note}) · 이미지 ${nImgs}장을 보내` : `예상 ${usd(est)} · 이미지 ${nImgs}장 + 짧은 답 (근거: ${IMG.reviewBasis(m.id, nImgs)}) — 이미지 비용(예산)에 같이 셈`) : '';
+      const local = m ? IMG.estimateReviewUsd(m.id, nImgs) : null;
+      const est = local != null && serverEst && serverEst.model === sel.value && serverEst.usd > local ? serverEst.usd : local;
+      const adopted = local != null && est !== local;
+      costLine.textContent = m ? (adopted ? `예상 ${usd(est)} — 서버가 다시 계산한 값이야 (원본의 참고 사진처럼 더 보내는 이미지 포함). 확인하고 다시 눌러줘 — 이미지 비용(예산)에 같이 셈` : m.free ? `무료 (${IMG.PROVIDERS[m.provider].free_note}) · 이미지 ${nImgs}장을 보내` : `예상 ${usd(est)} · 이미지 ${nImgs}장 + 짧은 답 (근거: ${IMG.reviewBasis(m.id, nImgs)}) — 이미지 비용(예산)에 같이 셈`) : '';
       goB.disabled = !m || !m.ok || est == null;
       goB.dataset.est = est == null ? '' : String(est);
     };
     sel.addEventListener('change', upd);
     const go = async () => {
-      const j = await run(goB, () => api(`/images/${img.id}/review`, { method: 'POST', body: { model: sel.value, confirm_usd: Number(goB.dataset.est), post_id: p.id, slot_key: o.slot ? o.slot.key : undefined }, timeout: 90000 }));
+      const j = await run(goB, async () => {
+        try { return await api(`/images/${img.id}/review`, { method: 'POST', body: { model: sel.value, confirm_usd: Number(goB.dataset.est), post_id: p.id, slot_key: o.slot ? o.slot.key : undefined }, timeout: 90000 }); } catch (e) {
+          // 서버가 계산한 예상이 다르면(원본의 참고 사진까지 보내는 경우 등) 그 값을 보여주고 다시 누르게 — 확인 없이 더 비싸게 시작하지 않음
+          if (e && e.code === 'estimate_changed' && Number.isFinite(Number(e.est_usd))) { serverEst = { model: String(e.model || sel.value), usd: Number(e.est_usd) }; upd(); }
+          throw e;
+        }
+      });
       if (j && j.review) { put(out, reviewView(j.review, img, p, o.slot)); refresh(p.id); }
     };
     openSheet('AI 검수 (참고용)',
@@ -1166,8 +1229,7 @@ export function createStudio(ui) {
         u ? h('span', { class: 'hint' }, `${usageLine(u)} · 남은 예산 ${usd(Math.max(0, Number(u.budget_usd) - Number(u.month_usd)))}`) : null,
         h('span', { class: 'hint' }, '같은 설명·비율·참고 사진으로 한 번씩 만들어. 한두 번 비교로 어느 모델이 늘 낫다고 단정할 수는 없어.'));
       // 실제 상품 자리·'직접 찍기' 자리는 만들기 창과 같은 판단 (서버도 다시 확인)
-      const sceneTxt = Object.entries(f0.scene || {}).filter(([k, v]) => k !== 'avoid' && k !== 'locale' && v != null).map(([, v]) => (Array.isArray(v) ? v.join(' ') : String(v))).join(' ');
-      const gate = s.n ? IMG.aiGate(s.text, { text: [f0.text, f0.extra, sceneTxt].join(' '), refs: (f0.refs || []).map((r) => ({ role: r.role, kind: r.image.kind })), genericOk: !!f0.genericOk }) : { ok: true };
+      const gate = s.n ? IMG.aiGate(s.text, { text: [f0.text, f0.extra, IMG.sceneGateText(f0.scene)].join(' '), refs: (f0.refs || []).map((r) => ({ role: r.role, kind: r.image.kind })), genericOk: !!f0.genericOk }) : { ok: true };
       let why = '';
       if (!gate.ok) why = gate.msg || IMAGE_ERR[gate.code] || '이 자리는 AI로 만들 수 없어.';
       else if (rows.length < 2) why = '비교할 모드를 2~3개 골라줘 (키가 있는 것만).';
@@ -2034,7 +2096,9 @@ export function createStudio(ui) {
       const g = IMG.geminiPrices(c, pr);
       const row = { fid, c, per: {}, text: inp(g.text_input_per_m, { inputmode: 'decimal' }), imgIn: inp(g.image_input_per_image, { inputmode: 'decimal' }),
         at: h('input', { type: 'date', value: (pr[fid] && pr[fid].checked_at) || c.checked || '', oninput: ui.markDirty }) };
-      for (const k of Object.keys(g.per_image)) row.per[k] = inp(g.per_image[k], { inputmode: 'decimal' });
+      // 앱이 쓰는 해상도만 (1K·2K — 4K는 저장 한도 때문에 안 씀)
+      const used = new Set(IMG.qualitiesFor(fid).map((q) => (c.imageSizes || {})[q]).filter(Boolean));
+      for (const k of Object.keys(g.per_image)) if (!used.size || used.has(k)) row.per[k] = inp(g.per_image[k], { inputmode: 'decimal' });
       return row;
     };
     const gRows = IMG.GEMINI_PRICE_IDS.map(gp);

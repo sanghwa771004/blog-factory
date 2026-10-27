@@ -242,6 +242,10 @@ describe('AI 검수 (멀티모달) — 의견일 뿐, 근거·확신 정도와 �
     assert.match(p, /unsure 로 두고 짐작으로 ok 를 주지 마/);
     const q = reviewPrompt({ slotText: 'x' });
     assert.ok(!q.includes('- ref_match:'), '참고 사진이 없으면 원본 비교 항목 없음');
+    // 다시 확인에서 나온 것: 'AI 합성'이라도 같이 보낸 참고 사진이 없으면(원본을 못 찾은 고친 이미지 등) 비교하라고 하지 않음
+    const z = reviewPrompt({ slotText: 'x', composite: true, refs: 0 });
+    assert.ok(!z.includes('- ref_match:') && !z.includes('참고 사진과 비교'), z);
+    assert.match(p, /참고 사진과 비교해서 제품 모양/);
   });
   test('답 읽기: 코드 블록 안 JSON도, 모르는 판정은 판단 어려움으로, 제안은 3개까지, 모양이 틀리면 null', () => {
     const r = parseReview('```json\n{"checks":{"match":{"verdict":"ok","reason":"맞아","confidence":0.83},"anatomy":{"verdict":"weird","reason":"?"}},"summary":"좋아","uncertainty":"작은 글자","suggestions":["a","b","c","d"]}\n```');
@@ -251,6 +255,11 @@ describe('AI 검수 (멀티모달) — 의견일 뿐, 근거·확신 정도와 �
     assert.deepEqual(r.suggestions, ['a', 'b', 'c']);
     assert.equal(parseReview('그냥 괜찮아 보여요'), null);
     assert.equal(parseReview('{"summary":"x"}'), null);
+    // 참고 사진을 안 보냈으면 '참고 사진과 같은지' 답은 버림 (비교할 게 없었으니까)
+    const ans = '{"checks":{"match":{"verdict":"ok","reason":"r","confidence":0.5},"ref_match":{"verdict":"ok","reason":"같아","confidence":0.9}},"summary":"s"}';
+    assert.ok(!('ref_match' in parseReview(ans, { refs: 0 }).checks));
+    assert.equal(parseReview(ans, { refs: 1 }).checks.ref_match.verdict, 'ok');
+    assert.equal(parseReview(ans).checks.ref_match.verdict, 'ok', '수를 모르면 그대로');
   });
   test('요청 모양: OpenAI(Responses, input_image 데이터 주소) · Gemini(JSON 답) · Cloudflare(무료, messages)', async () => {
     const ans = '{"checks":{"match":{"verdict":"ok","reason":"r","confidence":0.5}},"summary":"s","uncertainty":"","suggestions":[]}';
