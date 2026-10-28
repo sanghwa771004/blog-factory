@@ -55,7 +55,8 @@
 ```bash
 npm install                           # 처음 한 번 (DB 테스트용 PGlite)
 npm test                              # 규칙·계산 + DB(마이그레이션·함수) + Claude 안 글공장 계산 테스트 (Node 20+)
-python3 tests/ui/app_ui_test.py /tmp  # 휴대폰 크기 화면 테스트 (Playwright, 모의 서버)
+python3 tests/ui/app_ui_test.py /tmp  # 휴대폰 크기 화면 테스트 (Playwright, 모의 서버). 1.5.1 배경 지우기(U²-Netp)는 브라우저에서 실제로 돎
+UI_ONLY='^1\.5\.1' python3 tests/ui/app_ui_test.py /tmp  # (개발할 때만) 이름이 맞는 화면 시험과 로그인만 — 결과 줄에 '일부만'이라고 나옴
 python3 tests/artifact/run_check.py /tmp  # Claude 안 글공장 화면·흐름 테스트 (모의 Claude·Supabase)
 npm run test:server                   # 서버 코드를 Deno로 띄워서 가짜 DB API로 확인 (DB 015·016·017·018 전·후, 1.5.0·1.5.1 이미지 API). deno 필요 (DENO=/경로/deno), 없으면 건너뜀. 서버는 127.0.0.1 말고는 연결 못 하게 띄워서 실제 공급자 API를 부르지 않음
 ```

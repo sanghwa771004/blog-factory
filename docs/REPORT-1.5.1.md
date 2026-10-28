@@ -94,10 +94,10 @@
 
 | 무엇 | 어떻게 | 결과 |
 |---|---|---|
-| 규칙·계산 + DB (`npm test`) | node:test. DB는 PGlite(진짜 Postgres)에 마이그레이션 001~018을 적용해서 함수·트리거까지 돌림. 합성 계산(`cutout.js`)은 Node에서 직접. 공급자는 가짜 응답 | **{{NPM}}** |
-| 서버 (`npm run test:server`) | 실제 서버 코드를 Deno로 띄우고 가짜 DB API로. 서버는 127.0.0.1 말고는 연결 못 하게 띄움 (시험용 가짜 키) | **{{SERVER}}** |
-| 화면 (`tests/ui/app_ui_test.py`) | Playwright(Chromium), 휴대폰 크기(390px), 모의 서버. **배경 지우기(U²-Netp + ONNX Runtime Web)는 브라우저에서 실제로 실행**, AI 배경은 미리 넣어 둔 시험 사진 | **{{UI}}** (1.5.1 전부터 있던 41개 + 1.5.1 시험 5개, '콘솔 오류 없음' 포함) |
-| Claude 안 글공장 (`tests/artifact/run_check.py`) | Playwright, 모의 Claude·Supabase | **{{ART}}** |
+| 규칙·계산 + DB (`npm test`) | node:test. DB는 PGlite(진짜 Postgres)에 마이그레이션 001~018을 적용해서 함수·트리거까지 돌림. 합성 계산(`cutout.js`)은 Node에서 직접. 공급자는 가짜 응답 | **458/458 통과** |
+| 서버 (`npm run test:server`) | 실제 서버 코드를 Deno로 띄우고 가짜 DB API로. 서버는 127.0.0.1 말고는 연결 못 하게 띄움 (시험용 가짜 키) | **60/60 통과** |
+| 화면 (`tests/ui/app_ui_test.py`) | Playwright(Chromium), 휴대폰 크기(390px), 모의 서버. **배경 지우기(U²-Netp + ONNX Runtime Web)는 브라우저에서 실제로 실행**, AI 배경은 미리 넣어 둔 시험 사진 | **46/46 통과** (1.5.1 전부터 있던 41개 + 1.5.1 시험 5개, '콘솔 오류 없음' 포함) |
+| Claude 안 글공장 (`tests/artifact/run_check.py`) | Playwright, 모의 Claude·Supabase | **44/44 통과** |
 | 서버 형 검사 (`deno check index.ts`) | | 오류 없음 |
 | `images.js` 두 사본 | 글자 하나까지 같은지 (테스트가 확인) | 같음 |
 | 비밀값 검사 (ZIP 안 파일 전부) | 접속 코드·그 해시·메일·OpenAI·Google·Supabase 키·JWT 모양 찾기 | {{SECRETS}} |
