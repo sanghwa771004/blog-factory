@@ -73,7 +73,7 @@ export function createProduct(ui, kit) {
         if (t.mask && t.mask.url) {
           const m = await CUT.maskFromPng(t.mask.url);
           if (PS !== ps) return;
-          ps.mask = m; ps.maskSaved = t.mask; ps.maskMethod = t.mask.method; ps.maskDirty = false; ps.maskRev = (ps.maskRev || 0) + 1;
+          ps.mask = m; ps.maskSaved = t.mask; ps.maskMethod = t.mask.method; ps.maskEdited = !!t.mask.edited; ps.maskDirty = false; ps.maskRev = (ps.maskRev || 0) + 1;
         }
         if (t.background) { ps.cands = [{ image: t.background, gen: null }]; ps.pick = 0; }
       } else {

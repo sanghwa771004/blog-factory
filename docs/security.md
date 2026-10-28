@@ -35,6 +35,15 @@
 | 서버 일꾼 시간 | 무료 요금제 일꾼은 켜진 뒤 150초까지만 일함 → 품질별로 기다릴 시간이 남았을 때만 OpenAI를 부르고(모자라면 돈이 나가기 전에 '잠깐 뒤에'), 시간 제한은 부르기 직전에 남은 시간으로 다시 계산, 응답 본문을 읽는 동안에도 적용. 같은 요청 번호로 다시 오면 기다리게 하지 않고 그 기록을 바로 돌려줌 | `index.ts` DEADLINE·generateImage, `image_service.js` NEED_MS·busyRetryAfter·runGeneration·timed |
 | 생성 전용 서버 `blog-gen` | `blog-app`과 같은 코드·같은 로그인 검사·같은 CORS. `POST /images/generate`와 `/ping`만 받고 나머지는 404. 앱은 `blog-gen`의 답이 우리 서버의 오류 코드 모양이 아니면서 404·401·403·405·5xx면(아직 없음·JWT 검사·켜지지 못함 — Supabase BOOT_ERROR 등) 로그아웃시키지 않고 같은 요청 번호로 본 서버에 다시 보냄 (서버가 같은 요청 번호를 먼저 찾아서 중복 생성 없음). 우리 서버의 401(`unauthorized`)은 그대로 로그아웃. 화면 보안 정책(CSP)은 같은 Supabase 주소라 바꿀 것 없음 | `index.ts` handle, `app.js` api, `studio.js` sendGenerate, `tests/security_static.test.js`, 화면 테스트 |
 
+## 1.5.1 상품 사진으로 장면 만들기에서 더한 것 (2026-10-28)
+| 항목 | 지금 상태 | 근거·위치 |
+|---|---|---|
+| 화면 보안 정책(CSP) | `script-src 'self' 'wasm-unsafe-eval'` — 배경 지우기 실행기(WebAssembly)를 돌리려고 `'wasm-unsafe-eval'`만 더함. `unsafe-eval`·`unsafe-inline`·외부 스크립트 주소는 여전히 안 됨. 모델·실행기 파일은 외부 CDN이 아니라 앱 주소(GitHub Pages)에서 받고, 모델은 SHA-256으로 확인한 뒤에만 씀 | `index.html`, `cutout.js` loadSegmenter, `vendor/onnxruntime-web/README.md`, `tests/security_static.test.js` |
+| 사진이 나가는 곳 | 배경 지우기·합성은 이 기기 안에서만 (서버·외부 API로 사진을 보내지 않음). 원본 보존 합성의 배경 만들기에도 상품 사진을 AI에 안 보냄 | `cutout.js`, `index.ts` generateImage, 서버 시험 '원본 보존 합성의 배경 만들기…' |
+| 새 경로 | `POST /images/{id}/mask`·`POST /images/composite`·`POST /images/{id}/product-check` 모두 기존 세션 검사를 지나야 함. 마스크: PNG만·6MB·4096px·상품 사진과 같은 비율·진짜 사진(쓸 권한 확인한 직접 올림·Pexels)에만. 합성: 파일 첫 바이트로 형식 확인·12MB·4096px·숨은 정보 지우기, 원본 상품·배경·마스크가 맞는지 DB 함수가 다시 확인. 파일 경로는 서버가 무작위로 만듦(`mask/…`·`composite/…`) | `index.ts` saveMask·saveComposite·productCheck, `018` |
+| DB | 새 표 `product_masks` RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수 2개는 `search_path = ''`·service_role만 실행. 승인 없이 상품 장면 이미지를 '사용 가능'으로 바꾸면 트리거가 막음 | `018`, `tests/sql_images_151.test.js` |
+| 실패·지우기 | 합성 저장이 DB에서 거절되면 새로 올린 합성 파일만 지움(원본 상품 사진·배경·마스크는 안 건드림). 남은 결과가 쓰는 원본 상품 사진·배경은 못 지움. 상품 사진을 지우면 그 마스크 파일도 같이 지움 | `index.ts` saveComposite·deleteImage, `018` image_delete |
+
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)
 - 로그인 없이 `/state` → 401, 가짜 세션 → 401, 틀린 코드 로그인 → 401
 - 로그아웃한 세션으로 읽기·고치기·지우기·백업 → 모두 401 (원고는 안 바뀜)

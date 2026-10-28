@@ -2657,6 +2657,8 @@ def main():
             bgs = [i for i in mock.images if i.get('preset') == 'pscene_layer' and i['kind'] == 'ai']
             assert len(bgs) >= 2 and all(b['origin_slot_key'] == '' and b['product_image_id'] == prod['id'] and b['composite_mode'] == '' for b in bgs[:2]), bgs[:2]
             expect(view.locator('canvas.cthumb')).to_have_count(2)
+            # 11) 비용은 실제 청구와 구분: 무료 모델 배경은 '청구 없음' (모의 서버 — 실제 공급자는 안 부름)
+            expect(view.locator('.grid2 .slot').first).to_contain_text('비용 $0 (청구 없음)')
             no_overflow('상품 장면 (배경 후보)')
             view.get_by_role('button', name='이 배경으로 합성하기').first.click()
             expect(view.locator('canvas.compcv')).to_be_visible()
@@ -2765,6 +2767,10 @@ def main():
             ref = next(i for i in mock.images if i['kind'] == 'ai' and i.get('composite_mode') == 'reference' and i.get('preset') == 'pscene_ref')
             assert ref['product_image_id'] == prod['id'] and ref['composite'] is True and ref['ref_images'][0] == {'image_id': prod['id'], 'role': 'subject', 'kind': 'upload'}, ref
             expect(view.locator('.chip.k-ai').first).to_contain_text('AI 합성 이미지')
+            # 11) 모의 유료 생성의 비용은 '사용량 기준'(계산값) — '청구액 확인'은 사용자가 공급자 화면을 보고 넣을 때만
+            tile = view.locator('.grid2 .slot').first
+            expect(tile).to_contain_text('사용량 기준')
+            expect(tile).not_to_contain_text('청구액 확인')
             view.get_by_role('button', name='원본과 비교해서 검수·승인').click()
             expect(sheet.locator('.modebadge.m-ref')).to_contain_text('AI 재생성')
             expect(sheet.locator('.badbox')).to_contain_text('제품 외형·제품명·로고')
