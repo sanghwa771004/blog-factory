@@ -810,6 +810,8 @@ export async function saveUploaded(d, a) {
     source_url: bg ? bg.source_url || '' : '', author_name: bg ? bg.author_name || '' : '', author_url: bg ? bg.author_url || '' : '',
     attribution_text: bg ? (bg.kind === 'composite' ? ['배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경', bg.attribution_text].filter(Boolean).join(' · ')
       : bg.attribution_text || (bg.kind === 'ai' ? (bg.composite ? '배경: 실제 사진을 참고해 AI로 만든 연출 이미지' : '배경: AI로 만든 예시 이미지') : '')) : '',
+    // 카드를 그릴 때 쓴 배경 이미지 — 상품 장면이면 발행 막기가 그 승인을 따라감 (1.5.1 재검토. 018 전 DB는 이 칸을 무시)
+    background_image_id: bg && bg.id ? String(bg.id) : '',
   };
   const r = await d.rpc('image_save', { img, link, gen: null, fin: null });
   if (r.error) { await d.remove([path]); return { ok: false, status: 500, code: 'server', error: r.error }; }

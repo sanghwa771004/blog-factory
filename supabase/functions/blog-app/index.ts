@@ -1141,7 +1141,8 @@ async function patchSettings(c: Ctx) {
       if (!x || typeof x !== "object") continue;
       const m = modelName(x.model, "image_modes");
       const q = (QUALITIES as readonly string[]).includes(String(x.quality)) ? normQuality(m, String(x.quality)) : normQuality(m, String(d.quality));
-      out[String(d.id)] = { model: m, quality: q };
+      // user: 1.5.1 화면에서 사용자가 고른 값 (1.5.0 화면이 같이 저장한 기본값과 구분 — images.js resolveModes)
+      out[String(d.id)] = x.user === true ? { model: m, quality: q, user: true } : { model: m, quality: q };
     }
     s.image_modes = out;
   }
@@ -1718,7 +1719,11 @@ async function generateImage(c: Ctx) {
   // 1.5.1: 진짜 상품 사진(직접 올림·Pexels)을 '대상 모양 유지'로 넣어 AI가 그 상품을 다시 그린 이미지는 자리와 상관없이
   // 'AI 실사 장면'(composite_mode reference)으로 기록 → 상품 디테일 검수를 승인해야 '사용 가능'·발행 준비 완료 (1.5.1 검토: 일반 자리도)
   // 원본 상품 사진 id 를 같이 남김. AI 실사 장면을 고친 것도 같은 방식, 원본 보존 합성용 빈 배경을 고친 것은 그대로 빈 배경(상품 사진은 가리키기만)
-  const realSubject = refRows.find((x) => ["upload", "stock"].includes(String(x.kind)) && refs.some((r) => r.image_id === x.id && r.role === "subject"));
+  // 1.5.1 재검토: '대상 모양 유지'로 넣은 진짜 사진이 상품이 아니면(반려동물·사람·물건 — 화면에서 '상품 사진 아님'을 고름) 상품 검수 대상이 아님
+  // ('AI 합성 이미지 (실제 사진 참고)'로만 표시). 실제 상품이 보여야 하는 자리(aiGate composite)에서는 늘 상품 사진으로 봄
+  const subjectNotProduct = !product && b.subject_product === false && gate.composite !== true;
+  const realSubject = subjectNotProduct ? undefined
+    : refRows.find((x) => ["upload", "stock"].includes(String(x.kind)) && refs.some((r) => r.image_id === x.id && r.role === "subject"));
   const productImageId = product ? String(productRow!.id) : String(realSubject?.id ?? (mode === "edit" ? base?.product_image_id ?? "" : ""));
   const compositeMode = product ? (product.mode === "reference" ? "reference" : "")
     : realSubject || base?.composite_mode === "reference" ? "reference" : "";
@@ -2120,9 +2125,8 @@ async function productCheck(c: Ctx) {
   // 승인을 풀면 DB(트리거)가 이 이미지를 쓰는 발행 준비·예약 글(휴지통 포함)을 '검수 필요'로 되돌림 → 어느 글인지 먼저 찾아서 알려줌
   let demoted: string[] = [];
   if (was && !approve) {
-    const { data: sl, error: e1 } = await sb.from("post_image_slots").select("post_id").eq("image_id", c.params[0]);
-    if (e1) throw e1;
-    const ids = [...new Set(((sl ?? []) as J[]).map((x) => String(x.post_id)))];
+    // 자리 연결·카드뉴스 배경·이 이미지로 그린 카드뉴스 PNG (1.5.1 재검토 — DB 트리거와 같은 범위)
+    const ids = await postsUsingImage(c.params[0]);
     if (ids.length) {
       const { data: d2, error: e2 } = await sb.from("posts").select("id").in("id", ids).in("stage", ["ready", "scheduled"]);
       if (e2) throw e2;
@@ -2139,14 +2143,55 @@ async function productBgGate(id: string) {
   if (error) { if (missingColumn(error, "composite_mode") || /composite_mode|product_check/.test(String(error.message ?? ""))) return; throw error; }
   if (data && productSceneMode(data as J) && !productApproved(data as J)) fail(409, "product_check_needed");
 }
-// 발행 준비 완료·예약·게시 완료로 바꿀 때: 이 글의 자리에 연결된 상품 장면 이미지 중 승인 안 한 것 (018 전 DB면 그런 이미지가 있을 수 없어서 빈 목록)
+// 발행 준비 완료·예약·게시 완료로 바꿀 때: 이 글이 쓰는 상품 장면 이미지 중 승인 안 한 것 (018 전 DB면 그런 이미지가 있을 수 없어서 빈 목록)
+// — 자리에 연결된 이미지, 자리에 연결된 카드뉴스 PNG를 그릴 때 쓴 배경, 이 글의 카드뉴스 배경 (DB post_product_unapproved 와 같은 범위 — 1.5.1 재검토)
 async function productGateFor(post: J): Promise<J[]> {
-  const { data, error } = await sb.from("post_image_slots").select("slot_key, image_id, post_images(kind, composite_mode, product_check)").eq("post_id", post.id).not("image_id", "is", null);
+  const { data, error } = await sb.from("post_image_slots").select("slot_key, image_id, post_images(kind, composite_mode, product_check, background_image_id)").eq("post_id", post.id).not("image_id", "is", null);
   if (error) {
-    if (/composite_mode|product_check/.test(String(error.message ?? "")) || missingColumn(error, "composite_mode")) return [];
+    if (/composite_mode|product_check|background_image_id/.test(String(error.message ?? "")) || missingColumn(error, "composite_mode")) return [];
     throw error;
   }
-  return productGateErrors(post, ((data ?? []) as J[]).map((r) => ({ slot_key: r.slot_key, image: r.post_images }))) as J[];
+  const rows: J[] = ((data ?? []) as J[]).map((r) => ({ slot_key: r.slot_key, image: r.post_images }));
+  const cardBg = (r: J) => { const im = (r.image ?? null) as J | null; return im && im.kind === "card" && isUuid(im.background_image_id) ? String(im.background_image_id) : ""; };
+  const { data: deck, error: e2 } = await sb.from("post_card_decks").select("bg_image_id").eq("post_id", post.id).maybeSingle();
+  if (e2) throw e2;
+  const deckBg = isUuid((deck as J | null)?.bg_image_id) ? String((deck as J).bg_image_id) : "";
+  const ids = [...new Set([...rows.map(cardBg).filter(Boolean), ...(deckBg ? [deckBg] : [])])];
+  if (ids.length) {
+    const { data: bgs, error: e3 } = await sb.from("post_images").select("id, kind, composite_mode, product_check").in("id", ids);
+    if (e3) throw e3;
+    const by = new Map(((bgs ?? []) as J[]).map((x) => [String(x.id), x]));
+    for (const r of rows) { const k = cardBg(r); if (k) r.bg = by.get(k) ?? null; }
+    const d = deckBg ? by.get(deckBg) : null;
+    if (d) rows.push({ deck: true, image: d });
+  }
+  return productGateErrors(post, rows) as J[];
+}
+// 이 이미지(카드뉴스 PNG면 그 배경까지)가 승인 안 한 상품 장면인지 (DB image_product_unapproved 와 같은 판단)
+async function productUnapprovedImage(id: string): Promise<boolean> {
+  const { data: im, error } = await sb.from("post_images").select("id, kind, composite_mode, product_check, background_image_id").eq("id", id).is("deleted_at", null).maybeSingle();
+  if (error) { if (/composite_mode|product_check|background_image_id/.test(String(error.message ?? "")) || missingColumn(error, "composite_mode")) return false; throw error; }
+  if (!im) return false;
+  if (productSceneMode(im as J) && !productApproved(im as J)) return true;
+  if ((im as J).kind === "card" && isUuid((im as J).background_image_id)) {
+    const { data: bg, error: e2 } = await sb.from("post_images").select("kind, composite_mode, product_check").eq("id", (im as J).background_image_id).maybeSingle();
+    if (e2) throw e2;
+    return !!bg && !!productSceneMode(bg as J) && !productApproved(bg as J);
+  }
+  return false;
+}
+// 이 이미지를 쓰는 글: 자리에 연결 · 카드뉴스 배경 · 이 이미지를 배경으로 그린 카드뉴스 PNG를 자리에 연결 (DB posts_using_image 와 같은 범위)
+async function postsUsingImage(id: string): Promise<string[]> {
+  const [sl, dk, cards] = await Promise.all([
+    sb.from("post_image_slots").select("post_id").eq("image_id", id),
+    sb.from("post_card_decks").select("post_id").eq("bg_image_id", id),
+    sb.from("post_images").select("id").eq("kind", "card").eq("background_image_id", id),
+  ]);
+  for (const r of [sl, dk, cards]) if (r.error) throw r.error;
+  const cardIds = ((cards.data ?? []) as J[]).map((x) => String(x.id));
+  const via = cardIds.length ? await sb.from("post_image_slots").select("post_id").in("image_id", cardIds) : { data: [] as J[], error: null };
+  if (via.error) throw via.error;
+  return [...new Set([...(sl.data ?? []), ...(dk.data ?? []), ...(via.data ?? [])].map((x) => String((x as J).post_id)))];
 }
 // 상품 장면 결과의 내력: 원본 상품 사진 · (원본 보존 합성) 배경·마스크 · 비용 (모델 생성 비용과 배경 지우기 비용을 따로, 예상과 실제를 따로)
 async function productTrail(img: J): Promise<J | null> {
@@ -2251,7 +2296,7 @@ async function uploadImage(c: Ctx) {
   let bg: J | null = null;
   if (meta.kind === "card" && isUuid(meta.bg_image_id)) {
     await productBgGate(String(meta.bg_image_id));
-    const cols = "kind, provider, source_url, author_name, author_url, attribution_text, license, rights_confirmed";
+    const cols = "id, kind, provider, source_url, author_name, author_url, attribution_text, license, rights_confirmed";
     let r0 = await sb.from("post_images").select(cols + ", composite, composite_mode").eq("id", meta.bg_image_id).maybeSingle();
     if (r0.error) r0 = await sb.from("post_images").select(cols + ", composite").eq("id", meta.bg_image_id).maybeSingle();
     if (r0.error && missingColumn(r0.error, "composite")) r0 = await sb.from("post_images").select(cols).eq("id", meta.bg_image_id).maybeSingle();
@@ -2409,18 +2454,16 @@ async function linkSlot(c: Ctx) {
   }
   if (!isUuid(b.image_id)) fail(400, "bad_field", { field: "image_id" });
   const { post, slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
-  // 1.5.1: 발행 준비 완료·예약·게시 완료 글에는 상품 디테일 검수를 승인한 상품 장면 이미지만 (검토 중인 글에는 넣어 두고 승인은 나중에 해도 됨)
-  if (["ready", "scheduled", ...LIVE].includes(String(post!.stage))) {
-    const { data: im, error: e0 } = await sb.from("post_images").select("*").eq("id", b.image_id).is("deleted_at", null).maybeSingle();
-    if (e0) throw e0;
-    if (im && productSceneMode(im) && !productApproved(im)) fail(409, "product_check_needed");
+  const { data: ex, error: exErr } = await sb.from("post_image_slots").select("purpose, image_id").eq("post_id", postId).eq("slot_key", slot!.key).maybeSingle();
+  if (exErr) throw exErr;
+  // 1.5.1: 발행 준비 완료·예약·게시 완료 글에는 상품 디테일 검수를 승인한 상품 장면 이미지만 (카드뉴스 PNG는 그 배경까지 — 검토 중인 글에는 넣어 두고 승인은 나중에 해도 됨).
+  // 그 자리에 이미 있는 같은 이미지를 다시 연결하는 건(용도 바꾸기 등) 새로 넣는 게 아니라서 그대로 (1.5.1 재검토)
+  if (["ready", "scheduled", ...LIVE].includes(String(post!.stage)) && String((ex as J | null)?.image_id ?? "") !== String(b.image_id)) {
+    if (await productUnapprovedImage(String(b.image_id))) fail(409, "product_check_needed");
   }
   // 용도를 따로 안 보내면 그 자리에 저장해 둔 용도를 그대로 (연결할 때마다 기본값으로 돌아가지 않게)
   let use = has(PURPOSES, b.purpose) ? String(b.purpose) : "";
-  if (!use) {
-    const { data: ex } = await sb.from("post_image_slots").select("purpose").eq("post_id", postId).eq("slot_key", slot!.key).maybeSingle();
-    use = String((ex as J | null)?.purpose ?? "") || purpose;
-  }
+  if (!use) use = String((ex as J | null)?.purpose ?? "") || purpose;
   const { data, error } = await sb.rpc("image_slot_upsert", {
     p_post: postId, p: { slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, slot_ctx: ctxOf(slot), image_id: b.image_id, purpose: use },
   });
@@ -2477,7 +2520,10 @@ async function saveCards(c: Ctx) {
   if (b.bg_image_id !== null && b.bg_image_id !== undefined && b.bg_image_id !== "") {
     if (!isUuid(b.bg_image_id)) fail(400, "bad_field", { field: "bg_image_id" });
     bg = String(b.bg_image_id);
-    await productBgGate(bg);
+    // 배경을 새로 고를 때만 상품 디테일 검수 확인 (같은 배경으로 문구만 고치는 건 그대로 — 승인을 푼 배경이면 발행 준비로 바꿀 때 막음, 1.5.1 재검토)
+    const { data: cur, error: ce } = await sb.from("post_card_decks").select("bg_image_id").eq("post_id", post.id).maybeSingle();
+    if (ce) throw ce;
+    if (String((cur as J | null)?.bg_image_id ?? "") !== bg) await productBgGate(bg);
   }
   const row = {
     template: oneOf(b.template ?? "clean", Object.keys(CARD_TEMPLATES), "template"), ratio: oneOf(b.ratio ?? "4:5", CARD_RATIOS as string[], "ratio"),

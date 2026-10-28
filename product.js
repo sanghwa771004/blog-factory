@@ -415,7 +415,7 @@ export function createProduct(ui, kit) {
     PS.el.go = btn('만들기', 'wide', () => submit());
     PS.el.msg = h('div');
     const countSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '후보 몇 장' }, ...[1, 2, 3].map((n) =>
-      h('button', { type: 'button', 'aria-pressed': String(n === PS.count), onclick: () => { PS.count = n; draw(); } }, n === 1 ? '1장' : `${n}장 후보`)));
+      h('button', { type: 'button', 'aria-pressed': String(n === PS.count), disabled: !!PS.busy && n !== PS.count, onclick: () => { if (PS.busy) return; PS.count = n; draw(); } }, n === 1 ? '1장' : `${n}장 후보`)));
     if (!PS.el.status) PS.el.status = h('div', { class: 'stack' });
     const sec = step(8, '후보 만들기', h('p', { class: 'legend' }, '몇 장 만들까'), countSeg, PS.el.msg, PS.el.go, PS.el.status,
       h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 같은 요청은 한 번만 보내고, 여러 장이면 한 장씩 차례로 만들어. 이 화면을 나가도 서버에서 계속 만들고, 만든 이미지는 보관함에 남아.'));
@@ -456,9 +456,9 @@ export function createProduct(ui, kit) {
     const ps = PS;
     const e = estimate();
     if (whyNot(e)) return;
-    // 누른 즉시 잠금 (두 번 눌러도 한 번만 — 1.5.1 검토). 방식·장면·모델은 누른 때의 값으로 묶음 끝까지 (중간에 바꿔도 섞이지 않게)
+    // 누른 즉시 잠금 (두 번 눌러도 한 번만 — 1.5.1 검토). 방식·장면·모델·장수는 누른 때의 값으로 묶음 끝까지 (중간에 바꿔도 섞이지 않게)
     ps.busy = true;
-    const mode = ps.mode, specNow = spec(), refsNow = refsOut(), modelNow = modelOf();
+    const mode = ps.mode, specNow = spec(), refsNow = refsOut(), modelNow = modelOf(), n = ps.count;
     say(h('span', null, '준비하는 중…'));
     draw();
     const made = [];
@@ -468,19 +468,19 @@ export function createProduct(ui, kit) {
         const m = await saveMask(null);
         if (!m) return;
       }
-      const batch = ps.count > 1 ? { id: newUuid(), keys: Array.from({ length: ps.count }, () => newKey()) } : { id: null, keys: [newKey()] };
+      const batch = n > 1 ? { id: newUuid(), keys: Array.from({ length: n }, () => newKey()) } : { id: null, keys: [newKey()] };
       // 무료 모델(FLUX.2 klein)은 참고 사진을 512px보다 작은 사본으로 받음 → 없으면 먼저 만들어 올림 (원본은 그대로)
       if (mode === 'reference' && e.c.provider === 'cloudflare' && !isTest()) {
         try { for (const im of [ps.product, ...ps.extras]) await ensureSmall(im); } catch (err) { toast('작은 사본을 만들지 못했어: ' + ((err && err.code ? ui.errText(err) : err && err.message) || '이유 모름'), 5000); return; }
       }
-      for (let i = 0; i < ps.count; i++) {
+      for (let i = 0; i < n; i++) {
         const body = {
           request_key: batch.keys[i], product: specNow, product_image_id: ps.product.id, refs: refsNow, post_id: ps.postId || undefined, slot_key: ps.slotKey || undefined,
           ratio: e.ratio, quality: e.quality, model: modelNow, confirm_usd: e.est,
-          batch: ps.count > 1 ? { id: batch.id, kind: 'candidates', index: i, total: ps.count } : undefined,
-          reserve_usd: ps.count > 1 && e.est != null ? IMG.roundUsd(e.est * (ps.count - i)) : undefined,
+          batch: n > 1 ? { id: batch.id, kind: 'candidates', index: i, total: n } : undefined,
+          reserve_usd: n > 1 && e.est != null ? IMG.roundUsd(e.est * (n - i)) : undefined,
         };
-        const r = await sendOne(ps, body, i, e);
+        const r = await sendOne(ps, body, i, e, n);
         if (!r) break;
         made.push(r);
         if (!r.image) break;
@@ -498,14 +498,14 @@ export function createProduct(ui, kit) {
     }
     const failed = made.filter((x) => !x.image);
     if (failed.length) toast(failed[0].generation ? `못 만든 장: ${failed[0].generation.error_message || '이유 없음'}` : '못 만들었어', 5000);
-    if (ok.length < ps.count && made.length < ps.count) toast(`${ps.count}장 중 ${ok.length}장만 만들었어. 남은 장은 보내지 않았어 (돈이 안 나가).`, 5000);
+    if (ok.length < n && made.length < n) toast(`${n}장 중 ${ok.length}장만 만들었어. 남은 장은 보내지 않았어 (돈이 안 나가).`, 5000);
     draw();
     refreshPost(ps.postId);
   }
-  async function sendOne(ps, body, i, e) {
+  async function sendOne(ps, body, i, e, n = 1) {
     let j = null;
     for (let attempt = 0; attempt < 4 && !j; attempt++) {
-      say(h('span', null, ps.count > 1 ? `${i + 1}/${ps.count}장 보내는 중…` : '보내는 중…'));
+      say(h('span', null, n > 1 ? `${i + 1}/${n}장 보내는 중…` : '보내는 중…'));
       try { j = await sendGenerate(body); } catch (err) {
         if (err && err.code === 'server_busy' && attempt < 3) {
           for (let t = Math.max(1, Math.round(Number(err.retry_after) || 3)); t > 0; t--) { if (PS !== ps) return null; say(h('span', null, `서버가 다른 일을 마무리하는 중이야. ${t}초 뒤에 같은 요청으로 다시 보낼게 (돈은 아직 안 나갔어).`)); await sleep(1000); }
@@ -529,7 +529,7 @@ export function createProduct(ui, kit) {
     const t0 = Date.now();
     for (;;) {
       if (PS !== ps) return null;
-      say(h('span', null, h('i', { class: 'spin', 'aria-hidden': 'true' }), ` ${ps.count > 1 ? `${i + 1}/${ps.count}장 ` : ''}만드는 중… ${Math.round((Date.now() - t0) / 1000)}초 (보통 20초~1분)`));
+      say(h('span', null, h('i', { class: 'spin', 'aria-hidden': 'true' }), ` ${n > 1 ? `${i + 1}/${n}장 ` : ''}만드는 중… ${Math.round((Date.now() - t0) / 1000)}초 (보통 20초~1분)`));
       await sleep(Date.now() - t0 > 60e3 ? 5000 : 3000);
       let r;
       try { r = await api('/images/generations/' + gen.id); } catch (err) { if (err && err.code === 'auth') return null; continue; }
@@ -729,7 +729,8 @@ export function createProduct(ui, kit) {
         const blob = await CUT.toPngBlob(r.data, o.W, o.H);
         const fd = new FormData();
         const desc = clean(`${snap.name || '상품'} · ${IMG.PRODUCT_TEMPLATES[snap.template].label}`).slice(0, 120);
-        fd.append('meta', JSON.stringify({ product_image_id: ps.product.id, background_image_id: c.image.id, mask_id: snap.maskId, layer: { ...snap.layer, ratio: snap.ratio }, purpose: snap.purpose, ratio: snap.ratio,
+        // src_scaled: 아주 큰 상품 사진을 줄여 읽었으면 '원본 크기 그대로'여도 줄인 사진의 픽셀이라 검수 칸(글자·버튼)을 미리 채우지 않음 (1.5.1 재검토)
+        fd.append('meta', JSON.stringify({ product_image_id: ps.product.id, background_image_id: c.image.id, mask_id: snap.maskId, layer: { ...snap.layer, ratio: snap.ratio, src_scaled: !!(ps.src && ps.src.scaled) }, purpose: snap.purpose, ratio: snap.ratio,
           description: desc, spec: snap.spec, parent_image_id: snap.parent || undefined, post_id: ps.postId || undefined }));
         fd.append('file', blob, 'composite.png');
         return api('/images/composite', { method: 'POST', body: fd, timeout: 60000 });

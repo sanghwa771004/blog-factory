@@ -229,6 +229,18 @@ describe('원본 보존 합성 (지시서 9번 1·2·4·8)', () => {
     for (let i = 0; i < 800 * 600; i++) maxv = Math.max(maxv, r2.data[i * 4]);
     assert.ok(maxv <= 2, `검은 상품을 검은 배경에 얹었는데 흰 테두리가 남음: ${maxv}`);
   });
+  test('줄이거나 늘려 얹어도 가장자리에 어두운 테두리가 없음 — 흰 상품·흰 사진 배경 → 흰 AI 배경 (1.5.1 재검토: 줄일 때 214 같은 회색 테두리)', () => {
+    // 둥근 상품(가장자리 1px 반투명), 사진의 배경도 흰색 → 결과는 어디나 흰색(255)이어야 함
+    const W0 = 800, d = new Uint8ClampedArray(W0 * W0 * 4).fill(255), m = new Uint8ClampedArray(W0 * W0), R = W0 * 0.4, C = W0 / 2;
+    for (let y = 0; y < W0; y++) for (let x = 0; x < W0; x++) m[y * W0 + x] = Math.round(255 * Math.max(0, Math.min(1, R - Math.hypot(x + 0.5 - C, y + 0.5 - C) + 0.5)));
+    const bg = solid(1024, 768, [255, 255, 255]);
+    for (const feather of [1, 0]) for (const h of [0.2, 0.3, 0.45, 0.6, 1.1]) for (const x of [0.5, 0.507, 0.513]) {
+      const r = composite({ bg, prod: { data: d, w: W0, h: W0 }, mask: { data: m, w: W0, h: W0 }, layer: { x, y: 0.877, h, rot: h === 0.45 ? 7 : 0, ...NOSHADOW, mask: { feather, shrink: 0 } }, W: 800, H: 600 });
+      let minv = 255;
+      for (let p = 0; p < 800 * 600; p++) minv = Math.min(minv, r.data[p * 4], r.data[p * 4 + 1], r.data[p * 4 + 2]);
+      assert.ok(minv >= 254, `feather ${feather} h ${h} x ${x} (배율 ${r.scale.toFixed(2)}): 가장 어두운 칸 ${minv}`);
+    }
+  });
   test('레이어 설정은 images.js cleanLayer 로 정리 (원본 크기 그대로 표시 포함)', () => {
     assert.equal(cleanLayer({ one: true }).one, true);
     assert.equal(cleanLayer({ one: 'yes' }).one, false);

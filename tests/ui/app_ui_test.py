@@ -733,7 +733,7 @@ class Mock:
                  'model': model, 'provider': prov, 'size': size, 'quality': quality,
                  'purpose': body.get('purpose'), 'style': body.get('style'), 'user_prompt': '\n'.join(x for x in (body.get('text', ''), body.get('extra', '')) if x),
                  'ratio': body.get('ratio') or '', 'status': '생성 중', 'provider_called': True, 'refs': refs, 'batch': body.get('batch'), 'preset': body.get('preset', ''),
-                 'scene': body.get('scene'), 'base_image_id': body.get('base_image_id'),
+                 'scene': body.get('scene'), 'base_image_id': body.get('base_image_id'), 'subject_product': body.get('subject_product'),
                  'error_code': '', 'error_message': '', 'est_usd': body['confirm_usd'], 'usage_usd': None, 'actual_usd': None, 'actual_checked_at': None,
                  'cost_status': '청구 없음' if free else '예상', 'fx_krw': 1400, 'image_id': None, 'created_at': NOW, 'started_at': NOW, 'finished_at': None}
             self.gens.insert(0, g)
@@ -755,6 +755,9 @@ class Mock:
                 else:
                     base = self.img(g.get('base_image_id')) if g['mode'] == 'edit' else None
                     # 1.5.1 검토 뒤 서버처럼: 진짜 상품 사진을 '대상 모양 유지'로 넣으면 자리와 상관없이 AI 실사 장면
+                    # (1.5.1 재검토: 화면에서 '상품 사진 아님'을 고르면 아님 — 화면은 실제 상품 자리에서는 묻지 않음)
+                    if g.get('subject_product') is False:
+                        real_subject = None
                     ref_mode = real_subject or (base and base.get('composite_mode') == 'reference')
                     pextra = {'composite_mode': 'reference' if ref_mode else '', 'product_image_id': real_subject or (base or {}).get('product_image_id')}
                 slot_for = '' if pr and pr.get('mode') == 'layer' else g['slot_key']
@@ -2074,7 +2077,7 @@ def main():
             sec.get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
-            assert body['image_modes']['gemini_hq'] == {'model': 'gemini-nano-banana-2.1', 'quality': 'high'}, body['image_modes']
+            assert body['image_modes']['gemini_hq'] == {'model': 'gemini-nano-banana-2.1', 'quality': 'high', 'user': True}, body['image_modes']  # 1.5.1 재검토: 이 화면에서 고른 값 표시
             # 1.5.1: 기본값 그대로인 모드는 저장하지 않음 (나중에 앱 기본값이 바뀌면 따라감) — 바꾼 모드만
             assert set(body['image_modes']) == {'gemini_hq'} and 'image_gen_model' not in body, ('바꾼 모드만 저장, 안 바꾼 기본 모델은 안 보냄', body['image_modes'])
             assert body['image_review_model'] == 'gemini-3.5-flash-lite' and body['image_request_cap_usd'] == 0.5
@@ -2840,6 +2843,55 @@ def main():
                 reload_keys()
         check("1.5.1 승인 전 막기: 발행 준비 완료 잠김(검사 오류), 미리보기 '사용 가능'은 상품 검수로, 내려받아도 저절로 승인 안 됨, 발행 준비 원고 자리에는 못 넣음", t_product_gates)
 
+        # 1.5.1 재검토: 일반 자리에 '대상 모양 유지'로 넣은 진짜 사진이 상품이 아니면(반려동물·사람·물건) 끌 수 있음 → AI 합성 표시만, 상품 디테일 검수 대상 아님
+        def t_product_not_product_subject():
+            close_sheet()
+            # 보관함에 직접 올린 사진이 없으면 하나 넣어 둠 (이 시험만 따로 돌릴 때 — 전체를 돌리면 앞 시험이 올린 사진이 있음)
+            if not any(i['kind'] == 'upload' and not i.get('deleted_at') for i in mock.images):
+                mock.add_image('upload', P8, '', '4x3', source_type='own', description='내가 찍은 사진')
+            reload_keys()
+            open_p8()
+            prod_label = re.compile(r'이 사진은 상품\(제품\) 사진이야')
+
+            def add_upload_ref(i):
+                open_ai(i)
+                pick = sheet.get_by_role('button', name='보관함에서 참고 사진 고르기')
+                if not pick.is_visible():
+                    sheet.locator('summary', has_text='참고 사진').click()
+                pick.click()
+                sheet.locator('button.pick', has_text='직접').first.click()
+                expect(sheet.locator('select[aria-label="참고 사진 역할"]')).to_have_value('subject')
+            # 앞 시험이 본문을 고쳤을 수 있어서 자리를 글로 찾음: 일반 자리(실제 상품이 보여야 하는 자리가 아님)와 구성품 자리(실제 상품 자리)
+            slots8 = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])
+            gen_i = next(i for i, x in enumerate(slots8) if '구성품' not in x['text'] and '직접 찍기' not in x['text'])
+            real_i = next(i for i, x in enumerate(slots8) if '구성품' in x['text'])
+            add_upload_ref(gen_i)
+            chk = sheet.get_by_label(prod_label)
+            expect(chk).to_be_checked()  # 기본은 상품 사진 (검수를 거쳐야 씀)
+            expect(sheet).to_contain_text('상품 디테일 검수에서 원본과 비교해 승인해야 써')
+            chk.uncheck()
+            expect(sheet).to_contain_text("실제 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고")
+            expect(sheet).not_to_contain_text('상품 디테일 검수에서 원본과 비교해 승인해야 써')
+            go = sheet.get_by_role('button', name=re.compile(r'· 만들기$'))
+            expect(go).to_be_enabled()
+            n0 = len(gen_bodies())
+            go.click()
+            expect(sheet).to_contain_text('다 만들었어', timeout=20000)
+            req = gen_bodies()[n0]
+            assert req.get('subject_product') is False and req['refs'][0]['role'] == 'subject', req
+            new = mock.img(next(g for g in mock.gens if g['request_key'] == req['request_key'])['image_id'])
+            assert new['composite'] is True and new['composite_mode'] == '' and not new.get('product_image_id'), new
+            expect(sheet.get_by_role('button', name='상품 디테일 검수')).to_have_count(0)
+            sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
+            new['deleted_at'] = NOW  # 뒤 시험이 '진짜 사진을 참고한 AI 합성'을 찾을 때 섞이지 않게
+            # 실제 상품이 보여야 하는 자리(구성품)에서는 묻지 않음 — 늘 상품 사진으로 봄
+            open_p8()
+            add_upload_ref(real_i)
+            expect(sheet.get_by_label(prod_label)).to_have_count(0)
+            expect(sheet).to_contain_text('상품 디테일 검수에서 원본과 비교해 승인해야 써')
+            close_sheet()
+        check('1.5.1 재검토: 일반 자리의 진짜 사진이 상품이 아니면(반려동물 등) 끌 수 있음 — AI 합성 표시만·상품 검수 대상 아님, 실제 상품 자리에서는 묻지 않음', t_product_not_product_subject)
+
         def t_product_entries_settings():
             close_sheet()
             prod = PSPEC['prod']
@@ -2893,7 +2945,7 @@ def main():
             page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
-            assert body['image_modes'] == {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'xhigh'}}, ('저장해 둔 값은 덮어쓰지 않음', body['image_modes'])
+            assert body['image_modes'] == {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'xhigh', 'user': True}}, ('저장해 둔 값은 덮어쓰지 않음 (이 화면에서 고른 값 표시)', body['image_modes'])
             row.get_by_role('button', name='기본값으로').click()
             page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
@@ -2905,6 +2957,18 @@ def main():
             expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-sunburst')
             expect(row).to_contain_text('1.5.0 때 설정과 같이 저장된 예전 기본값(gpt-image-2.5-flare · 높음)은 네가 고른 값이 아니라서 새 기본값을 써')
             assert len([c for c in mock.calls if c['path'] == 'settings' and c['method'] == 'POST']) == n_post, '앱이 혼자 저장하지 않음 (저장된 값은 그대로)'
+            # 예전 값(Flare · 높음)을 직접 다시 고르면 그건 네가 고른 값 — 저장하면 다시 열어도 그대로 (1.5.1 재검토)
+            row.locator('label', has_text='모델').locator('select').select_option('gpt-image-2.5-flare')
+            row.locator('label', has_text='품질').locator('select').select_option('high')
+            page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
+            assert body['image_modes'].get('hq_paid') == {'model': 'gpt-image-2.5-flare', 'quality': 'high', 'user': True}, body['image_modes']
+            row = reload_settings(body['image_modes'])
+            expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-flare')
+            expect(row.locator('label', has_text='품질').locator('select')).to_have_value('high')
+            expect(row).to_contain_text('내가 저장한 값을 쓰는 중')
+            expect(row).not_to_contain_text('1.5.0 때 설정과 같이 저장된')
             mock.settings['image_modes'] = {}
             no_overflow('설정 > 이미지 (1.5.1)')
         check('1.5.1 진입 버튼(원고 이미지 칸·빈 자리·보관함)·보관함 상품 합성 탭·비용 따로, 설정은 고품질 기본 Sunburst · 높음이고 저장한 값은 그대로, 기본값으로 되돌리기', t_product_entries_settings)

@@ -8,9 +8,10 @@
 --                     product_check(상품 디테일 검수 — 사용자가 승인해야 '사용 가능'으로 바꿀 수 있음)
 --  3. 함수: image_save(새 칸 저장), image_mask_save, image_product_check(검수 저장·승인), image_delete(합성에 쓴 원본·배경은 못 지움,
 --           마스크 파일 경로도 돌려줌), image_usage(마스크 용량 포함). 승인 없이 '사용 가능'으로 바꾸면 DB가 막음(트리거)
---  4. 발행 막기 (트리거 — 서버·화면과 같은 규칙을 DB도): 승인 안 한 상품 장면 이미지가 자리(본문·본문 밖·본문에서 사라진 자리)에 있으면
---     발행 준비 완료·예약·게시 완료로 못 바꾸고, 그런 글의 자리에는 못 넣음. 승인을 풀면 그 이미지를 쓰는 발행 준비·예약 글(휴지통 포함)은
---     '검수 필요'로, 휴지통에서 되살린 발행 준비·예약 글이 걸리면 '검수 필요'로
+--  4. 발행 막기 (트리거 — 서버·화면과 같은 규칙을 DB도): 승인 안 한 상품 장면 이미지를 쓰고 있으면(자리 — 본문·본문 밖·본문에서 사라진 자리,
+--     카드뉴스 배경, 그걸 배경으로 그린 카드뉴스 PNG) 발행 준비 완료·예약·게시 완료로 못 바꾸고, 그런 글의 자리·카드뉴스 배경에는 못 넣음.
+--     승인을 풀면 그 이미지를 쓰는 발행 준비·예약 글(휴지통 포함)은 '검수 필요'로, 휴지통에서 되살린 발행 준비·예약 글이 걸리면 '검수 필요'로.
+--     card_deck_save·image_slot_upsert·image_slot_swap 은 012와 같고 잠그는 순서(글 줄 → 이미지 줄)·맞바꾸기만 더함
 
 -- 1 ───────── 상품 마스크 (원본 사진은 그대로 두고 마스크만 따로)
 create table if not exists public.product_masks (
@@ -90,28 +91,48 @@ end $$;
 drop trigger if exists post_images_product_gate on public.post_images;
 create trigger post_images_product_gate before insert or update on public.post_images for each row execute function public.post_images_product_gate();
 
--- 이 글의 자리(본문·본문 밖·본문에서 사라진 자리 모두)에 연결된 상품 장면 이미지 중 상품 디테일 검수를 승인하지 않은 것의 수
+-- 이 글이 쓰는 상품 장면 이미지 중 상품 디테일 검수를 승인하지 않은 것의 수 (같은 이미지는 한 번):
+-- 자리(본문·본문 밖·본문에서 사라진 자리 모두)에 연결된 이미지 · 이 글의 카드뉴스 배경 · 자리에 연결된 카드뉴스 PNG를 그릴 때 쓴 배경 (1.5.1 재검토)
 create or replace function public.post_product_unapproved(p_post uuid) returns int
 language sql stable set search_path = '' as $$
-  select count(*)::int from public.post_image_slots s join public.post_images i on i.id = s.image_id
-   where s.post_id = p_post
-     and (i.kind = 'composite' or i.composite_mode = 'reference')
+  select count(*)::int from public.post_images i
+   where (i.kind = 'composite' or i.composite_mode = 'reference')
      and coalesce((i.product_check->>'approved')::boolean, false) is not true
+     and (i.id in (select s.image_id from public.post_image_slots s where s.post_id = p_post)
+          or i.id in (select d.bg_image_id from public.post_card_decks d where d.post_id = p_post)
+          or i.id in (select c.background_image_id from public.post_image_slots s join public.post_images c on c.id = s.image_id
+                       where s.post_id = p_post and c.kind = 'card'))
 $$;
 
--- 발행 준비 완료·예약·게시(완료 뒤 단계 포함) 글의 자리에는 승인 안 한 상품 장면 이미지를 넣지 못함 (자리 연결·맞바꾸기·같은 파일 다시 올리기 등 어느 길로든)
+-- 이 이미지(카드뉴스 PNG면 그 배경까지)가 승인 안 한 상품 장면인지
+create or replace function public.image_product_unapproved(p_image uuid) returns boolean
+language sql stable set search_path = '' as $$
+  select exists (select 1 from public.post_images i
+    where i.id in (p_image, (select c.background_image_id from public.post_images c where c.id = p_image and c.kind = 'card'))
+      and (i.kind = 'composite' or i.composite_mode = 'reference')
+      and coalesce((i.product_check->>'approved')::boolean, false) is not true)
+$$;
+
+-- 발행 준비 완료·예약·게시(완료 뒤 단계 포함) 글의 자리에는 승인 안 한 상품 장면 이미지(와 그걸 배경으로 그린 카드뉴스 PNG)를 넣지 못함
+-- (자리 연결·같은 파일 다시 올리기 등 어느 길로든). 이미 그 자리에 있던 이미지를 다시 연결하거나 두 자리를 맞바꾸는 건 새 이미지를 넣는 게 아니라서 그대로 둠.
+-- 글 줄을 먼저 잠그고(for share) 단계를 본 뒤 이미지 줄을 잠그고 봄 — 같은 때 그 글을 발행 준비로 바꾸거나 승인을 푸는 요청과 겹쳐도
+-- 둘 중 하나가 기다렸다가 바뀐 값을 봄 (승인 풀기도 글 줄부터 잠금 — 순서가 같아서 서로 기다리다 멈추지 않음)
 create or replace function public.post_image_slots_product_gate() returns trigger
 language plpgsql set search_path = '' as $$
 declare
-  i public.post_images;
   st text;
 begin
-  if new.image_id is not null and (tg_op = 'INSERT' or new.image_id is distinct from old.image_id) then
-    select * into i from public.post_images where id = new.image_id;
-    if (i.kind = 'composite' or i.composite_mode = 'reference') and coalesce((i.product_check->>'approved')::boolean, false) is not true then
-      select stage into st from public.posts where id = new.post_id;
-      if st in ('ready', 'scheduled', 'published', 'collecting', 'analyzed') then raise exception 'product_check_needed'; end if;
-    end if;
+  if new.image_id is null then return new; end if;
+  if tg_op = 'UPDATE' and new.image_id is not distinct from old.image_id then return new; end if;
+  if tg_op = 'INSERT' and exists (select 1 from public.post_image_slots x
+                                   where x.post_id = new.post_id and x.slot_key = new.slot_key and x.image_id = new.image_id) then return new; end if;
+  if current_setting('app.slot_swap_post', true) = new.post_id::text then return new; end if;
+  select stage into st from public.posts where id = new.post_id for share;
+  if st in ('ready', 'scheduled', 'published', 'collecting', 'analyzed') then
+    perform 1 from public.post_images
+     where id = new.image_id or id = (select c.background_image_id from public.post_images c where c.id = new.image_id and c.kind = 'card')
+     order by id for share;
+    if public.image_product_unapproved(new.image_id) then raise exception 'product_check_needed'; end if;
   end if;
   return new;
 end $$;
@@ -119,12 +140,108 @@ drop trigger if exists post_image_slots_product_gate on public.post_image_slots;
 create trigger post_image_slots_product_gate before insert or update of image_id on public.post_image_slots
   for each row execute function public.post_image_slots_product_gate();
 
--- 글을 발행 준비 완료·예약·게시 완료로 바꿀 때 (어느 길로든) 승인 안 한 상품 장면 이미지가 자리에 있으면 막음.
+-- 카드뉴스 배경도 같은 규칙: 발행 준비 완료·예약·게시 글의 카드뉴스 배경으로 승인 안 한 상품 장면 이미지를 새로 고르지 못함 (배경을 그대로 두고 문구만 고치는 건 그대로)
+create or replace function public.post_card_decks_product_gate() returns trigger
+language plpgsql set search_path = '' as $$
+declare
+  st text;
+begin
+  if new.bg_image_id is null then return new; end if;
+  if tg_op = 'UPDATE' and new.bg_image_id is not distinct from old.bg_image_id then return new; end if;
+  if tg_op = 'INSERT' and exists (select 1 from public.post_card_decks x where x.post_id = new.post_id and x.bg_image_id = new.bg_image_id) then return new; end if;
+  select stage into st from public.posts where id = new.post_id for share;
+  if st in ('ready', 'scheduled', 'published', 'collecting', 'analyzed') then
+    perform 1 from public.post_images
+     where id = new.bg_image_id or id = (select c.background_image_id from public.post_images c where c.id = new.bg_image_id and c.kind = 'card')
+     order by id for share;
+    if public.image_product_unapproved(new.bg_image_id) then raise exception 'product_check_needed'; end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists post_card_decks_product_gate on public.post_card_decks;
+create trigger post_card_decks_product_gate before insert or update of bg_image_id on public.post_card_decks
+  for each row execute function public.post_card_decks_product_gate();
+
+-- 카드뉴스 저장 (012와 같음 + 1.5.1): 글 줄을 먼저 잠그고(for share) 배경 이미지 줄을 잠금 — 위 트리거·승인 풀기와 잠그는 순서를 같게
+create or replace function public.card_deck_save(p_post uuid, p jsonb) returns jsonb
+language plpgsql set search_path = '' as $$
+declare
+  d public.post_card_decks;
+  bg uuid := nullif(p->>'bg_image_id', '')::uuid;
+begin
+  perform 1 from public.posts where id = p_post for share;
+  if not found then raise exception 'post not found'; end if;
+  if bg is not null then
+    perform 1 from public.post_images where id = bg and deleted_at is null for share;
+    if not found then raise exception 'image not found'; end if;
+  end if;
+  insert into public.post_card_decks (post_id, template, ratio, slides, ad_label, bg_image_id)
+    values (p_post, coalesce(nullif(p->>'template', ''), 'clean'), coalesce(nullif(p->>'ratio', ''), '4:5'),
+            coalesce(p->'slides', '[]'::jsonb), coalesce((p->>'ad_label')::boolean, true), bg)
+    on conflict (post_id) do update set template = excluded.template, ratio = excluded.ratio, slides = excluded.slides,
+      ad_label = excluded.ad_label, bg_image_id = excluded.bg_image_id
+    returning * into d;
+  return to_jsonb(d);
+end $$;
+
+-- 사진 자리에 이미지 연결·빼기 (012와 같음 + 1.5.1): 글 줄을 먼저 잠그고(for share) 이미지 줄을 잠금 — 위 트리거·승인 풀기와 잠그는 순서를 같게
+create or replace function public.image_slot_upsert(p_post uuid, p jsonb) returns jsonb
+language plpgsql set search_path = '' as $$
+declare
+  sl public.post_image_slots;
+  img uuid := nullif(p->>'image_id', '')::uuid;
+begin
+  perform 1 from public.posts where id = p_post for share;
+  if not found then raise exception 'post not found'; end if;
+  if img is not null then
+    -- 같은 때 그 이미지를 지우는 요청이 있으면 끝날 때까지 기다렸다가 다시 확인 (지운 이미지에 연결되지 않게)
+    perform 1 from public.post_images where id = img and deleted_at is null for share;
+    if not found then raise exception 'image not found'; end if;
+  end if;
+  insert into public.post_image_slots (post_id, slot_key, slot_index, slot_text, slot_ctx, image_id, purpose)
+    values (p_post, p->>'slot_key', coalesce(nullif(p->>'slot_index', '')::int, 0), left(coalesce(p->>'slot_text', ''), 500),
+            left(coalesce(p->>'slot_ctx', ''), 300), img, coalesce(nullif(p->>'purpose', ''), 'blog_body'))
+    on conflict (post_id, slot_key) do update set
+      image_id = excluded.image_id,
+      slot_index = excluded.slot_index,
+      slot_text = excluded.slot_text,
+      slot_ctx = coalesce(nullif(p->>'slot_ctx', ''), public.post_image_slots.slot_ctx),
+      purpose = coalesce(nullif(p->>'purpose', ''), public.post_image_slots.purpose),
+      crop = case when public.post_image_slots.image_id is distinct from excluded.image_id then null else public.post_image_slots.crop end,
+      downloaded_at = case when public.post_image_slots.image_id is distinct from excluded.image_id then null else public.post_image_slots.downloaded_at end,
+      used_at = case when public.post_image_slots.image_id is distinct from excluded.image_id then null else public.post_image_slots.used_at end
+    returning * into sl;
+  return to_jsonb(sl);
+end $$;
+
+-- 두 자리의 이미지를 맞바꿈 (012와 같음 + 1.5.1): 이 글에 이미 있던 이미지끼리 자리만 바꾸는 거라서 위 자리 연결 막기를 건너뜀
+-- (게시한 글에서 승인을 푼 이미지가 있어도 순서는 바꿀 수 있게 — 1.5.1 재검토). 건너뛰는 표시는 이 함수 안에서만 켰다가 끔
+create or replace function public.image_slot_swap(p_post uuid, a jsonb, b jsonb) returns jsonb
+language plpgsql set search_path = '' as $$
+declare
+  ra public.post_image_slots;
+  rb public.post_image_slots;
+begin
+  if a->>'slot_key' = b->>'slot_key' then raise exception 'same slot'; end if;
+  perform set_config('app.slot_swap_post', p_post::text, true);
+  perform public.image_slot_upsert(p_post, a || jsonb_build_object('image_id', (select image_id from public.post_image_slots where post_id = p_post and slot_key = a->>'slot_key')));
+  perform public.image_slot_upsert(p_post, b || jsonb_build_object('image_id', (select image_id from public.post_image_slots where post_id = p_post and slot_key = b->>'slot_key')));
+  select * into ra from public.post_image_slots where post_id = p_post and slot_key = a->>'slot_key' for update;
+  select * into rb from public.post_image_slots where post_id = p_post and slot_key = b->>'slot_key' for update;
+  update public.post_image_slots set image_id = rb.image_id, crop = rb.crop, downloaded_at = null, used_at = null where id = ra.id;
+  update public.post_image_slots set image_id = ra.image_id, crop = ra.crop, downloaded_at = null, used_at = null where id = rb.id;
+  perform set_config('app.slot_swap_post', '', true);
+  return jsonb_build_object('a', (select to_jsonb(x) from public.post_image_slots x where x.id = ra.id), 'b', (select to_jsonb(x) from public.post_image_slots x where x.id = rb.id));
+end $$;
+
+-- 글을 발행 준비 완료·예약·게시 완료로 바꿀 때 (어느 길로든) 승인 안 한 상품 장면 이미지를 쓰고 있으면 막음
+-- (게시 뒤 단계(실적 모으는 중·분석 끝)에서 게시 완료로 돌아가는 건 서버처럼 다시 검사하지 않음 — 이미 올린 글이라서).
 -- 휴지통에서 되살린 발행 준비·예약 글이 그사이 승인을 푼 이미지를 쓰고 있으면 '검수 필요'로
 create or replace function public.posts_product_gate() returns trigger
 language plpgsql set search_path = '' as $$
 begin
   if new.stage in ('ready', 'scheduled', 'published') and new.stage is distinct from old.stage
+     and not (new.stage = 'published' and old.stage in ('collecting', 'analyzed'))
      and public.post_product_unapproved(new.id) > 0 then
     raise exception 'product_check_needed';
   end if;
@@ -137,6 +254,15 @@ end $$;
 drop trigger if exists posts_product_gate on public.posts;
 create trigger posts_product_gate before update of stage, deleted_at on public.posts for each row execute function public.posts_product_gate();
 
+-- 이 이미지를 쓰는 글: 자리에 연결 · 카드뉴스 배경 · 이 이미지를 배경으로 그린 카드뉴스 PNG를 자리에 연결 (1.5.1 재검토)
+create or replace function public.posts_using_image(p_image uuid) returns setof uuid
+language sql stable set search_path = '' as $$
+  select s.post_id from public.post_image_slots s where s.image_id = p_image
+  union select d.post_id from public.post_card_decks d where d.bg_image_id = p_image
+  union select s.post_id from public.post_image_slots s join public.post_images c on c.id = s.image_id
+         where c.kind = 'card' and c.background_image_id = p_image
+$$;
+
 -- 승인을 풀면 그 이미지를 쓰는 발행 준비 완료·예약 글을 '검수 필요'로 (휴지통에 있는 글도 — 되살렸을 때 그대로 발행 준비로 남지 않게)
 create or replace function public.post_images_product_demote() returns trigger
 language plpgsql set search_path = '' as $$
@@ -144,7 +270,7 @@ begin
   if coalesce((old.product_check->>'approved')::boolean, false) is true
      and coalesce((new.product_check->>'approved')::boolean, false) is not true then
     update public.posts set stage = 'review'
-     where id in (select post_id from public.post_image_slots where image_id = new.id)
+     where id in (select public.posts_using_image(new.id))
        and stage in ('ready', 'scheduled');
   end if;
   return null;
@@ -191,6 +317,10 @@ begin
     select * into m from public.product_masks where id = nullif(img->>'mask_id', '')::uuid and deleted_at is null for share;
     if m.id is null or m.image_id is distinct from prod.id then raise exception 'mask_mismatch'; end if;
   end if;
+  -- 카드뉴스 PNG: 그릴 때 쓴 배경 이미지를 가리키기만 함 — 배경이 상품 장면이면 발행 막기가 그 승인을 따라감 (1.5.1 재검토)
+  if img->>'kind' = 'card' and nullif(img->>'background_image_id', '') is not null then
+    select * into bg from public.post_images where id = (img->>'background_image_id')::uuid;
+  end if;
   insert into public.post_images (origin_post_id, origin_slot_index, origin_slot_key, kind, provider, model, prompt, user_prompt, style, purpose, ratio, description, alt_text,
       storage_path, mime, bytes, width, height, sha256, source_url, source_id, author_name, author_url, license, attribution_text, rights_confirmed, generation_id,
       parent_image_id, ref_images, composite, scene, preset,
@@ -210,7 +340,7 @@ begin
       case when mode = 'reference' then true when mode = 'layer' then false else coalesce((img->>'composite')::boolean, false) end,
       case when jsonb_typeof(img->'scene') = 'object' then img->'scene' end,
       left(coalesce(img->>'preset', ''), 30),
-      mode, prod.id, case when mode = 'layer' then bg.id end, case when mode = 'layer' then m.id end,
+      mode, prod.id, case when mode = 'layer' or img->>'kind' = 'card' then bg.id end, case when mode = 'layer' then m.id end,
       case when mode = 'layer' then img->'layer' end)
     returning * into i;
   if link is not null and coalesce(link->>'post_id', '') <> '' then
@@ -269,6 +399,10 @@ declare
   approve boolean := coalesce((p->>'approve')::boolean, false);
   mode text;
 begin
+  -- 승인을 풀 수 있는 저장이면 이 이미지를 쓰는 글 줄부터 잠금 (자리 연결·카드뉴스 배경·발행 준비로 바꾸기와 같은 순서: 글 줄 → 이미지 줄)
+  if not approve then
+    perform 1 from public.posts where id in (select public.posts_using_image(p_image)) order by id for no key update;
+  end if;
   select * into img from public.post_images where id = p_image and deleted_at is null for update;
   if img.id is null then raise exception 'image not found'; end if;
   mode := case when img.kind = 'composite' then 'layer' when img.kind = 'ai' and img.composite_mode = 'reference' then 'reference' else '' end;
@@ -344,9 +478,13 @@ revoke all on public.product_masks from anon, authenticated;
 revoke execute on function
   public.image_save(jsonb, jsonb, uuid, jsonb), public.image_mask_save(jsonb), public.image_product_check(uuid, jsonb),
   public.image_delete(uuid), public.image_usage(), public.post_images_product_gate(), public.post_product_unapproved(uuid),
-  public.post_image_slots_product_gate(), public.posts_product_gate(), public.post_images_product_demote()
+  public.image_product_unapproved(uuid), public.posts_using_image(uuid),
+  public.post_image_slots_product_gate(), public.post_card_decks_product_gate(), public.posts_product_gate(), public.post_images_product_demote(),
+  public.card_deck_save(uuid, jsonb), public.image_slot_swap(uuid, jsonb, jsonb), public.image_slot_upsert(uuid, jsonb)
   from public, anon, authenticated;
 grant execute on function
   public.image_save(jsonb, jsonb, uuid, jsonb), public.image_mask_save(jsonb), public.image_product_check(uuid, jsonb),
-  public.image_delete(uuid), public.image_usage(), public.post_product_unapproved(uuid)
+  public.image_delete(uuid), public.image_usage(), public.post_product_unapproved(uuid),
+  public.image_product_unapproved(uuid), public.posts_using_image(uuid),
+  public.card_deck_save(uuid, jsonb), public.image_slot_swap(uuid, jsonb, jsonb), public.image_slot_upsert(uuid, jsonb)
   to service_role;

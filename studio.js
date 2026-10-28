@@ -686,6 +686,10 @@ export function createStudio(ui) {
     const genericChk = h('input', { type: 'checkbox' });
     const genericText = h('span', null, '');
     const genericRow = h('label', { class: 'chk' }, genericChk, genericText);
+    // 1.5.1 재검토: '대상 모양 유지'로 넣은 진짜 사진이 상품인지 (반려동물·사람·물건이면 끔 → 상품 디테일 검수 대상이 아님). 실제 상품이 보여야 하는 자리에서는 묻지 않음
+    const productChk = h('input', { type: 'checkbox', checked: true, 'data-subject-product': '1' });
+    const productRow = h('label', { class: 'chk' }, productChk, h('span', null, " 이 사진은 상품(제품) 사진이야 — 만든 뒤 원본과 비교하는 상품 디테일 검수를 거쳐야 써. 반려동물·사람·물건처럼 상품이 아닌 사진이면 꺼줘."));
+    let askProduct = false;
     const riskBox = h('div', { class: 'stack' });
     const refBox = h('div', { class: 'stack' });
     const sceneBox = h('div', { class: 'stack' });
@@ -801,14 +805,21 @@ export function createStudio(ui) {
       const sr = IMG.slotRisk(gateText);
       const own = gate.code === 'own_photo_slot';
       const realNeeded = !own && s.n && IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).real && !gate.composite;
+      const realSubj = f.refs.some((r) => r.role === 'subject' && IMG.REAL_KINDS.includes(r.image.kind));
+      const baseRef = !!(base && base.composite_mode === 'reference');
+      askProduct = realSubj && !gate.composite && !baseRef;
+      const productScene = baseRef || (realSubj && (!askProduct || productChk.checked));
       genericText.textContent = ' 실제 상품·화면이 아니라 일반 장면으로 만들게 (특정 제품처럼 보이지 않게 — 실제 구성품·라벨·화면은 직접 찍은 사진이나 진짜 제품 사진 참고로)';
       put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)),
         own ? h('p', { class: 'badbox' }, gate.msg) : '',
         !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).msg || sr.msg) : '',
         !own && realNeeded && f.refs.some((r) => r.role === 'subject' && !IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "AI로 만든 이미지는 '대상 모양 유지'로 넣어도 진짜 제품 사진이 아니라서 실제 상품 자리를 채우지 못해. 직접 올린 사진이나 Pexels 사진을 넣어줘.") : '',
         !own && realNeeded ? genericRow : '',
-        // 1.5.1: 진짜 상품 사진을 '대상 모양 유지'로 넣으면 자리와 상관없이 AI 실사 장면으로 기록 → 상품 디테일 검수 필요 (서버와 같은 판단)
-        gate.composite || f.refs.some((r) => r.role === 'subject' && IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼. AI가 상품을 다시 그려서 상품 디테일 검수에서 원본과 비교해 승인해야 써 (상품을 원본 그대로 쓰려면 '이 상품으로 장면 만들기'의 원본 보존 합성).") : '');
+        // 1.5.1: 진짜 상품 사진을 '대상 모양 유지'로 넣으면 자리와 상관없이 AI 실사 장면으로 기록 → 상품 디테일 검수 필요 (서버와 같은 판단).
+        // 상품이 아닌 사진(반려동물·사람·물건)이라고 끄면 'AI 합성 이미지'로만 표시 — 실제 상품이 보여야 하는 자리는 늘 상품 사진으로 봄 (1.5.1 재검토)
+        askProduct ? productRow : '',
+        productScene ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼. AI가 상품을 다시 그려서 상품 디테일 검수에서 원본과 비교해 승인해야 써 (상품을 원본 그대로 쓰려면 '이 상품으로 장면 만들기'의 원본 보존 합성).")
+          : realSubj || gate.composite ? h('p', { class: 'notice' }, "실제 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고, 실제로 찍은 사진이나 써본 사진처럼 쓰면 안 돼.") : '');
       const u = usage();
       const fx = Number(st.image_fx_krw) || 0;
       const over = u && lastTotal != null && Number(u.month_usd) + lastTotal > Number(u.budget_usd) + 1e-9;
@@ -863,6 +874,7 @@ export function createStudio(ui) {
     qualSel.addEventListener('change', () => { f.quality = qualSel.value; update(); });
     for (const el of [textTa, extraTa]) el.addEventListener('input', update);
     genericChk.addEventListener('change', update);
+    productChk.addEventListener('change', update);
     const examples = mode === 'edit' ? h('div', { class: 'go' }, ...['조명만 더 자연스럽게 바꿔줘', '배경은 그대로 두고 자세만 바꿔줘', '피사체는 그대로, 카메라 각도를 조금 높여줘', '전체를 다시 만들지 말고 요청한 부분만 고쳐줘'].map((t) =>
       h('button', { type: 'button', class: 'copy', onclick: () => { textTa.value = textTa.value.trim() ? textTa.value.trim() + ' / ' + t : t; update(); } }, t))) : null;
     const form = () => {
@@ -889,7 +901,7 @@ export function createStudio(ui) {
         mode === 'edit' ? null : h('p', { class: 'legend' }, '몇 장 만들까'), mode === 'edit' ? null : countSeg,
         riskBox, promptDet,
         costBox, msg, goBtn,
-        mode === 'edit' ? null : h('div', { class: 'go' }, btn('여러 모델로 비교하기', 'sm ghost', () => compareSheet(p, s, { ...f, refs: f.refs.slice(), scene: { ...f.scene }, genericOk: genericChk.checked }))),
+        mode === 'edit' ? null : h('div', { class: 'go' }, btn('여러 모델로 비교하기', 'sm ghost', () => compareSheet(p, s, { ...f, refs: f.refs.slice(), scene: { ...f.scene }, genericOk: genericChk.checked, subjectProduct: !(askProduct && !productChk.checked) }))),
         h('p', { class: 'hint' }, '버튼을 누를 때만 만들어. 같은 요청은 한 번만 보내고, 여러 장이면 한 장씩 차례로 만들어.'));
       // 처음 채워 둔 설명·더 원하는 것을 고쳤으면 창 밖을 눌러도 안 닫힘 (안 고쳤으면 그냥 닫힘)
       if (ui.setSheetGuard) ui.setSheetGuard(() => clean(textTa.value) === clean(f0.text) && clean(extraTa.value) === clean(f0.extra) && JSON.stringify(f.scene) === scene0);
@@ -910,7 +922,7 @@ export function createStudio(ui) {
     const bodyFor = (rk, i) => ({
       request_key: rk, post_id: p.id, slot_key: s.key, mode, base_image_id: base ? base.id : undefined, purpose: f.purpose, ratio: f.ratio, preset: f.preset, style: f.preset,
       text: clean(f.text), extra: clean(f.extra), quality: f.quality, model: modelOf(), refs: refsOut(), scene: Object.keys(f.scene).length ? f.scene : undefined,
-      confirm_usd: lastEst, generic_ok: genericChk.checked || undefined,
+      confirm_usd: lastEst, generic_ok: genericChk.checked || undefined, subject_product: askProduct && !productChk.checked ? false : undefined,
       batch: f.count > 1 ? { id: batch.id, kind: 'candidates', index: i, total: f.count } : undefined,
       reserve_usd: f.count > 1 && lastEst != null ? IMG.roundUsd(lastEst * (f.count - i)) : undefined,
     });
@@ -1278,7 +1290,7 @@ export function createStudio(ui) {
         const reserve = IMG.roundUsd(todo.slice(i).reduce((a, x) => a + (x.est || 0), 0));
         const body = { request_key: newKey(), post_id: p.id, slot_key: s.key, mode: 'generate', purpose: f0.purpose, ratio: f0.ratio, preset: f0.preset, style: f0.preset,
           text: clean(f0.text), extra: clean(f0.extra), quality: r.q, model: r.m.model, refs: refsOut(), scene: Object.keys(f0.scene || {}).length ? f0.scene : undefined,
-          confirm_usd: r.est, generic_ok: f0.genericOk || undefined, batch: { id: batchId, kind: 'compare', index: i, total: todo.length }, reserve_usd: reserve };
+          confirm_usd: r.est, generic_ok: f0.genericOk || undefined, subject_product: f0.subjectProduct === false ? false : undefined, batch: { id: batchId, kind: 'compare', index: i, total: todo.length }, reserve_usd: reserve };
         put(msg, h('div', { class: 'genprog' }, h('i', { class: 'spin', 'aria-hidden': 'true' }), h('span', null, `${i + 1}/${todo.length} ${r.m.caps.label} 만드는 중…`)));
         let j = null;
         // 서버가 바쁘면(돈 나가기 전) 알려준 초만큼 기다렸다 같은 요청 번호로 다시 (최대 3번, 창을 닫으면 멈춤)
@@ -2135,7 +2147,7 @@ export function createStudio(ui) {
         const est = IMG.estimateUsd({ quality: qs.value, size, promptTokens: 900, prices: pr, model: ms.value });
         info.textContent = `${IMG.PROVIDERS[c.provider] ? IMG.PROVIDERS[c.provider].label : '?'} · ${c.free ? '무료' : est == null ? '가격 계산 못 함' : `블로그 본문 4:3 한 장 예상 약 ${usd(est)}`} · 참고 사진 ${c.refsMax ? c.refsMax + '장까지' : '못 받음'} · 고치기 ${c.edit ? '됨' : '안 됨'}`;
         const isDefault = ms.value === m.default_model && qs.value === IMG.normQuality(m.default_model, m.default_quality);
-        const legacyNote = m.legacy && !row.keep && isDefault ? ` · 1.5.0 때 설정과 같이 저장된 예전 기본값(${IMG.MODE_DEFAULTS_150[m.id].model} · ${IMG.qualityLabel(IMG.MODE_DEFAULTS_150[m.id].model, IMG.MODE_DEFAULTS_150[m.id].quality)})은 네가 고른 값이 아니라서 새 기본값을 써 — 예전 값을 쓰려면 골라서 저장해` : '';
+        const legacyNote = m.legacy && !row.keep && isDefault ? ` · 1.5.0 때 설정과 같이 저장된 예전 기본값(${IMG.MODE_DEFAULTS_150[m.id].model} · ${IMG.qualityLabel(IMG.MODE_DEFAULTS_150[m.id].model, IMG.MODE_DEFAULTS_150[m.id].quality)})은 네가 고른 값이 아니라서 새 기본값을 써 — 예전 값을 쓰려면 모델·품질을 그걸로 골라서 저장해 (그러면 네가 고른 값으로 남아)` : '';
         tag.textContent = `기본값: ${m.default_model} · ${IMG.qualityLabel(m.default_model, m.default_quality)} — ${row.keep ? (isDefault ? '저장해 둔 값 (기본값과 같음)' : '내가 저장한 값을 쓰는 중') : isDefault ? '기본값을 쓰는 중 (앱이 기본값을 바꾸면 따라감)' : '바꾼 값 (저장하면 이걸로)'}${legacyNote}`;
       };
       ms.addEventListener('change', () => { qs.value = ''; draw(); });

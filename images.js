@@ -990,7 +990,8 @@ export function resolveModes(settings) {
   return IMAGE_MODES.map((d) => {
     let x = o[d.id] && typeof o[d.id] === 'object' ? o[d.id] : {};
     const old = MODE_DEFAULTS_150[d.id];
-    const legacy = !!old && x.model === old.model && (typeof x.quality === 'string' ? x.quality : old.quality) === old.quality && (old.model !== d.model || old.quality !== d.quality);
+    // 1.5.1 화면이 저장한 값(user 표시)은 늘 사용자가 고른 값 — 1.5.0 기본값과 같아도 그대로 씀 (1.5.1 재검토: 예전 값을 다시 고를 수 있게)
+    const legacy = !!old && x.user !== true && x.model === old.model && (typeof x.quality === 'string' ? x.quality : old.quality) === old.quality && (old.model !== d.model || old.quality !== d.quality);
     if (legacy) x = {};
     const model = typeof x.model === 'string' && modelCaps(x.model).known && modelCaps(x.model).usable ? x.model : d.model;
     const caps = modelCaps(model);
@@ -1008,7 +1009,7 @@ export function modeOverrides(rows, keep = []) {
     if (!d || typeof r.model !== 'string' || !r.model) continue;
     const q = normQuality(r.model, String(r.quality || d.quality));
     if (r.model === d.model && q === normQuality(d.model, d.quality) && !keep.includes(r.id)) continue;
-    out[r.id] = { model: r.model, quality: q };
+    out[r.id] = { model: r.model, quality: q, user: true }; // user: 이 화면에서 사용자가 고른 값 (1.5.0 화면이 같이 저장한 기본값과 구분)
   }
   return out;
 }
@@ -1079,6 +1080,8 @@ export const PRODUCT_PURPOSES = {
   blog_cover: { label: '블로그 대표 이미지', size: 0.45, look_en: 'a clean, inviting hero image for the top of a blog post; calm empty space on one side for a title',
     look_ko: '글 맨 위 대표 이미지 — 한쪽에 제목이 올라갈 여백' },
   product_detail: { label: '상품 상세 소개', size: 0.62, look_en: 'a clean product detail photograph with even, soft light and neutral surroundings; the product is the clear focus',
+    // 원본 보존 합성의 빈 배경에는 '상품' 이야기를 하지 않음 (AI가 상품을 그리게 할 수 있어서 — 1.5.1 재검토)
+    layer_look_en: 'a clean, minimal detail photograph with even, soft light, neutral surroundings and one clear, uncluttered spot in the middle ground',
     look_ko: '상품이 잘 보이는 깔끔한 상세 사진' },
   ig_feed: { label: 'SNS 게시물', size: 0.55, look_en: 'a bright, pleasant social media photo with simple styling and harmonious colors',
     look_ko: '밝고 깔끔한 SNS용 사진' },
@@ -1184,7 +1187,7 @@ export function promptFromProductScene(sc) {
     if (layer) L.push('This image is an empty background plate for product compositing — keep the empty resting spot empty and do not add any product, object, text or logo.');
     else L.push('Keep the product exactly as it is in the image (same shape, colors, buttons, printing and logos); keep the composition, background and lighting unless the request asks otherwise.');
   } else if (layer) {
-    L.push(`Image type: Photograph — an empty background plate for product compositing; the final picture should read as ${Pp.look_en}.`);
+    L.push(`Image type: Photograph — an empty background plate for product compositing; the final picture should read as ${Pp.layer_look_en || Pp.look_en}.`);
     L.push(`Scene: ${T.layer_setting_en || T.setting_en}.${T.light_en ? ` Light: ${T.light_en}.` : ''}`);
     L.push(`Empty resting spot: a clear, flat, uncluttered part of the surface ${Pl.en}, large enough for an object about ${Math.round(Pp.size * 100)}% of the image height to stand on.`);
     L.push(`Camera: ${A.en}. Keep perspective natural and surface lines level so a product photographed from this angle fits in.`);
@@ -1240,7 +1243,8 @@ export const PRODUCT_VERDICTS = { ok: '괜찮아', issue: '문제 있어', unsur
 export function preservedChecks(layer) {
   const L = layer && typeof layer === 'object' ? layer : {};
   const tone = L.tone && (Number(L.tone.b) || Number(L.tone.w));
-  const exact = L.one === true && !Number(L.rot);
+  // 아주 큰 사진(긴 변 2,560px 넘음)은 줄여 읽어서 '원본 크기 그대로'여도 줄인 사진의 픽셀 — 그때도 글자·버튼은 직접 확인 (1.5.1 재검토)
+  const exact = L.one === true && !Number(L.rot) && L.src_scaled !== true;
   return ['shape', ...(tone ? [] : ['color']), ...(exact ? ['details', 'text'] : [])];
 }
 // 검수 상태: 모든 칸이 '괜찮아'여야 승인할 수 있음 (하나라도 '문제 있어'·'모르겠어'·빈칸이면 못 함)
@@ -1275,6 +1279,7 @@ export function cleanLayer(o) {
     mask: { feather: Math.round(num(m.feather, 0, 8, D.mask.feather)), shrink: Math.round(num(m.shrink, 0, 6, 0)) },
     ratio: Object.prototype.hasOwnProperty.call(RATIOS, x.ratio) ? x.ratio : '',
     one: x.one === true, // 원본 크기 그대로 (늘리거나 줄이지 않음 — 회전도 0이면 상품 칸이 원본 픽셀 그대로)
+    src_scaled: x.src_scaled === true, // 상품 사진이 아주 커서(긴 변 2,560px 넘음) 줄여 읽은 사진으로 합성했는지
   };
 }
 // 제작 목적·놓을 자리에 맞춘 첫 레이어 설정
@@ -1323,18 +1328,27 @@ export function refDownscaleNote(model, mode = 'reference') {
   return `${c.label}은 참고 사진을 ${c.refSmall}px보다 작게 줄여서 받아. 작은 로고·상품 글자·버튼은 남지 않거나 바뀔 수 있어 — 초안으로만 쓰고, 상품 모양이 중요하면 '원본 보존 합성'을 써줘.`;
 }
 // 발행 준비 완료·예약·게시 완료로 바꿀 때 막는 것: 이 글의 자리(본문·본문 밖·본문에서 사라진 자리 모두)에 연결된 상품 장면 이미지 중
-// 상품 디테일 검수를 승인하지 않은 것 (서버·화면·DB 같은 판단 — 사라진 자리도 보는 건 그 줄을 다시 쓰면 연결이 되살아나서, 1.5.1 검토)
-// rows: [{slot_key, image: {kind, composite_mode, product_check}}]
+// 상품 디테일 검수를 승인하지 않은 것 (서버·화면·DB 같은 판단 — 사라진 자리도 보는 건 그 줄을 다시 쓰면 연결이 되살아나서, 1.5.1 검토).
+// 1.5.1 재검토: 카드뉴스도 — 자리에 연결된 카드뉴스 PNG를 그릴 때 쓴 배경(bg)과 이 글의 카드뉴스 배경(deck: true 줄)
+// rows: [{slot_key, image: {kind, composite_mode, product_check}, bg?: {…카드뉴스 PNG의 배경}}, {deck: true, image: {…카드뉴스 배경}}]
+const unapprovedScene = (img) => !!(img && productSceneMode(img) && !productApproved(img));
 export function productGateErrors(post, rows) {
   const slots = parseSlots(post && post.body);
   const byKey = new Map(slots.map((s) => [s.key, s]));
-  const bad = (rows || []).filter((r) => r && r.image && productSceneMode(r.image) && !productApproved(r.image));
-  const body = bad.map((r) => byKey.get(r.slot_key)).filter(Boolean).sort((a, b) => a.n - b.n).map((s) => '사진 ' + s.n);
-  const extra = bad.filter((r) => !byKey.has(r.slot_key) && isExtraKey(r.slot_key)).map((r) => (extraSlot(r.slot_key) || {}).label || '본문 밖 자리');
+  const list = (rows || []).filter(Boolean);
+  const bad = list.filter((r) => !r.deck && (unapprovedScene(r.image) || (r.image && r.image.kind === 'card' && unapprovedScene(r.bg))));
+  const deck = list.some((r) => r.deck && unapprovedScene(r.image));
+  const name = (r, base) => (r.image && r.image.kind === 'card' ? `${base} (카드뉴스)` : base);
+  const body = bad.filter((r) => byKey.has(r.slot_key)).sort((a, b) => byKey.get(a.slot_key).n - byKey.get(b.slot_key).n).map((r) => name(r, '사진 ' + byKey.get(r.slot_key).n));
+  const extra = bad.filter((r) => !byKey.has(r.slot_key) && isExtraKey(r.slot_key)).map((r) => name(r, (extraSlot(r.slot_key) || {}).label || '본문 밖 자리'));
   const gone = bad.filter((r) => !byKey.has(r.slot_key) && !isExtraKey(r.slot_key)).length;
-  const ns = [...body, ...extra, ...(gone ? [`본문에서 사라진 자리 ${gone}곳`] : [])];
-  return bad.length ? [{ code: 'product_check_needed', msg: `상품 디테일 검수를 승인하지 않은 상품 이미지가 ${bad.length}곳 있어 (${ns.join(', ')}).`,
-    fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘 (본문에서 사라진 자리면 그 연결을 빼도 돼). 승인 전에는 발행 준비 완료·예약·게시 완료로 못 바꿔." }] : [];
+  const ns = [...body, ...extra, ...(gone ? [`본문에서 사라진 자리 ${gone}곳`] : []), ...(deck ? ['카드뉴스 배경'] : [])];
+  const n = bad.length + (deck ? 1 : 0);
+  const cards = deck || bad.some((r) => r.image && r.image.kind === 'card');
+  return n ? [{ code: 'product_check_needed', msg: `상품 디테일 검수를 승인하지 않은 상품 이미지가 ${n}곳 있어 (${ns.join(', ')}).`,
+    fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘 (본문에서 사라진 자리면 그 연결을 빼도 돼)."
+      + (cards ? ' 카드뉴스는 배경으로 쓴 상품 장면을 승인하거나, 승인한 배경으로 카드를 다시 만들어줘.' : '')
+      + ' 승인 전에는 발행 준비 완료·예약·게시 완료로 못 바꿔.' }] : [];
 }
 
 // 프롬프트 토큰 수 어림: 영어·숫자는 약 3.5글자에 1토큰, 한글 등은 1글자에 1.2토큰으로 넉넉하게 (실제 사용량이 오면 그걸로 다시 계산)
@@ -1674,7 +1688,7 @@ export function captionHint(img) {
     const t = String(img.license || '') + ' ' + String(img.attribution_text || '');
     // 1.5.1: 상품 장면을 배경으로 쓴 카드도 AI 표시를 잃지 않게 (원본 보존 합성 · AI 합성 이미지)
     if (/원본 보존 합성/.test(t)) {
-      const credit = /상품 사진: [^·]+\(Pexels\)/.exec(String(img.attribution_text || ''));
+      const credit = /상품 사진: (?:[^·]+\(Pexels\)|제조사·판매처 제공 이미지|외부 제공 이미지)/.exec(String(img.attribution_text || ''));
       return '※ 배경은 원본 보존 합성 이미지 — 실제 상품 사진에 AI로 만든 배경을 합성 (실제 사용 사진 아님)' + (credit ? ` · ${credit[0].trim()}` : '');
     }
     if (/AI 합성 이미지|실제 사진을 참고해 AI/.test(t)) return '※ 배경은 AI 합성 이미지 — 실제 사진을 참고해 AI로 만든 연출 이미지 (실제 사용 사진 아님)';

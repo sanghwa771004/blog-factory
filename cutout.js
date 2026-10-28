@@ -417,33 +417,37 @@ function render(bp, lp, L, W, H) {
   const ey0 = Math.floor(Math.min(...corners.map((c) => c[1]))), ey1 = Math.ceil(Math.max(...corners.map((c) => c[1])));
   if (ex0 < 0 || ey0 < 0 || ex1 > W || ey1 > H) warnings.push('clipped');
   const qx0 = Math.max(0, ex0), qx1 = Math.min(W, ex1), qy0 = Math.max(0, ey0), qy1 = Math.min(H, ey1);
-  const sampleA = (px, py) => {
-    if (exact) { const ix = Math.floor(px), iy = Math.floor(py); return ix < 0 || iy < 0 || ix >= prod.w || iy >= prod.h ? 0 : alpha[iy * prod.w + ix]; }
-    const x = px - 0.5, y = py - 0.5;
-    const x0 = Math.floor(x), y0 = Math.floor(y), tx = x - x0, ty = y - y0;
-    const g = (ix, iy) => (ix < 0 || iy < 0 || ix >= prod.w || iy >= prod.h ? 0 : alpha[iy * prod.w + ix]);
-    const t = g(x0, y0) + (g(x0 + 1, y0) - g(x0, y0)) * tx, b = g(x0, y0 + 1) + (g(x0 + 1, y0 + 1) - g(x0, y0 + 1)) * tx;
-    return t + (b - t) * ty;
-  };
   // 3) 상품 칸 미리 계산 (덮는 범위만): 투명도와 색 — 배율 1·회전 0이면 원본 칸을 그대로 (다시 계산하지 않음)
+  // 그 밖은 둘레 네 칸을 쌍선형으로 섞는데, 색은 투명도로 곱해서 섞고 나중에 나눔 (premultiplied) — 완전히 투명한 칸의 색(원래 배경색·0)이
+  // 가장자리에 섞여 테두리가 생기지 않게 (1.5.1 재검토: 흰 상품이 흰 배경에서 회색 테두리)
   const rw = Math.max(0, qx1 - qx0), rh = Math.max(0, qy1 - qy0);
   const RA = new Float32Array(rw * rh), RC = new Float32Array(rw * rh * 3);
   const pt = toneFn(L.tone.b, L.tone.w);
   let groundY = -1;
   for (let y = qy0; y < qy1; y++) for (let x = qx0; x < qx1; x++) {
     const [px, py] = toProd(x + 0.5, y + 0.5);
-    const a = sampleA(px, py);
-    if (a <= 0) continue;
-    let r, g, b;
+    let a, r, g, b;
     if (exact) {
-      const i = (Math.floor(py) * prod.w + Math.floor(px)) * 4;
+      const ix = Math.floor(px), iy = Math.floor(py);
+      if (ix < 0 || iy < 0 || ix >= prod.w || iy >= prod.h) continue;
+      a = alpha[iy * prod.w + ix];
+      if (a <= 0) continue;
+      const i = (iy * prod.w + ix) * 4;
       r = rgb[i]; g = rgb[i + 1]; b = rgb[i + 2];
     } else {
-      const sxp = Math.min(prod.w - 1, Math.max(0, px - 0.5)), syp = Math.min(prod.h - 1, Math.max(0, py - 0.5));
-      const x0 = Math.floor(sxp), y0 = Math.floor(syp), x1 = Math.min(prod.w - 1, x0 + 1), y1 = Math.min(prod.h - 1, y0 + 1), tx = sxp - x0, ty = syp - y0;
-      const c = (ix, iy, k) => rgb[(iy * prod.w + ix) * 4 + k];
-      const lerp = (k) => { const t = c(x0, y0, k) + (c(x1, y0, k) - c(x0, y0, k)) * tx, bt2 = c(x0, y1, k) + (c(x1, y1, k) - c(x0, y1, k)) * tx; return t + (bt2 - t) * ty; };
-      r = lerp(0); g = lerp(1); b = lerp(2);
+      const sx0 = px - 0.5, sy0 = py - 0.5;
+      const x0 = Math.floor(sx0), y0 = Math.floor(sy0), tx = sx0 - x0, ty = sy0 - y0;
+      let A = 0, R = 0, G = 0, B = 0;
+      for (let k = 0; k < 4; k++) {
+        const ix = x0 + (k & 1), iy = y0 + (k >> 1);
+        if (ix < 0 || iy < 0 || ix >= prod.w || iy >= prod.h) continue;
+        const w = ((k & 1) ? tx : 1 - tx) * ((k >> 1) ? ty : 1 - ty);
+        const j = iy * prod.w + ix, aw = alpha[j] * w;
+        if (aw <= 0) continue;
+        A += aw; R += rgb[j * 4] * aw; G += rgb[j * 4 + 1] * aw; B += rgb[j * 4 + 2] * aw;
+      }
+      if (A <= 1e-6) continue;
+      a = A; r = R / A; g = G / A; b = B / A;
     }
     if (pt) [r, g, b] = pt(r, g, b);
     const q = (y - qy0) * rw + (x - qx0);

@@ -71,4 +71,15 @@ describe('1.5.1 검토 뒤: 상품 장면을 배경으로 쓴 카드뉴스', () 
     assert.equal(img.attribution_text, '배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경 · 상품 사진: 김사진 (Pexels)');
     assert.match(captionHint(img), /^※ 배경은 원본 보존 합성 이미지 — .* · 상품 사진: 김사진 \(Pexels\)$/);
   });
+  test('카드 기록에 그릴 때 쓴 배경 이미지 id 를 남김 — 배경이 상품 장면이면 발행 막기가 그 승인을 따라감 (1.5.1 재검토)', async () => {
+    const d = deps(openaiOk);
+    const PNG = fx('product.png');
+    const r = await saveUploaded(d, { bytes: PNG, declaredMime: 'image/png', kind: 'card', post: { id: 'post-1' }, slot: null, purpose: 'cards',
+      bg: { id: 'bg-1', kind: 'ai', provider: 'openai', composite: true, composite_mode: 'reference', attribution_text: '' } });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    assert.equal(d.log.rpc.find((x) => x.name === 'image_save').args.img.background_image_id, 'bg-1');
+    const d2 = deps(openaiOk);
+    await saveUploaded(d2, { bytes: PNG, declaredMime: 'image/png', kind: 'card', post: { id: 'post-1' }, slot: null, purpose: 'cards' });
+    assert.equal(d2.log.rpc.find((x) => x.name === 'image_save').args.img.background_image_id, '', '배경 없는 카드');
+  });
 });

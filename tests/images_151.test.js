@@ -41,8 +41,9 @@ describe('지시서 5번: 모델 기본값 — 고품질은 Sunburst(high), 빠�
     const mine = resolveModes({ image_modes: { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'xhigh' } } }).find((m) => m.id === 'hq_paid');
     assert.deepEqual([mine.model, mine.quality, mine.saved, mine.legacy], ['gpt-image-2.5-flare', 'xhigh', true, false]);
     // 화면이 저장할 때: 예전 기본값은 '저장해 둔 값'이 아니라서, 기본값 그대로 두면 저장하지 않음 (저장된 값을 앱이 몰래 바꾸지는 않음 — 사용자가 저장을 누를 때만)
+    const u = (x) => ({ ...x, user: true }); // 1.5.1 화면이 저장한 값에는 '사용자가 고른 값' 표시 (1.5.1 재검토)
     assert.deepEqual(modeOverrides(ms.map((m) => ({ id: m.id, model: m.model, quality: m.quality })), ms.filter((m) => m.saved).map((m) => m.id)),
-      { free_draft: v150.free_draft, fast_paid: v150.fast_paid, gemini_hq: v150.gemini_hq });
+      { free_draft: u(v150.free_draft), fast_paid: u(v150.fast_paid), gemini_hq: u(v150.gemini_hq) });
   });
   test('Flare·Sunburst 는 화면에서 이름으로 구분돼 보임', () => {
     assert.equal(modelCaps('gpt-image-2.5-flare').label, 'GPT Image 2.5 Flare');
@@ -53,8 +54,8 @@ describe('지시서 5번: 모델 기본값 — 고품질은 Sunburst(high), 빠�
     const rows = IMAGE_MODES.map((m) => ({ id: m.id, model: m.model, quality: m.quality }));
     assert.deepEqual(modeOverrides(rows), {});
     const changed = rows.map((r) => (r.id === 'free_draft' ? { ...r, model: 'cf-flux-1-schnell', quality: 'high' } : r));
-    assert.deepEqual(modeOverrides(changed), { free_draft: { model: 'cf-flux-1-schnell', quality: 'high' } });
-    assert.deepEqual(modeOverrides(rows, ['hq_paid']), { hq_paid: { model: 'gpt-image-2.5-sunburst', quality: 'high' } }, '저장해 둔 모드는 같은 값이어도 남김');
+    assert.deepEqual(modeOverrides(changed), { free_draft: { model: 'cf-flux-1-schnell', quality: 'high', user: true } });
+    assert.deepEqual(modeOverrides(rows, ['hq_paid']), { hq_paid: { model: 'gpt-image-2.5-sunburst', quality: 'high', user: true } }, '저장해 둔 모드는 같은 값이어도 남김');
     assert.deepEqual(modeOverrides([{ id: 'nope', model: 'x' }, { id: 'hq_paid', model: '' }]), {});
   });
   test('Gemini 두 모델은 계속 고를 수 있고, 3 Pro Image 에는 문서에 없는 비율(1:4 등)을 안 줌', () => {
@@ -131,7 +132,7 @@ describe('지시서 1·7번: 두 방식은 섞지 않고 프롬프트도 따로'
 describe('지시서 4번: 레이어 설정 (위치·크기·회전·그림자·밝기) — 원본 픽셀은 화면이 그대로 얹음', () => {
   test('범위 밖 값은 범위 안으로, 모르는 비율은 빈 값', () => {
     const L = cleanLayer({ x: 3, y: -1, h: 9, rot: 90, shadow: { o: 2, s: -1, dx: 5 }, tone: { b: 1, w: -1 }, bg: { b: 0.1 }, mask: { feather: 99, shrink: -3 }, ratio: '21:9' });
-    assert.deepEqual(L, { x: 1, y: 0.05, h: 1.2, rot: 45, shadow: { o: 1, s: 0, dx: 1 }, tone: { b: 0.3, w: -0.3 }, bg: { b: 0.1, w: 0 }, mask: { feather: 8, shrink: 0 }, ratio: '', one: false });
+    assert.deepEqual(L, { x: 1, y: 0.05, h: 1.2, rot: 45, shadow: { o: 1, s: 0, dx: 1 }, tone: { b: 0.3, w: -0.3 }, bg: { b: 0.1, w: 0 }, mask: { feather: 8, shrink: 0 }, ratio: '', one: false, src_scaled: false });
   });
   test('첫 설정은 목적·자리·각도에 맞춤', () => {
     assert.deepEqual([defaultLayer({ place: 'left', purpose: 'product_detail' }).x, defaultLayer({ place: 'left', purpose: 'product_detail' }).h], [0.34, 0.62]);
@@ -264,5 +265,54 @@ describe('1.5.1 검토 뒤 고친 것: 카드뉴스 AI 표시 · 원본 보존 �
     const ok = checkImageFile(png, 'image/png', 12 * 1024 * 1024);
     assert.equal(ok.ok, true, JSON.stringify(ok));
     assert.deepEqual([ok.width, ok.height], [800, 600]);
+  });
+});
+
+describe('1.5.1 재검토 뒤 고친 것: 카드뉴스 발행 막기 · 예전 값 다시 고르기 · 줄여 읽은 사진 · 빈 배경 지시문 · 카드 출처', () => {
+  const body = '본문\n[이미지: 침대 위 전기요]\n끝';
+  const KEY = 'k:침대 위 전기요#1';
+  const unapproved = { kind: 'ai', composite_mode: 'reference', product_check: null };
+  test('발행 막기: 자리에 연결된 카드뉴스 PNG를 그릴 때 쓴 배경 · 이 글의 카드뉴스 배경도 봄 (서버·DB와 같은 범위)', () => {
+    const cardRow = { slot_key: KEY, image: { kind: 'card' }, bg: unapproved };
+    const e = productGateErrors({ body }, [cardRow]);
+    assert.match(e[0].msg, /1곳 있어 \(사진 1 \(카드뉴스\)\)/);
+    assert.match(e[0].fix, /승인한 배경으로 카드를 다시 만들어줘/);
+    const d = productGateErrors({ body }, [{ deck: true, image: unapproved }]);
+    assert.match(d[0].msg, /1곳 있어 \(카드뉴스 배경\)/);
+    assert.match(productGateErrors({ body }, [cardRow, { deck: true, image: unapproved }])[0].msg, /2곳 있어 \(사진 1 \(카드뉴스\), 카드뉴스 배경\)/);
+    // 승인한 배경·상품 장면이 아닌 배경은 그대로, 카드가 아닌 이미지의 bg 칸은 보지 않음
+    assert.deepEqual(productGateErrors({ body }, [{ ...cardRow, bg: { ...unapproved, product_check: { approved: true } } }, { deck: true, image: { kind: 'stock' } }]), []);
+    assert.deepEqual(productGateErrors({ body }, [{ slot_key: KEY, image: { kind: 'stock' }, bg: unapproved }]), []);
+  });
+  test('1.5.1 화면에서 예전 값(Flare · 높음)을 직접 고르면 그 값을 씀 — 1.5.0 화면이 같이 저장한 값만 예전 기본값으로 봄', () => {
+    const saved = modeOverrides([{ id: 'hq_paid', model: 'gpt-image-2.5-flare', quality: 'high' }]);
+    assert.deepEqual(saved, { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'high', user: true } });
+    const r = resolveModes({ image_modes: saved }).find((m) => m.id === 'hq_paid');
+    assert.deepEqual([r.model, r.quality, r.saved, r.legacy], ['gpt-image-2.5-flare', 'high', true, false]);
+    const old = resolveModes({ image_modes: { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'high' } } }).find((m) => m.id === 'hq_paid');
+    assert.deepEqual([old.model, old.legacy], ['gpt-image-2.5-sunburst', true]);
+  });
+  test("아주 큰 사진을 줄여 읽어 합성했으면 '원본 크기 그대로'여도 글자·버튼 칸을 미리 채우지 않음", () => {
+    assert.deepEqual(preservedChecks({ one: true, rot: 0, tone: { b: 0, w: 0 }, src_scaled: true }), ['shape', 'color']);
+    assert.deepEqual(preservedChecks(cleanLayer({ one: true, src_scaled: true })), ['shape', 'color']);
+    assert.equal(cleanLayer({ src_scaled: 'yes' }).src_scaled, false);
+  });
+  test('원본 보존 합성의 빈 배경 지시문: 목적·장면·각도 어느 조합에서도 상품을 장면에 넣으라는 말이 없음 (합성할 거라는 설명만)', () => {
+    const allowed = [/an empty background plate for product compositing/g, /so a product photographed from this angle fits in/g, /so a product added later can match/g];
+    for (const template of Object.keys(PRODUCT_TEMPLATES)) for (const purpose of Object.keys(PRODUCT_PURPOSES)) for (const angle of ['front', 'high', 'top']) {
+      const p = promptFromProductScene(buildProductScene({ spec: { ...SPEC, template, purpose, angle }, ratio: '4:3', size: '1280×960' }));
+      let head = p.split('\nRules:')[0];
+      for (const a of allowed) head = head.replace(a, '');
+      assert.doesNotMatch(head, /product/i, `${template}/${purpose}/${angle}: ${head}`);
+    }
+    // AI 실사 장면의 상세 소개는 그대로 상품이 주인공
+    assert.match(promptFromProductScene(buildProductScene({ spec: { ...SPEC, mode: 'reference', purpose: 'product_detail' }, ratio: '4:3', size: '1280×960', refs: [{ image_id: 'p', role: 'subject' }] })), /the product is the clear focus/);
+  });
+  test('상품 장면을 배경으로 쓴 카드뉴스 캡션: 상품 사진 출처(제조사·판매처 제공·외부 제공)도 남김', () => {
+    const lic = '카드뉴스 (앱에서 직접 만듦) · 배경: 원본 보존 합성 (상품 사진 + AI 배경)';
+    for (const credit of ['상품 사진: 제조사·판매처 제공 이미지', '상품 사진: 외부 제공 이미지', '상품 사진: 김사진 (Pexels)']) {
+      assert.equal(captionHint({ kind: 'card', license: lic, attribution_text: `배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경 · ${credit}` }),
+        `※ 배경은 원본 보존 합성 이미지 — 실제 상품 사진에 AI로 만든 배경을 합성 (실제 사용 사진 아님) · ${credit}`);
+    }
   });
 });

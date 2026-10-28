@@ -303,3 +303,117 @@ describe('018 — 검토 뒤: 원본 보존 합성의 배경은 이 상품용 �
     assert.equal(await val(db, `select count(*)::int from pg_trigger where tgname in ('post_image_slots_product_gate', 'posts_product_gate', 'post_images_product_demote')`), 3);
   });
 });
+
+describe('018 — 재검토 뒤: 카드뉴스도 발행 막기, 게시한 글의 순서 바꾸기·같은 이미지 다시 연결은 그대로, 잠그는 순서', () => {
+  let db, prod, plate, m, comp, refImg;
+  const slot = (post, key, image, extra = {}) => val(db, `select public.image_slot_upsert($1, $2::jsonb)`, [post, JSON.stringify({ slot_key: key, slot_index: 0, slot_text: '자리', image_id: image, ...extra })]);
+  const newPost = (stage = 'review') => val(db, `insert into public.posts (keyword, body, stage) values ('상품', '본문\n[이미지: 첫 사진]\n[이미지: 둘째 사진]\n끝', $1) returning id`, [stage]);
+  const stageOf = (id) => val(db, `select stage from public.posts where id = $1`, [id]);
+  const deck = (post, bg, title = '첫 장') => val(db, `select public.card_deck_save($1, $2::jsonb)`, [post, JSON.stringify({ slides: [{ title }], bg_image_id: bg })]);
+  const toReady = (post) => db.query(`update public.posts set stage = 'ready' where id = $1`, [post]);
+  const card = (bgId, sha) => save(db, { kind: 'card', provider: 'cardnews', mime: 'image/png', storage_path: `card/${sha}.png`, sha256: sha, background_image_id: bgId });
+  before(async () => {
+    db = await freshDb();
+    prod = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p.jpg', rights_confirmed: true, sha256: 'p1' });
+    plate = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/plate.jpg', preset: 'pscene_layer', product_image_id: prod.id });
+    m = await mask(db, { image_id: prod.id });
+    comp = await save(db, { kind: 'composite', provider: 'composite', storage_path: 'composite/c.png', layer: LAYER, product_image_id: prod.id, background_image_id: plate.id, mask_id: m.id });
+    refImg = await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/ref.jpg', composite_mode: 'reference', product_image_id: prod.id });
+  });
+
+  test('카드뉴스 배경: 승인 안 한 상품 장면이면 발행 준비로 못 바꾸고, 승인을 풀면 그 글이 검수 필요로 (휴지통 포함)', async () => {
+    const post = await newPost();
+    await deck(post, refImg.id);
+    assert.equal(await val(db, `select public.post_product_unapproved($1)`, [post]), 1);
+    await assert.rejects(toReady(post), /product_check_needed/);
+    await check(db, refImg.id, { items: ALL_OK, approve: true });
+    await toReady(post);
+    const trashed = await newPost();
+    await deck(trashed, refImg.id);
+    await toReady(trashed);
+    await db.query(`update public.posts set deleted_at = now() where id = $1`, [trashed]);
+    await check(db, refImg.id, { items: { ...ALL_OK, text: 'issue' } }); // 승인 풀기
+    assert.deepEqual([await stageOf(post), await stageOf(trashed)], ['review', 'review']);
+    assert.deepEqual((await all(db, `select public.posts_using_image($1) as id`, [refImg.id])).map((r) => r.id).sort(), [post, trashed].sort());
+  });
+  test('카드뉴스 배경: 발행 준비 글에는 승인 안 한 상품 장면을 새 배경으로 못 고르지만, 같은 배경으로 문구만 고치는 건 됨', async () => {
+    await check(db, refImg.id, { items: ALL_OK, approve: true });
+    const post = await newPost();
+    await deck(post, refImg.id);
+    await toReady(post);
+    // 승인을 풀면 검수 필요로 내려가니까, 다시 발행 준비 상태를 만들려고 내려 두는 트리거를 잠깐 끔 (다른 기기에서 겹친 경우 흉내)
+    await db.exec(`alter table public.post_images disable trigger post_images_product_demote`);
+    await check(db, refImg.id, { items: { ...ALL_OK, shape: 'unsure' } });
+    await db.exec(`alter table public.post_images enable trigger post_images_product_demote`);
+    assert.equal(await stageOf(post), 'ready');
+    await deck(post, refImg.id, '문구만 고침'); // 같은 배경 — 새로 넣는 게 아님
+    const other = await newPost('ready');
+    await assert.rejects(deck(other, refImg.id), /product_check_needed/, '발행 준비 글에 새 배경으로');
+    await deck(other, plate.id); // 상품 장면이 아닌 배경은 그대로
+    await check(db, refImg.id, { items: ALL_OK, approve: true });
+  });
+  test('카드뉴스 PNG: 그릴 때 쓴 배경을 기록하고, 그 배경의 승인을 따라감 (발행 준비 글 자리에 못 넣음 · 발행 준비로 못 바꿈 · 승인을 풀면 검수 필요)', async () => {
+    const c1 = await card(comp.id, 'card1');
+    assert.equal(c1.background_image_id, comp.id);
+    assert.equal(c1.composite_mode, '');
+    const ready = await newPost('ready');
+    await assert.rejects(slot(ready, 'k:첫 사진#1', c1.id), /product_check_needed/, '승인 안 한 합성으로 그린 카드');
+    const post = await newPost();
+    await slot(post, 'k:첫 사진#1', c1.id);
+    await assert.rejects(toReady(post), /product_check_needed/);
+    await check(db, comp.id, { items: ALL_OK, approve: true });
+    await toReady(post);
+    await slot(ready, 'k:첫 사진#1', c1.id);
+    await check(db, comp.id, { items: { ...ALL_OK, artifacts: 'issue' } });
+    assert.deepEqual([await stageOf(post), await stageOf(ready)], ['review', 'review']);
+    // 카드는 따로 검수 대상이 아니고, 배경을 지워도 카드는 남음 (지운 배경을 가리키기만 — 그 승인 상태를 계속 따라감)
+    await check(db, comp.id, { items: ALL_OK, approve: true });
+  });
+  test('게시한 글: 승인을 푼 이미지가 있어도 두 자리 맞바꾸기·같은 이미지 다시 연결·게시 뒤 단계에서 게시 완료로 돌아가기는 됨, 새 이미지는 여전히 막음', async () => {
+    const pub = await newPost();
+    await slot(pub, 'k:첫 사진#1', comp.id);
+    await slot(pub, 'k:둘째 사진#1', plate.id);
+    await db.query(`update public.posts set stage = 'published', blog_url = 'https://blog.naver.com/x/9', published_on = current_date where id = $1`, [pub]);
+    await check(db, comp.id, { items: { ...ALL_OK, text: 'issue' } }); // 게시 완료 글은 내려가지 않음
+    assert.equal(await stageOf(pub), 'published');
+    await val(db, `select public.image_slot_swap($1, $2::jsonb, $3::jsonb)`, [pub, JSON.stringify({ slot_key: 'k:첫 사진#1', slot_index: 0, slot_text: '첫 사진' }), JSON.stringify({ slot_key: 'k:둘째 사진#1', slot_index: 1, slot_text: '둘째 사진' })]);
+    assert.equal(await val(db, `select image_id from public.post_image_slots where post_id = $1 and slot_key = 'k:둘째 사진#1'`, [pub]), comp.id);
+    assert.equal(await val(db, `select current_setting('app.slot_swap_post', true)`), '', '맞바꾸기 표시는 끝나면 꺼짐');
+    await slot(pub, 'k:둘째 사진#1', comp.id, { purpose: 'blog_cover' }); // 같은 이미지 다시 연결 (용도 바꾸기)
+    await db.query(`update public.posts set stage = 'collecting' where id = $1`, [pub]);
+    await db.query(`update public.posts set stage = 'published' where id = $1`, [pub]);
+    assert.equal(await stageOf(pub), 'published');
+    const fresh = await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/ref9.jpg', composite_mode: 'reference', product_image_id: prod.id });
+    await assert.rejects(slot(pub, 'x:cover', fresh.id), /product_check_needed/, '게시 글에 승인 안 한 새 이미지');
+    await assert.rejects(db.query(`update public.posts set stage = 'ready' where id = $1`, [pub]), /product_check_needed/, '게시 → 발행 준비는 다시 검사');
+    await check(db, comp.id, { items: ALL_OK, approve: true });
+  });
+  test('서버 키(service_role)로도 같은 길이 돎 — 새 함수 권한 · 잠그는 함수들', async () => {
+    for (const fn of ['public.image_product_unapproved(uuid)', 'public.posts_using_image(uuid)', 'public.card_deck_save(uuid, jsonb)', 'public.image_slot_swap(uuid, jsonb, jsonb)', 'public.image_slot_upsert(uuid, jsonb)']) {
+      assert.equal(await val(db, `select has_function_privilege('anon', '${fn}', 'execute')`), false, fn);
+      assert.equal(await val(db, `select has_function_privilege('authenticated', '${fn}', 'execute')`), false, fn);
+      assert.equal(await val(db, `select has_function_privilege('service_role', '${fn}', 'execute')`), true, fn);
+    }
+    assert.equal(await val(db, `select count(*)::int from pg_trigger where tgname = 'post_card_decks_product_gate'`), 1);
+    // Supabase 처럼 서버 키에 표 권한을 주고, 그 역할로 연결·발행 준비·카드뉴스·승인 풀기·맞바꾸기
+    await db.exec(`grant all on all tables in schema public to service_role; grant usage on schema public to service_role; alter role service_role bypassrls;`);
+    const post = await newPost();
+    await db.exec(`set role service_role`);
+    try {
+      await slot(post, 'k:첫 사진#1', comp.id);
+      await deck(post, refImg.id);
+      await toReady(post);
+      await check(db, refImg.id, { items: { ...ALL_OK, parts: 'unsure' } });
+      assert.equal(await stageOf(post), 'review');
+      await val(db, `select public.image_slot_swap($1, $2::jsonb, $3::jsonb)`, [post, JSON.stringify({ slot_key: 'k:첫 사진#1', slot_index: 0, slot_text: '첫 사진' }), JSON.stringify({ slot_key: 'k:둘째 사진#1', slot_index: 1, slot_text: '둘째 사진' })]);
+      await assert.rejects(toReady(post), /product_check_needed/);
+    } finally { await db.exec(`reset role`); }
+    await check(db, refImg.id, { items: ALL_OK, approve: true });
+  });
+  test('다시 돌려도 같은 결과 (새 트리거도 하나씩)', async () => {
+    await db.exec(SQL018);
+    for (const t of ['post_image_slots_product_gate', 'post_card_decks_product_gate', 'posts_product_gate', 'post_images_product_demote', 'post_images_product_gate']) {
+      assert.equal(await val(db, `select count(*)::int from pg_trigger where tgname = $1`, [t]), 1, t);
+    }
+  });
+});

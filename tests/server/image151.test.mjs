@@ -38,6 +38,7 @@ const MASK = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
 const BG_STOCK = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';   // Pexels 상품 사진용 빈 배경
 const GONE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';       // 지운 상품 사진
 const REF_GONE = 'ffffffff-ffff-4fff-8fff-ffffffffffff';   // 지운 상품 사진으로 만든 AI 실사 장면
+const CARD = 'abababab-abab-4bab-8bab-abababababab';       // AI 실사 장면(REF)을 배경으로 그린 카드뉴스 PNG
 const BODY = [
   '## 원룸 전기요 고르는 기준', '원룸 전기요는 크기와 온도 조절 단계를 먼저 봐야 해요. 전자파 인증 표시도 확인하세요.',
   '- 크기가 침대와 맞는지', '- 온도 조절이 여러 단계인지', '[이미지: 침대 위에 깔린 전기요]', '[이미지: 전기요를 접는 손 (직접 찍기)]', '[이미지: 전기요 온도 조절기 버튼 (제품 사진)]',
@@ -66,6 +67,7 @@ const IMAGES = () => ({
   [BG_STOCK]: base(BG_STOCK, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/bg2.jpg', preset: 'pscene_layer', product_image_id: STOCK }),
   [GONE]: base(GONE, { deleted_at: '2026-10-28T00:00:00Z' }),
   [REF_GONE]: base(REF_GONE, { kind: 'ai', provider: 'openai', storage_path: 'ai/refg.jpg', composite: true, composite_mode: 'reference', product_image_id: GONE, preset: 'pscene_ref' }),
+  [CARD]: base(CARD, { kind: 'card', provider: 'cardnews', storage_path: 'card/c.png', mime: 'image/png', background_image_id: REF, license: '카드뉴스 (앱에서 직접 만듦) · 배경: AI 합성 이미지 (실제 사진 참고)' }),
 });
 const SETTINGS = { id: 1, image_gen_model: 'cf-flux-2-klein-4b', image_edit_model: 'gpt-image-2.5-sunburst', image_quality: 'medium', image_daily_limit: 20, image_monthly_budget_usd: 5,
   image_fx_krw: null, image_fx_date: null, image_fx_source: '', image_prices: {}, image_modes: {}, image_review_model: '', image_request_cap_usd: 1, image_ratio_prefs: {} };
@@ -107,10 +109,22 @@ function fakeDb(st) {
     if (rpc === 'image_gen_fail') { st.fails.push(body); return [200, { id: body.gen, status: '실패' }]; }
     if (rpc === 'image_delete') return [200, { storage_path: 'upload/3333.jpg', ref_small_path: '', mask_paths: ['mask/2026/10/m1.png'] }];
     if (t === 'post_image_slots' && method === 'GET') {
-      if (select.replace(/\s/g, '').includes('post_images(kind,composite_mode,product_check)')) return [200, (st.slotRows[idsOf(query.post_id)[0]] || [])];
-      if (query.image_id) return [200, st.usedBy[idsOf(query.image_id)[0]] || []];
+      if (select.replace(/\s/g, '').includes('post_images(kind,composite_mode,product_check')) return [200, (st.slotRows[idsOf(query.post_id)[0]] || [])];
+      if (query.image_id) return [200, idsOf(query.image_id).flatMap((id) => st.usedBy[id] || [])];
+      // 자리 하나 (지금 그 자리에 있는 이미지·용도)
+      if (query.post_id && query.slot_key) {
+        const key = String(query.slot_key).replace(/^eq\./, '');
+        const r = (st.slotRows[idsOf(query.post_id)[0]] || []).find((x) => x.slot_key === key);
+        return [200, r ? [{ purpose: 'blog_body', image_id: r.image_id }] : []];
+      }
       return [200, []];
     }
+    if (t === 'post_card_decks' && method === 'GET') {
+      if (query.post_id) { const d = st.decks[idsOf(query.post_id)[0]]; return [200, d ? [d] : []]; }
+      if (query.bg_image_id) { const id = idsOf(query.bg_image_id)[0]; return [200, Object.values(st.decks).filter((d) => d.bg_image_id === id).map((d) => ({ post_id: d.post_id }))]; }
+      return [200, []];
+    }
+    if (rpc === 'card_deck_save') { st.deckSaves.push(body); return [200, { post_id: body.p_post, ...body.p }]; }
     if (t === 'posts') {
       if (method === 'PATCH') { st.postPatch.push({ query, body }); const ids = idsOf(query.id); return [200, ids.filter((id) => POSTS[id] && ['ready', 'scheduled'].includes(POSTS[id].stage)).map((id) => ({ id }))]; }
       if (query.stage) return [200, idsOf(query.id).map((id) => POSTS[id]).filter((x) => x && idsOf(query.stage).includes(x.stage)).map((x) => ({ id: x.id }))];
@@ -118,7 +132,7 @@ function fakeDb(st) {
       return [200, one ? p || {} : p ? [p] : []];
     }
     if (t === 'channels') return [200, [{ id: 'naver_blog', name: '네이버 블로그', kind: 'blog', clickable_links: true }]];
-    if (t === 'settings') return [200, one ? SETTINGS : [SETTINGS]];
+    if (t === 'settings') { if (method === 'PATCH') st.settingsPatch.push(body); return [200, one ? SETTINGS : [SETTINGS]]; }
     if (t === 'image_generations' && method === 'GET' && query.id) { const g = { id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', model: 'cf-flux-2-klein-4b', provider: 'cloudflare', est_usd: 0, usage_usd: 0, actual_usd: null, cost_status: '청구 없음' }; return [200, one ? g : [g]]; }
     if (t === 'post_images') {
       if (method === 'PATCH') {
@@ -128,13 +142,18 @@ function fakeDb(st) {
         return [200, one ? images[id] : images[id] ? [images[id]] : []];
       }
       if (select.includes('count') || query.product_image_id) return [200, [], { 'content-range': '0-0/2' }];
+      if (query.background_image_id && query.kind) {
+        const bid = idsOf(query.background_image_id)[0];
+        return [200, Object.values(images).filter((r) => r.kind === 'card' && r.background_image_id === bid).map((r) => ({ id: r.id }))];
+      }
       const rows = idsOf(query.id).map((id) => images[id]).filter(Boolean).filter((r) => query.deleted_at !== 'is.null' || !r.deleted_at);
       return [200, one ? rows[0] || (method === 'GET' && query.deleted_at === 'is.null' ? null : {}) : rows];
     }
     return undefined;
   };
 }
-const newState = () => ({ images: IMAGES(), no018: false, maskError: '', saveError: '', uploads: [], removed: [], maskSaves: [], saves: [], checks: [], begins: [], fails: [], imagePatch: [], postPatch: [], slotRows: {}, usedBy: {} });
+const newState = () => ({ images: IMAGES(), no018: false, maskError: '', saveError: '', uploads: [], removed: [], maskSaves: [], saves: [], checks: [], begins: [], fails: [], imagePatch: [], postPatch: [], slotRows: {}, usedBy: {},
+  decks: {}, deckSaves: [], settingsPatch: [] });
 const ENV = { EDGE_WALL_SECONDS: '400' };
 const waitFor = async (fn, ms = 15000) => { const until = Date.now() + ms; for (;;) { const v = fn(); if (v) return v; if (Date.now() > until) return null; await new Promise((ok) => setTimeout(ok, 100)); } };
 const form = (bytes, type, meta) => { const fd = new FormData(); fd.append('file', new Blob([bytes], { type }), 'f'); fd.append('meta', JSON.stringify(meta)); return fd; };
@@ -383,6 +402,99 @@ describe('1.5.1 상품 장면 — 서버', () => {
     const r = await srv.call('DELETE', `images/${PROD}`);
     assert.equal(r.status, 200);
     assert.deepEqual(st.removed.slice(n).sort(), ['mask/2026/10/m1.png', 'upload/3333.jpg']);
+  });
+
+  // ── 1.5.1 재검토 뒤 ──
+  test('재검토: 발행 준비로 바꿀 때 자리에 넣은 카드뉴스 PNG의 배경 · 이 글의 카드뉴스 배경도 봄 (DB와 같은 범위)', { skip }, async () => {
+    st.images = IMAGES();
+    st.slotRows[POST] = [{ slot_key: SLOT, image_id: CARD, post_images: { kind: 'card', composite_mode: '', product_check: null, background_image_id: REF } }];
+    const r = await srv.call('POST', `posts/${POST}`, { stage: 'ready' });
+    assert.deepEqual([r.status, r.j.error], [409, 'check_failed'], JSON.stringify(r.j));
+    assert.match(r.j.errors[0].msg, /사진 1 \(카드뉴스\)/);
+    st.slotRows[POST] = [];
+    st.decks[POST] = { post_id: POST, bg_image_id: REF };
+    const r2 = await srv.call('POST', `posts/${POST}`, { stage: 'ready' });
+    assert.deepEqual([r2.status, r2.j.error], [409, 'check_failed'], JSON.stringify(r2.j));
+    assert.match(r2.j.errors[0].msg, /카드뉴스 배경/);
+    st.images[REF].product_check = { mode: 'reference', approved: true };
+    const ok = await srv.call('POST', `posts/${POST}`, { stage: 'ready' });
+    assert.notEqual(ok.j.error, 'check_failed', JSON.stringify(ok.j));
+    st.decks = {};
+    st.images = IMAGES();
+  });
+  test('재검토: 이미 그 자리에 있는 같은 이미지를 다시 연결(용도 바꾸기 등)하는 건 그대로, 카드뉴스 PNG는 배경의 승인까지 봄', { skip }, async () => {
+    st.images = IMAGES();
+    st.slotRows[READY] = [{ slot_key: SLOT, image_id: REF, post_images: { kind: 'ai', composite_mode: 'reference', product_check: null } }];
+    const same = await srv.call('POST', `posts/${READY}/images/link`, { image_id: REF, slot_key: SLOT, purpose: 'blog_cover' });
+    assert.notEqual(same.j.error, 'product_check_needed', JSON.stringify(same.j));
+    const other = await srv.call('POST', `posts/${READY}/images/link`, { image_id: REF, slot_key: SLOT_REAL });
+    assert.deepEqual([other.status, other.j.error], [409, 'product_check_needed']);
+    const card = await srv.call('POST', `posts/${READY}/images/link`, { image_id: CARD, slot_key: SLOT_REAL });
+    assert.deepEqual([card.status, card.j.error], [409, 'product_check_needed'], '승인 안 한 상품 장면으로 그린 카드');
+    st.images[REF].product_check = { mode: 'reference', approved: true };
+    const ok = await srv.call('POST', `posts/${READY}/images/link`, { image_id: CARD, slot_key: SLOT_REAL });
+    assert.notEqual(ok.j.error, 'product_check_needed', JSON.stringify(ok.j));
+    st.slotRows[READY] = [];
+    st.images = IMAGES();
+  });
+  test('재검토: 카드뉴스 저장 — 같은 배경으로 문구만 고치는 건 됨(승인을 푼 배경이면 발행할 때 막음), 새로 고르는 배경은 승인한 것만', { skip }, async () => {
+    st.images = IMAGES();
+    const slides = [{ title: '원룸 전기요', text: '고르는 기준' }];
+    st.decks[POST] = { post_id: POST, bg_image_id: REF };
+    const n = st.deckSaves.length;
+    const same = await srv.call('POST', `posts/${POST}/cards`, { slides, bg_image_id: REF });
+    assert.equal(same.status, 200, JSON.stringify(same.j));
+    assert.equal(st.deckSaves.length, n + 1);
+    const nw = await srv.call('POST', `posts/${POST}/cards`, { slides, bg_image_id: COMP });
+    assert.deepEqual([nw.status, nw.j.error], [409, 'product_check_needed']);
+    assert.equal(st.deckSaves.length, n + 1, '막힌 저장은 DB에 보내지 않음');
+    st.decks = {};
+  });
+  test('재검토: 카드뉴스 PNG를 올리면 그릴 때 쓴 배경 이미지 id 를 기록 (배경의 승인을 따라가게)', { skip }, async () => {
+    st.images = IMAGES();
+    const n = st.saves.length;
+    const r = await srv.form('images/upload', form(COMP_PNG, 'image/png', { kind: 'card', bg_image_id: COMP_OK, post_id: POST }));
+    assert.equal(r.status, 200, JSON.stringify(r.j));
+    const sv = st.saves.slice(n).find((x) => x.img.kind === 'card');
+    assert.ok(sv, JSON.stringify(st.saves.slice(n)));
+    assert.equal(sv.img.background_image_id, COMP_OK);
+    assert.match(sv.img.license, /배경: 원본 보존 합성/);
+    const no = await srv.form('images/upload', form(COMP_PNG, 'image/png', { kind: 'card', bg_image_id: COMP, post_id: POST }));
+    assert.deepEqual([no.status, no.j.error], [409, 'product_check_needed'], '승인 안 한 상품 장면으로는 카드를 못 그림');
+  });
+  test('재검토: 승인을 풀 때 알려주는 글에 카드뉴스 배경·그 이미지로 그린 카드를 쓰는 글도 들어감', { skip }, async () => {
+    st.images = IMAGES();
+    st.images[CARD].background_image_id = COMP_OK;
+    st.usedBy = { [CARD]: [{ post_id: READY }] };
+    const viaCard = await srv.call('POST', `images/${COMP_OK}/product-check`, { items: { shape: 'issue' }, approve: false });
+    assert.equal(viaCard.status, 200, JSON.stringify(viaCard.j));
+    assert.deepEqual(viaCard.j.demoted, [READY]);
+    st.images = IMAGES();
+    st.usedBy = {};
+    st.decks[READY] = { post_id: READY, bg_image_id: COMP_OK };
+    const viaDeck = await srv.call('POST', `images/${COMP_OK}/product-check`, { items: { shape: 'issue' }, approve: false });
+    assert.deepEqual(viaDeck.j.demoted, [READY]);
+    st.decks = {};
+    st.images = IMAGES();
+  });
+  test("재검토: 일반 자리의 진짜 사진을 '상품 아님'으로 보내면 AI 합성 표시만(상품 검수 대상 아님), 실제 상품 자리에서는 무시하고 늘 상품으로", { skip }, async () => {
+    st.images = IMAGES();
+    const base1 = { model: 'gf-test-fake', quality: 'medium', confirm_usd: 0, post_id: POST, purpose: 'blog_body', ratio: '4:3', refs: [{ image_id: PROD, role: 'subject' }], subject_product: false };
+    const a = await srv.call('POST', 'images/generate', { ...base1, request_key: 'req-' + Math.random().toString(36).slice(2, 12), slot_key: SLOT });
+    assert.equal(a.status, 202, JSON.stringify(a.j));
+    const sa = await waitFor(() => st.saves.find((x) => x.gen === 'gen-' + st.begins.length));
+    assert.deepEqual([sa.img.composite, sa.img.composite_mode, sa.img.product_image_id], [true, '', '']);
+    const b = await srv.call('POST', 'images/generate', { ...base1, request_key: 'req-' + Math.random().toString(36).slice(2, 12), slot_key: SLOT_REAL });
+    assert.equal(b.status, 202, JSON.stringify(b.j));
+    const sb3 = await waitFor(() => st.saves.find((x) => x.gen === 'gen-' + st.begins.length));
+    assert.deepEqual([sb3.img.composite, sb3.img.composite_mode, sb3.img.product_image_id], [true, 'reference', PROD]);
+  });
+  test('재검토: 설정 저장은 사용자가 고른 값 표시(user)를 지킴 — 1.5.0 기본값과 같아도 고른 값이면 그대로 쓰게', { skip }, async () => {
+    const n = st.settingsPatch.length;
+    const r = await srv.call('POST', 'settings', { image_modes: { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'high', user: true }, fast_paid: { model: 'gpt-image-2.5-flare', quality: 'medium', user: 'yes' } } });
+    assert.equal(r.status, 200, JSON.stringify(r.j));
+    assert.equal(st.settingsPatch.length, n + 1);
+    assert.deepEqual(st.settingsPatch.at(-1).image_modes, { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'high', user: true }, fast_paid: { model: 'gpt-image-2.5-flare', quality: 'medium' } });
   });
 
   test('응답·DB 요청 어디에도 비밀값이 없음', { skip }, async () => {
