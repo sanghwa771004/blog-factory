@@ -1081,7 +1081,7 @@ export const PRODUCT_PURPOSES = {
 // 장면 템플릿 (초보자는 버튼으로 시작, 직접 적어도 됨). modes: 이 템플릿이 되는 방식
 export const PRODUCT_TEMPLATES = {
   table: { label: '집 안 테이블이나 선반', modes: ['layer', 'reference'], setting_ko: '집 안 테이블이나 선반 위',
-    setting_en: 'on a tabletop or shelf in a tidy, lived-in home interior', light_en: 'soft indoor daylight' },
+    setting_en: 'on a tabletop or shelf in a tidy, naturally furnished home interior', light_en: 'soft indoor daylight' },
   window: { label: '자연광이 들어오는 실내', modes: ['layer', 'reference'], setting_ko: '창가 자연광이 드는 실내',
     setting_en: 'in a bright room near a window', light_en: 'soft natural daylight coming from a side window, gentle shadows' },
   outdoor: { label: '야외 환경', modes: ['layer', 'reference'], setting_ko: '제품과 어울리는 야외',
@@ -1202,6 +1202,7 @@ export function promptFromProductScene(sc) {
 // - '직접 찍기' 자리: 막음 (합성·AI 이미지는 네가 직접 찍은 사진이 아님)
 // - AI 실사 장면: 진짜 상품 사진(직접 올림·Pexels)을 '대상 모양 유지'로 한 장 이상
 // - 원본 보존 합성: 상품 사진은 AI에 보내지 않음 (참고 사진을 붙이면 거절 — 상품을 다시 그리게 되니까)
+/** @param {string} mode @param {{ slotText?: string, refs?: any[] }} [o] */
 export function productGate(mode, { slotText = '', refs = [] } = {}) {
   if (isOwnPhotoSlot(slotText)) return { ok: false, code: 'own_photo_slot', msg: "'직접 찍기' 자리는 네가 찍은 사진만 넣어 (합성 이미지도 직접 찍은 사진이 아니야)." };
   if (mode === 'layer') return (refs || []).length ? { ok: false, code: 'layer_no_refs', msg: '원본 보존 합성은 상품 사진을 AI에 보내지 않아 (배경만 만들어).' } : { ok: true };
@@ -1279,6 +1280,43 @@ export function layerBox(layer, W, H, pw, ph) {
   const scale = dh / Math.max(1, ph);
   const dw = pw * scale;
   return { cx: L.x * W, bottom: L.y * H, w: dw, h: dh, scale, rot: L.rot, left: L.x * W - dw / 2, top: L.y * H - dh };
+}
+// 마스크(남길 영역)를 만든 방식 — 모두 이 기기 안에서 처리해서 외부 API를 부르지 않음 (배경 지우기 비용 0원, 청구 없음)
+export const MASK_METHODS = {
+  auto_u2netp: '자동 (U²-Netp 사물 분할, 이 기기에서)',
+  auto_simple: '자동 (테두리 색으로 간단히)',
+  alpha: '사진에 원래 있던 투명 부분',
+  manual: '직접 칠함',
+};
+// 원본 보존 합성 결과의 출처 글: 상품 사진의 출처를 이어받음 (Pexels 사진가 등 — 사라지지 않게)
+export function productAttribution(prod) {
+  if (!prod) return '';
+  if (prod.kind === 'stock') return `상품 사진: ${prod.author_name || '사진가'} (Pexels)`;
+  if (prod.kind === 'upload' && prod.source_type === 'official') return '상품 사진: 제조사·판매처 제공 이미지';
+  if (prod.kind === 'upload' && prod.source_type === 'external') return '상품 사진: 외부 제공 이미지';
+  return '';
+}
+export function compositeLicense(prod) {
+  const p = !prod ? '' : prod.kind === 'stock' ? String(prod.license || 'Pexels 라이선스') : String(prod.license || '직접 올림 (사용 권한 확인함)');
+  return clip(`원본 보존 합성 (앱이 합성) · 상품: ${p} · 배경: AI 생성 이미지`, 200);
+}
+// 참고 사진을 작게 줄여서 받는 모델(무료 FLUX.2 klein 등)로 AI 실사 장면을 만들 때, 만들기 전에 알릴 글 (지시서 5번)
+// 원본 보존 합성은 상품 사진을 AI에 보내지 않아서 해당 없음
+export function refDownscaleNote(model, mode = 'reference') {
+  const c = modelCaps(model);
+  if (mode !== 'reference' || !c.known || !c.refSmall) return '';
+  return `${c.label}은 참고 사진을 ${c.refSmall}px보다 작게 줄여서 받아. 작은 로고·상품 글자·버튼은 남지 않거나 바뀔 수 있어 — 초안으로만 쓰고, 상품 모양이 중요하면 '원본 보존 합성'을 써줘.`;
+}
+// 발행 준비 완료·예약·게시 완료로 바꿀 때 막는 것: 지금 본문 자리에 연결된 상품 장면 이미지 중 상품 디테일 검수를 승인하지 않은 것 (서버·화면 같은 판단)
+// rows: [{slot_key, image: {kind, composite_mode, product_check}}]
+export function productGateErrors(post, rows) {
+  const slots = parseSlots(post && post.body);
+  const byKey = new Map((rows || []).filter((r) => r && r.image).map((r) => [r.slot_key, r.image]));
+  const ns = slots.filter((s) => { const img = byKey.get(s.key); return img && productSceneMode(img) && !productApproved(img); }).map((s) => '사진 ' + s.n);
+  // 본문 밖 자리(대표 이미지 등)도 같이 봄
+  for (const r of rows || []) if (r && r.image && isExtraKey(r.slot_key) && productSceneMode(r.image) && !productApproved(r.image)) ns.push((extraSlot(r.slot_key) || {}).label || '본문 밖 자리');
+  return ns.length ? [{ code: 'product_check_needed', msg: `상품 디테일 검수를 승인하지 않은 상품 이미지가 ${ns.length}곳 있어 (${ns.join(', ')}).`,
+    fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘. 승인 전에는 발행 준비 완료·예약·게시 완료로 못 바꿔." }] : [];
 }
 
 // 프롬프트 토큰 수 어림: 영어·숫자는 약 3.5글자에 1토큰, 한글 등은 1글자에 1.2토큰으로 넉넉하게 (실제 사용량이 오면 그걸로 다시 계산)

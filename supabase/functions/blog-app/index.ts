@@ -12,10 +12,13 @@ import {
   CARD_TEMPLATES, CARD_RATIOS, CARD_ICONS, CARD_LIMITS,
   presetOf, buildScene, promptFromScene, sizeLabel, aiGate, REF_ROLES, SCENE_EDITABLE, IMAGE_MODES, REVIEW_MODELS, reviewCaps, estimateReviewUsd, EVAL_CRITERIA, PRESETS, refsLimit, sniffImage,
   GEMINI_PRICE_IDS, sceneDrawText, sceneGateText,
+  // 1.5.1 상품 장면
+  cleanProductSpec, buildProductScene, promptFromProductScene, productGate, PRODUCT_PRESETS, PRODUCT_TEMPLATES, PRODUCT_CHECKS, productSceneMode, productApproved,
+  cleanLayer, productAttribution, compositeLicense, productGateErrors, checkImageFile, stripMetadata, altTextFor,
 } from "./images.js";
 import {
   BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter,
-  reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub,
+  reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub, storagePath, sha256Hex,
 } from "./image_service.js";
 
 const VERSION = "1.5.0";
@@ -315,6 +318,16 @@ function rpcError(error: { message?: string; code?: string } | null): never {
   if (/image_budget/.test(m)) fail(429, "image_budget");
   if (/image_request_cap/.test(m)) fail(429, "image_request_cap");
   if (/review_busy/.test(m)) fail(409, "review_busy");
+  // 1.5.1 상품 장면 (018)
+  if (/product_check_needed/.test(m)) fail(409, "product_check_needed");
+  if (/product_check_incomplete/.test(m)) fail(400, "product_check_incomplete");
+  if (/not_product_scene/.test(m)) fail(400, "not_product_scene");
+  if (/product_image_required/.test(m)) fail(400, "product_image_required");
+  if (/background_image_required/.test(m)) fail(400, "background_image_required");
+  if (/layer_required/.test(m)) fail(400, "bad_field", { field: "layer" });
+  if (/mask_mismatch/.test(m)) fail(400, "mask_mismatch");
+  if (/mask_real_only/.test(m)) fail(400, "mask_real_only");
+  if (/rights_required/.test(m)) fail(400, "rights_required");
   if (/bad provider/.test(m)) fail(400, "bad_field", { field: "provider" });
   const inUse = /image in use: (\d+)/.exec(m);
   if (inUse) fail(409, "image_in_use", { uses: Number(inUse[1]) });
@@ -399,12 +412,21 @@ async function getState(c: Ctx) {
     fetchAll("post_products", [["post_id", true], ["sort", true], ["product_id", true]]),
     fetchAll("links", [["post_id", true], ["sort", true], ["id", true]]),
     // 원고 목록·발행 전 검사에 쓰는 사진 자리 연결 요약 (1000줄이 넘어도 끝까지. 이미지 스튜디오 표가 아직 없으면 빈 목록)
-    // source_type(직접 올린 사진의 출처)은 014→015 사이, composite(실제 사진을 참고한 AI 이미지)는 017에서 생김 — 그 전 DB면 빼고 다시 읽음
-    (() => {
+    // source_type(직접 올린 사진의 출처)은 014→015 사이, composite(실제 사진을 참고한 AI 이미지)는 017, composite_mode·product_check(상품 장면·상품 검수)는 018에서 생김
+    // — 그 전 DB면 없는 칸을 빼고 다시 읽음 (모르는 칸이 하나라도 있으면 PostgREST 가 전체를 거절하니까 새 칸부터 차례로 뺌)
+    (async () => {
       const base = "post_id, slot_key, slot_index, image_id, purpose, used_at, downloaded_at, post_images(kind, provider, review_status, mime, author_name, description, license, attribution_text";
       const read = (extra: string) => fetchAll("post_image_slots", [["post_id", true], ["id", true]], (q) => q.not("image_id", "is", null), `${base}${extra})`);
-      // 015 전이면 source_type 도 없으니 바로 둘 다 뺀 것으로, 015 뒤·017 전이면 composite 만 빼고 (다시 읽기는 한 번만)
-      return read(", source_type, composite").catch((e) => (/source_type/.test(String((e as Error)?.message ?? e)) ? read("") : read(", source_type")));
+      // 오류에 적힌 칸으로 어느 DB인지 알아냄: source_type → 015 전(둘 다 뺌), composite_mode·product_check → 018 전, composite → 017 전
+      let extra = ", source_type, composite, composite_mode, product_check";
+      for (;;) {
+        try { return await read(extra); } catch (e) {
+          const m = String((e as Error)?.message ?? e);
+          const next = /source_type/.test(m) ? "" : /composite_mode|product_check/.test(m) ? ", source_type, composite" : /composite/.test(m) ? ", source_type" : null;
+          if (next === null || next === extra || next.length > extra.length) throw e;
+          extra = next;
+        }
+      }
     })().then((data) => ({ data, error: null as unknown }), (error) => ({ data: [] as J[], error: error as unknown })),
   ]);
   if (imageSlots.error) console.error("state image_slots:", String((imageSlots.error as Error)?.message ?? imageSlots.error));
@@ -444,14 +466,15 @@ const EXPORT_TABLES: [string, [string, boolean][]][] = [
   ["post_images", [["id", true]]], ["post_image_slots", [["id", true]]], ["image_generations", [["id", true]]], ["post_card_decks", [["post_id", true]]],
   ["post_channels", [["id", true]]], ["search_terms", [["id", true]]],
   ["image_reviews", [["id", true]]],
+  ["product_masks", [["id", true]]],
 ];
 // 016(1.4.0)에서 생긴 표 — 아직 016 전인 DB면 빈 목록으로
 const OPS_TABLES = ["post_channels", "search_terms"];
 // 017(1.5.0)에서 생긴 표: AI 검수 의견·비용과 내 평가 — 017 전 DB면 빈 목록으로.
 // 연결 확인 기록(image_provider_checks)은 운영 기록이라 api_calls 처럼 백업에 넣지 않음
-const STUDIO150_TABLES = ["image_reviews"];
+const STUDIO150_TABLES = ["image_reviews", "product_masks"]; // product_masks 는 018(1.5.1) — 그 전 DB면 빈 목록으로
 async function getExport(_c: Ctx) {
-  const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결·AI 검수·내 평가)만 들어 있어." };
+  const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결·AI 검수·내 평가·상품 마스크·합성 설정)만 들어 있어." };
   const counts: J = {};
   const missing: string[] = [];
   for (const [t, order] of EXPORT_TABLES) {
@@ -646,6 +669,9 @@ async function patchPost(c: Ctx) {
     if (stage === "ready" || stage === "scheduled" || (stage === "published" && !LIVE.includes(String(post.stage)))) {
       const { result, disclosure } = await runChecks(merged);
       if (result.errors.length) fail(409, "check_failed", { errors: result.errors });
+      // 1.5.1: 상품 디테일 검수를 승인하지 않은 상품 장면 이미지가 이 글의 사진 자리에 있으면 막음 (images.js productGateErrors — 화면과 같은 판단)
+      const pErr = await productGateFor(merged);
+      if (pErr.length) fail(409, "check_failed", { errors: pErr });
       patch.disclosure_text = disclosure;
       patch.disclosure_at = nowIso();
       checked = true;
@@ -1520,6 +1546,10 @@ async function getPostImages(c: Ctx) {
 // AI 이미지 만들기: 검사·예상 비용 확인·한도 확인 → '생성 중' 기록 → 응답은 바로, 생성은 뒤에서 (화면은 상태를 물어봄)
 // 1.5.0: 모델을 요청에 직접 고를 수 있음(모드·비교) — 앱이 아는 모델만, 키가 있는 공급자만 (모르는 이름을 OpenAI로 보내지 않음)
 //        이미지 종류(프리셋)·장면 설계서·참고 사진(역할)·묶음(후보 여러 장·모델 비교)
+// 1.5.1: 상품 장면(b.product) — 두 방식을 섞지 않음 (images.js PRODUCT_MODES)
+//        layer(원본 보존 합성): AI는 '빈 배경'만 만듦. 상품 사진은 AI에 보내지 않고, 합성은 화면이 원본 픽셀 그대로 얹어서 따로 저장(POST /images/composite)
+//        reference(AI 실사 장면): 상품 사진을 '대상 모양 유지' 참고 사진으로 보내 AI가 장면 전체를 그림 → 'AI 합성 이미지', 상품 디테일 검수 필수
+//        원고·사진 자리는 없어도 됨 (보관함에서 시작). 있으면 '직접 찍기' 자리 검사와 맥락(브랜드 지우기)에만 씀
 const MAX_REF_BYTES = 8 * 1024 * 1024;
 async function generateImage(c: Ctx) {
   const b = await readJson(c.req, 40_000);
@@ -1529,13 +1559,17 @@ async function generateImage(c: Ctx) {
   const prior = await sb.from("image_generations").select(GEN_COLS).eq("request_key", requestKey).maybeSingle();
   if (prior.error) throw prior.error;
   if (prior.data) return json({ generation: prior.data, duplicate: true });
-  const { post, slot, purpose } = await slotTarget(b, true);
+  const product = b.product && typeof b.product === "object" && !Array.isArray(b.product) ? cleanProductSpec(b.product) as J : null;
+  const { post, slot, purpose: slotPurposeOf } = await slotTarget(b, !product);
   const mode = b.mode === "edit" ? "edit" : "generate";
+  const purpose = product ? String(product.purpose) : slotPurposeOf;
   const ratio = ratioOf(purpose, str(b.ratio, 8));
-  const preset = presetOf(str(b.preset, 30) || str(b.style, 30));
-  const text = str(b.text, 300).trim() || String(slot!.text ?? "").trim();
-  const extra = str(b.extra, 400).trim();
+  const preset = product ? String(PRODUCT_PRESETS[String(product.mode) as "layer" | "reference"]) : presetOf(str(b.preset, 30) || str(b.style, 30));
+  const editText = str(b.edit, 300).trim();
+  const text = product ? (slot ? String(slot.text ?? "") : "") || productDescription(product) : str(b.text, 300).trim() || String(slot!.text ?? "").trim();
+  const extra = product ? "" : str(b.extra, 400).trim();
   if (!text) fail(400, "bad_field", { field: "text" });
+  if (product && mode === "edit" && !editText) fail(400, "bad_field", { field: "edit" });
   const s = await imageSettings();
   // 모델: 요청에 있으면 그것(화면에서 사용자가 고른 모드·비교 모델), 없으면 설정의 생성·편집 모델. 설정을 몰래 유료로 바꾸지 않음
   const asked = str(b.model, 64).trim();
@@ -1553,22 +1587,39 @@ async function generateImage(c: Ctx) {
   // 모델이 못 받는 품질은 가까운 것으로 (모델마다 되는 품질이 다름 — images.js 모델 표)
   const quality = normQuality(capsModel, (QUALITIES as readonly string[]).includes(String(b.quality)) ? String(b.quality) : String(s.image_quality));
   // 상표·가격·인증·후기 사진·글자 요청은 서버에서도 막음 (화면에서 먼저 알려줌)
-  const products = await linkedProducts(String(post!.id));
-  const risks = blocksOf(promptRisk(text + "\n" + extra, products.brands));
+  const products = post ? await linkedProducts(String(post.id)) : { brands: [] as string[], hide: [] as string[] };
+  const risks = blocksOf(promptRisk(product ? [String(product.custom ?? ""), editText].join("\n") : text + "\n" + extra, products.brands));
   if (risks.length) fail(400, "prompt_blocked", { risks });
   // 고친 장면 칸에도 같은 금지 검사 — 그려 달라는 칸만 (넣지 말 것 목록·지역은 빼고). 자리 검사보다 먼저 (1.5.0 검토)
-  const sceneRisks = blocksOf(promptRisk(sceneUserText(b.scene), products.brands));
-  if (sceneRisks.length) fail(400, "prompt_blocked", { risks: sceneRisks });
+  if (!product) {
+    const sceneRisks = blocksOf(promptRisk(sceneUserText(b.scene), products.brands));
+    if (sceneRisks.length) fail(400, "prompt_blocked", { risks: sceneRisks });
+  }
+  // 상품 장면: 원본 상품 사진(직접 올림 — 쓸 권한 확인한 것 · Pexels). AI 실사 장면은 이 사진을 첫 '대상 모양 유지' 참고 사진으로 보냄
+  let productRow: J | null = null;
+  if (product) {
+    if (!isUuid(b.product_image_id)) fail(400, "bad_field", { field: "product_image_id" });
+    const { data, error } = await sb.from("post_images").select("id, kind, rights_confirmed, deleted_at").eq("id", b.product_image_id).is("deleted_at", null).maybeSingle();
+    if (error) throw error;
+    if (!data) fail(404, "product_not_found");
+    productRow = data as J;
+    if (!["upload", "stock"].includes(String(productRow.kind))) fail(400, "product_image_required");
+    if (productRow.kind === "upload" && productRow.rights_confirmed !== true) fail(400, "rights_required");
+  }
   // 참고 사진: 이 모델이 받는 만큼만, 보관함에 있고 지우지 않은 것만 (직접 올린 사진은 쓸 권한 확인한 것만)
   const refsIn = Array.isArray(b.refs) ? (b.refs as J[]) : [];
   const maxRefs = refsLimit(capsModel, mode); // 고치기면 고칠 이미지가 한 장을 씀
   if (refsIn.length > 16) fail(400, "too_many_refs", { max: maxRefs }); // 어느 모델도 16장을 넘게 받지 않음 (OpenAI edits 최대)
   const refs: { image_id: string; role: string }[] = [];
+  if (product && product.mode === "reference") refs.push({ image_id: String(productRow!.id), role: "subject" });
   for (const r of refsIn) {
     if (!isUuid(r?.image_id) || !has(REF_ROLES, r?.role)) fail(400, "bad_field", { field: "refs" });
+    if (product && r.role !== "subject") fail(400, "bad_field", { field: "refs" }); // 상품 장면의 추가 사진은 같은 상품의 다른 면(앞·뒤·옆)만
     if (refs.some((x) => x.image_id === r.image_id)) continue;
     refs.push({ image_id: String(r.image_id), role: String(r.role) });
   }
+  // 원본 보존 합성은 상품 사진을 AI에 보내지 않음 (images.js productGate — 참고 사진을 붙이면 상품을 다시 그리게 되니까)
+  if (product && product.mode === "layer" && refs.length) fail(400, "layer_no_refs");
   if (refs.length > maxRefs) fail(400, refs.length && !caps.refsMax ? "refs_unsupported" : "too_many_refs", { max: maxRefs, model });
   let refRows: J[] = [];
   if (refs.length) {
@@ -1579,6 +1630,9 @@ async function generateImage(c: Ctx) {
     for (const x of refRows) {
       if (x.kind === "upload" && x.rights_confirmed !== true) fail(400, "rights_required");
       if (Number(x.bytes ?? 0) > MAX_REF_BYTES) fail(400, "ref_too_big");
+      // 1.5.1: 합성 이미지는 참고 사진으로 안 받음 (원본 상품 사진을 넣어야 '원본과 같은지'를 볼 수 있음)
+      if (x.kind === "composite") fail(400, "ref_composite");
+      if (product && !["upload", "stock"].includes(String(x.kind))) fail(400, "product_image_required");
     }
   }
   let base: J | null = null;
@@ -1587,18 +1641,23 @@ async function generateImage(c: Ctx) {
     const { data } = await sb.from("post_images").select("*").eq("id", b.base_image_id).is("deleted_at", null).maybeSingle();
     if (!data) fail(404, "not_found");
     // 직접 찍은 사진·실제 사진을 AI로 고치면 실제와 다른 '진짜 같은 사진'이 될 수 있어서, AI가 만든 이미지만 고침
-    // (실제 사진은 '참고 사진'으로 넣어 새로 만들면 'AI 합성'으로 표시됨)
+    // (실제 사진은 '참고 사진'으로 넣어 새로 만들면 'AI 합성'으로 표시됨. 원본 보존 합성 결과는 배경을 고친 뒤 다시 합성)
     if ((data as J).kind !== "ai") fail(400, "edit_ai_only");
     base = data as J;
+    // 상품 장면의 부분 수정은 같은 방식의 이미지만: 원본 보존 합성은 그 배경, AI 실사 장면은 그 결과 (두 방식을 섞지 않음)
+    if (product && product.mode === "layer" && base.preset !== PRODUCT_PRESETS.layer) fail(400, "edit_mode_mismatch");
+    if (product && product.mode === "reference" && base.composite_mode !== "reference") fail(400, "edit_mode_mismatch");
   }
-  // AI로 만들어도 되는 자리인지 (images.js aiGate — 화면과 같은 판단): '직접 찍기' 자리는 막음,
+  // AI로 만들어도 되는 자리인지 (images.js aiGate·productGate — 화면과 같은 판단): '직접 찍기' 자리는 막음,
   // 실제 상품·화면이 보여야 하는 자리는 진짜 제품 사진(직접 올림·Pexels)을 '대상 모양 유지'로 넣었거나, 고치는 이미지가 이미 AI 합성이거나,
   // '일반 장면' 확인이 있어야 함. 고친 장면 칸 중 주 피사체·꼭 보일 것도 같이 봄 (1.5.0 검토)
   const gateRefs = refs.map((r) => ({ role: r.role, kind: String(refRows.find((x) => x.id === r.image_id)?.kind ?? "") }));
-  const gate = aiGate(isExtraKey(String(slot!.key)) ? "" : String(slot!.text ?? ""), {
+  const slotText = slot && !isExtraKey(String(slot.key)) ? String(slot.text ?? "") : "";
+  const gate = product ? productGate(String(product.mode), { slotText, refs: gateRefs }) as J : aiGate(slotText, {
     text: [text, extra, sceneSubjectText(b.scene)].join(" "), refs: gateRefs, genericOk: b.generic_ok === true, baseComposite: base?.composite === true,
-  });
-  if (!gate.ok) fail(400, String(gate.code), gate.word ? { word: gate.word } : {});
+  }) as J;
+  // 상품 장면의 부분 수정은 참고 사진이 없어도 됨 (고칠 이미지가 이미 그 상품의 장면)
+  if (!gate.ok && !(product && mode === "edit" && gate.code === "product_photo_needed")) fail(400, String(gate.code), gate.word ? { word: gate.word } : {});
   // 무료 모델(FLUX.2 klein)은 512px보다 작은 사본만 받음 — 사본이 없는 이미지가 있으면 화면이 만들어 올린 뒤 다시 보냄 (돈 안 나감)
   if (provider === "cloudflare" && !isTest) {
     const need = [...(base ? [base] : []), ...refRows].filter((x) => !String(x.ref_small_path ?? "")).map((x) => String(x.id));
@@ -1616,11 +1675,15 @@ async function generateImage(c: Ctx) {
   const size = sizeFor(purpose, ratio, capsModel, quality);
   if (provider === "openai" && caps.flexible && !validApiSize(size)) fail(400, "bad_field", { field: "ratio" }); // 크기 규칙은 OpenAI 것
   // 장면 설계서: 원고 맥락 + 이미지 종류 + 사용자가 고친 칸. 맥락에서 연결 상품 이름·브랜드·모델명·가격·인증 표현을 지우고 보냄
-  const scene = buildScene({
-    post, slot, text, preset, purpose, ratio, extra, mode, hide: products.hide, refs, size: sizeLabel(size), channel: String(post!.channel_id ?? ""),
-    overrides: cleanSceneOverrides(b.scene),
-  });
-  const prompt = promptFromScene(scene);
+  // 상품 장면은 상품 전용 설계서 (상품을 '새로 그리라'와 '정확히 두라'를 섞지 않게 — images.js buildProductScene)
+  const scene = product
+    ? buildProductScene({ spec: product, ratio, size: sizeLabel(size), refs: refs.map((r) => ({ ...r, label: "" })), post, slot, hide: products.hide,
+        channel: String(post?.channel_id ?? ""), edit: mode === "edit" ? editText : "" })
+    : buildScene({
+        post, slot, text, preset, purpose, ratio, extra, mode, hide: products.hide, refs, size: sizeLabel(size), channel: String(post!.channel_id ?? ""),
+        overrides: cleanSceneOverrides(b.scene),
+      });
+  const prompt = product ? promptFromProductScene(scene) : promptFromScene(scene);
   const est = isTest ? 0 : estimateUsd({ quality, size, promptTokens: estimateTokens(prompt), mode, prices: s.image_prices, model, refs: refs.length });
   if (est == null) fail(400, "bad_field", { field: "quality" });
   // 화면에서 보여준 예상 비용보다 눈에 띄게 비싸지면(설정·가격·제목이 바뀐 경우) 다시 확인받음 — 토큰 몇 개 차이는 넘어감
@@ -1641,13 +1704,20 @@ async function generateImage(c: Ctx) {
   if (DEADLINE - Date.now() < (isFree ? 45000 : needMsFor(quality, mode, WALL_MS, provider)) + (refs.length ? 8000 : 0)) {
     fail(503, "server_busy", { retry_after: busyRetryAfter(Date.now() - BOOT_AT, WALL_MS) });
   }
-  const composite = (mode === "edit" && base?.composite === true)
+  const composite = product ? product.mode === "reference" : (mode === "edit" && base?.composite === true)
     || refRows.some((x) => x.kind !== "ai" && x.kind !== "card" && refs.find((r) => r.image_id === x.id && (r.role === "subject" || r.role === "background")));
+  // 1.5.1: 상품 모양이 중요한 AI 이미지(상품 장면의 AI 실사 장면 · 실제 상품이 보여야 하는 자리에 진짜 상품 사진을 '대상 모양 유지'로 넣은 것)는
+  // 'AI 실사 장면'(composite_mode reference)으로 기록 → 상품 디테일 검수를 승인해야 '사용 가능'. 원본 상품 사진 id 를 같이 남김
+  const realSubject = refRows.find((x) => ["upload", "stock"].includes(String(x.kind)) && refs.some((r) => r.image_id === x.id && r.role === "subject"));
+  const productImageId = product ? String(productRow!.id) : String(realSubject?.id ?? (mode === "edit" ? base?.product_image_id ?? "" : ""));
+  const compositeMode = product ? (product.mode === "reference" ? "reference" : "")
+    : productImageId && (gate.composite === true || base?.composite_mode === "reference") ? "reference" : "";
   const begin = await sb.rpc("image_gen_begin", {
     p: {
-      request_key: requestKey, post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, mode, model, size, quality,
+      request_key: requestKey, post_id: post ? post.id : "", slot_key: slot ? slot.key : "", slot_index: slot ? slot.index : "", slot_text: slot ? slot.text : "", mode, model, size, quality,
       provider: isTest ? "openai" : provider,
-      output_format: "jpeg", purpose, style: preset, preset, user_prompt: [text, extra].filter(Boolean).join("\n"), prompt, base_image_id: base ? base.id : "", est_usd: est,
+      output_format: "jpeg", purpose, style: preset, preset, user_prompt: product ? [String(product.custom ?? ""), editText].filter(Boolean).join("\n") : [text, extra].filter(Boolean).join("\n"),
+      prompt, base_image_id: base ? base.id : "", est_usd: est,
       risk_override: gate.generic ? "일반 장면으로 만들기 확인: " + gate.word : gate.composite ? "진짜 제품 사진 참고: " + gate.word : "",
       refs, scene, batch_id: batch?.id ?? "", batch_kind: batch?.kind ?? "", batch_index: batch?.index ?? "", batch_total: batch?.total ?? "",
       reserve_n: reserveN, reserve_usd: reserveUsd,
@@ -1671,15 +1741,22 @@ async function generateImage(c: Ctx) {
     keys: providerKeys(), prices: s.image_prices, safetyId: await safetyIdOf(c.auth), deadline: DEADLINE, timeoutMs: isFree ? 90_000 : 115_000, ratio,
     base: base ? { path: String(base.storage_path), mime: String(base.mime), id: String(base.id), small: String(base.ref_small_path ?? "") } : null,
     refs: refs.map((r) => { const x = refRows.find((y) => y.id === r.image_id)!; return { path: String(x.storage_path), mime: String(x.mime), role: r.role, id: r.image_id, kind: String(x.kind), small: String(x.ref_small_path ?? "") }; }),
-    composite, scene, preset, type: scene.type,
+    composite, scene, preset, type: product ? "photo" : (scene as J).type,
+    // 1.5.1: 상품 장면 기록 — AI 실사 장면은 composite_mode reference, 원본 보존 합성의 배경은 상품 사진 id 만 (사진 자리 후보로는 안 보임 — 합성 결과가 후보)
+    compositeMode, productImageId, noSlot: !!product && product.mode === "layer",
     // 고치기는 바뀐 내용(지시)이 아니라 원래 이미지 설명을 그대로 씀 (지시는 생성 기록의 user_prompt 에)
-    description: mode === "edit" ? String(base?.description || slot!.text || text) : text,
+    description: mode === "edit" ? String(base?.description || slot?.text || text) : product && product.mode === "layer" ? "배경: " + text : text,
   }).catch(async (e) => {
     console.error("image generation:", String((e as Error)?.message ?? e).slice(0, 200));
     await sb.rpc("image_gen_fail", { gen: gen.id, fin: { error_code: "server_error", error_message: "서버에서 문제가 생겼어. 청구됐을 수 있으니 공급자 사용량을 확인해줘.", cost_status: "확인 필요" } });
   }).finally(() => RUNNING.delete(String(gen.id)));
   inBackground(task);
   return json({ generation: pub, est_usd: est, model, size, quality, provider }, 202);
+}
+// 상품 장면의 이미지 설명 (보관함·대체 텍스트): 상품 이름(사용자가 적은 것)과 장면 — AI에는 보내지 않음
+function productDescription(spec: J): string {
+  const t = (PRODUCT_TEMPLATES as Record<string, J>)[String(spec.template)];
+  return [String(spec.name ?? "").trim() || "상품", t ? String(t.label) : ""].filter(Boolean).join(" · ").slice(0, 120);
 }
 // 4분 넘게 끝나지 않은 생성은 실패로 정리 (그 생성 하나 또는 그 글 전체).
 // 유료 공급자(OpenAI·Gemini)는 청구됐을 수 있음 → 확인 필요, 무료 플랜 Cloudflare 는 청구 없음 (1.5.0: 공급자별로 나눔)
@@ -1770,7 +1847,9 @@ async function reviewImage(c: Ctx) {
   if (error) throw error;
   if (!row) fail(404, "not_found");
   const img = row as J;
-  if (img.kind !== "ai") fail(400, "review_ai_only");
+  // 1.5.1: 원본 보존 합성 결과도 검수함 (상품 장면은 상품 디테일 아홉 항목으로 — 원본 상품 사진과 비교)
+  const pmode = productSceneMode(img);
+  if (img.kind !== "ai" && pmode !== "layer") fail(400, "review_ai_only");
   const s = await imageSettings();
   const model = str(b.model, 64).trim() || String(s.image_review_model ?? "");
   const m = reviewCaps(model) as J | null;
@@ -1779,6 +1858,8 @@ async function reviewImage(c: Ctx) {
   // 고친 'AI 합성' 이미지는 자기 기록에 참고 사진이 없음 → 고치기 전 원본 쪽에서 찾아 같이 보냄 (원본과 같은지 보게 — 1.5.0 검토)
   let refs = (Array.isArray(img.ref_images) ? img.ref_images : []) as J[];
   if (!refs.length && img.composite === true) refs = await lineageRefs(img);
+  // 상품 장면: 원본 상품 사진을 맨 앞에 (같은 상품의 다른 면 사진이 있으면 그 뒤로)
+  if (pmode && isUuid(img.product_image_id)) refs = [{ image_id: img.product_image_id, role: "subject" }, ...refs.filter((r) => r.image_id !== img.product_image_id && r.role === "subject")];
   const est = Number(estimateReviewUsd(model, 1 + Math.min(3, refs.length)));
   const seen = Number(b.confirm_usd);
   if (!(Number.isFinite(seen) && seen + Math.max(0.0005, est * 0.02) >= est)) fail(409, "estimate_changed", { est_usd: est, model });
@@ -1811,14 +1892,14 @@ async function reviewImage(c: Ctx) {
   const scene = (img.scene && typeof img.scene === "object" ? img.scene : {}) as J;
   const purpose = String(img.purpose || (scene.platform as J | undefined)?.purpose || "blog_body");
   const prompt = reviewPrompt({ slotText, goal: String(scene.goal ?? ""), type: String(scene.type ?? "photo"), ratio: String(img.ratio || (scene.platform as J | undefined)?.ratio || ""),
-    crops: purpose === "blog_cover" ? ["1:1 (목록 썸네일)"] : [], refs: images.length - 1, composite: img.composite === true });
+    crops: purpose === "blog_cover" ? ["1:1 (목록 썸네일)"] : [], refs: images.length - 1, composite: img.composite === true, product: pmode });
   const r = await visionReview({ fetchImpl: fetch, keys: providerKeys(), model, prompt, images, timeoutMs: Math.max(10_000, Math.min(60_000, DEADLINE - Date.now() - 8_000)) }) as J;
   if (!r.ok) return finish({ ok: false, error_code: r.code, error_message: scrub(r.message, 500), cost_status: m!.free || r.billed === "no" ? "청구 없음" : "확인 필요" });
   const usd = reviewUsageUsd(model, r.usage);
   const cost = m!.free ? "청구 없음" : usd != null ? "사용량 기준" : "예상";
-  const parsed = parseReview(String(r.text ?? ""), { refs: images.length - 1 });
+  const parsed = parseReview(String(r.text ?? ""), { refs: images.length - 1, product: pmode });
   if (!parsed) return finish({ ok: false, error_code: "review_unreadable", error_message: "검수 답을 읽지 못했어. 다시 해줘.", usage: r.usage, usage_usd: usd, cost_status: cost });
-  return finish({ ok: true, scores: { checks: parsed.checks }, summary: parsed.summary, uncertainty: parsed.uncertainty, suggestions: parsed.suggestions, usage: r.usage, usage_usd: usd, cost_status: cost });
+  return finish({ ok: true, scores: { checks: parsed.checks, ...(pmode ? { set: "product", mode: pmode } : {}) }, summary: parsed.summary, uncertainty: parsed.uncertainty, suggestions: parsed.suggestions, usage: r.usage, usage_usd: usd, cost_status: cost });
 }
 // 고친 이미지의 참고 사진: 원본(parent_image_id)을 따라 올라가며 참고 사진이 있는 첫 이미지의 것 (최대 5단계, 지운 원본도 기록은 읽음)
 async function lineageRefs(img: J): Promise<J[]> {
@@ -1893,6 +1974,180 @@ async function checkProviderRoute(c: Ctx) {
   const ins = await sb.from("image_provider_checks").insert(row);
   if (ins.error) console.error("provider check save:", ins.error.message); // 017 전 DB면 기록만 못 함
   return json({ check: { ...row, checked_at: nowIso() } });
+}
+
+// ───────── 1.5.1: 상품 사진으로 장면 만들기 — 마스크·원본 보존 합성 저장·상품 디테일 검수 ─────────
+// 배경 지우기(마스크)와 합성(픽셀 얹기)은 화면(이 기기 브라우저)에서 함: Edge Function 은 CPU 시간이 짧고 그림 그리기 도구가 없어서
+// 서버는 결과 파일을 검사해서 새 이미지로 저장하고, 원본 상품 사진·배경 파일과 기록은 건드리지 않음 (실패하면 새로 올린 파일만 지움)
+const MAX_MASK_BYTES = 6 * 1024 * 1024;
+const MAX_COMPOSITE_BYTES = 12 * 1024 * 1024;
+async function need018() {
+  const { error } = await sb.from("product_masks").select("id").limit(1);
+  if (error && (missingTable(error, "product_masks") || ["PGRST205", "42P01"].includes(String((error as { code?: string }).code ?? "")))) fail(409, "db_update_needed", { migration: "018" });
+  if (error) throw error;
+}
+async function readImageForm(c: Ctx, maxBytes: number): Promise<{ bytes: Uint8Array; type: string; meta: J }> {
+  const ct = (c.req.headers.get("content-type") ?? "").toLowerCase();
+  if (!ct.startsWith("multipart/form-data")) fail(415, "bad_type");
+  const len = Number(c.req.headers.get("content-length") ?? 0);
+  if (len > maxBytes + 200_000) fail(413, "too_large");
+  let form: FormData;
+  try { form = await c.req.formData(); } catch { return fail(400, "bad_body"); }
+  const f = form.get("file");
+  if (!(f instanceof Blob)) fail(400, "bad_field", { field: "file" });
+  const file = f as Blob;
+  if (file.size > maxBytes) fail(413, "too_large");
+  let meta: J = {};
+  try { meta = JSON.parse(String(form.get("meta") ?? "{}")) as J; } catch { fail(400, "bad_body"); }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) meta = {};
+  return { bytes: new Uint8Array(await file.arrayBuffer()), type: file.type, meta };
+}
+const clamp01 = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? Math.min(1, Math.max(0, Math.round(n * 1000) / 1000)) : null; };
+// 마스크 저장: 화면이 만든 '남길 영역'(PNG — 불투명 = 남김, 투명 = 지움). 원본 상품 사진과 같은 비율이어야 함 (크기는 같거나 작게)
+async function saveMask(c: Ctx) {
+  await need018();
+  const { bytes, meta } = await readImageForm(c, MAX_MASK_BYTES);
+  const sn = sniffImage(bytes) as J | null;
+  if (!sn || sn.mime !== "image/png" || sn.animated) fail(400, "bad_image", { reason: "mask_png" });
+  const { data: img, error } = await sb.from("post_images").select("id, kind, width, height").eq("id", c.params[0]).is("deleted_at", null).maybeSingle();
+  if (error) throw error;
+  if (!img) fail(404, "not_found");
+  const pw = Number((img as J).width ?? 0), ph = Number((img as J).height ?? 0);
+  const mw = Number(sn!.width), mh = Number(sn!.height);
+  if (!(mw > 0 && mh > 0 && mw <= 4096 && mh <= 4096)) fail(400, "bad_field", { field: "file" });
+  if (pw > 0 && ph > 0 && (mw > pw + 1 || mh > ph + 1 || Math.abs(mw / mh - pw / ph) > (pw / ph) * 0.02)) fail(400, "mask_size_mismatch");
+  await storageGuard(bytes.length);
+  const path = storagePath("mask", "png");
+  const up = await sb.storage.from(BUCKET).upload(path, bytes, { contentType: "image/png", upsert: false, cacheControl: "3600" });
+  if (up.error) fail(502, "storage_failed");
+  const bb = (meta.bbox && typeof meta.bbox === "object" ? meta.bbox : null) as J | null;
+  const int = (v: unknown) => Math.max(0, Math.min(4096, Math.round(Number(v) || 0)));
+  const pr = (meta.params && typeof meta.params === "object" ? meta.params : {}) as J;
+  const p = {
+    image_id: c.params[0], storage_path: path, width: mw, height: mh, bytes: bytes.length,
+    method: ["auto_u2netp", "auto_simple", "alpha", "manual"].includes(String(meta.method)) ? String(meta.method) : "manual", edited: meta.edited === true,
+    params: { feather: int(pr.feather), shrink: int(pr.shrink), threshold: clamp01(pr.threshold), model: str(pr.model, 40) },
+    bbox: bb ? { x: int(bb.x), y: int(bb.y), w: int(bb.w), h: int(bb.h) } : null, coverage: clamp01(meta.coverage),
+  };
+  const r = await sb.rpc("image_mask_save", { p });
+  if (r.error) { await sb.storage.from(BUCKET).remove([path]); rpcError(r.error); }
+  const urls = await signPaths([path]);
+  return json({ mask: { ...(r.data as J), url: urls[path] ?? "" } }, 201);
+}
+// 원본 보존 합성 저장: 화면이 원본 상품 레이어(마스크 밖만 투명, 상품 픽셀은 원본 그대로)를 AI 배경 위에 얹어 만든 파일 (보통 PNG — 다시 압축하지 않음)
+async function saveComposite(c: Ctx) {
+  await need018();
+  const { bytes, type, meta } = await readImageForm(c, MAX_COMPOSITE_BYTES);
+  const chk = checkImageFile(bytes, type) as J;
+  if (!chk.ok) fail(400, "bad_image", { reason: chk.code });
+  if (Number(chk.width) > 4096 || Number(chk.height) > 4096) fail(400, "bad_image", { reason: "too_many_pixels" });
+  for (const k of ["product_image_id", "background_image_id", "mask_id"]) if (!isUuid(meta[k])) fail(400, "bad_field", { field: k });
+  if (meta.parent_image_id !== undefined && meta.parent_image_id !== "" && !isUuid(meta.parent_image_id)) fail(400, "bad_field", { field: "parent_image_id" });
+  const purpose = has(PURPOSES, meta.purpose) ? String(meta.purpose) : "blog_body";
+  const ratio = ratioOf(purpose, str(meta.ratio, 8));
+  const layer = { ...(cleanLayer(meta.layer) as J), ratio };
+  const { data: rows, error } = await sb.from("post_images").select("*").in("id", [meta.product_image_id, meta.background_image_id]).is("deleted_at", null);
+  if (error) throw error;
+  const prod = ((rows ?? []) as J[]).find((r) => r.id === meta.product_image_id);
+  const bg = ((rows ?? []) as J[]).find((r) => r.id === meta.background_image_id);
+  if (!prod) fail(404, "product_not_found");
+  if (!bg) fail(404, "background_not_found");
+  // 사진 자리에 바로 넣기 (선택): 새 합성은 아직 상품 검수 전이라 발행 준비 완료·예약·게시 완료 글에는 못 넣음
+  let post: J | null = null, slot: J | null = null, link: J | null = null;
+  if (isUuid(meta.post_id)) ({ post, slot } = await slotTarget(meta, false));
+  if (meta.link === true) {
+    if (!post || !slot) fail(400, "bad_field", { field: "slot_key" });
+    if (["ready", "scheduled", ...LIVE].includes(String(post!.stage))) fail(409, "product_check_needed");
+    link = { post_id: post!.id, slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, slot_ctx: ctxOf(slot), purpose };
+  }
+  await storageGuard(bytes.length);
+  const out = stripMetadata(bytes).bytes as Uint8Array;
+  const path = storagePath("composite", String(chk.ext));
+  const up = await sb.storage.from(BUCKET).upload(path, out, { contentType: String(chk.mime), upsert: false, cacheControl: "3600" });
+  if (up.error) fail(502, "storage_failed");
+  const desc = str(meta.description, 300).trim() || (slot ? String(slot.text ?? "") : "") || String(prod!.description || "상품 합성 이미지");
+  const spec = cleanProductSpec(meta.spec) as J;
+  const img = {
+    origin_post_id: post ? post.id : "", origin_slot_index: slot ? slot.index ?? "" : "", origin_slot_key: slot ? slot.key : "",
+    kind: "composite", provider: "composite", model: "", prompt: "", user_prompt: "", style: "", purpose, ratio,
+    description: desc, alt_text: altTextFor(desc), storage_path: path, mime: chk.mime, bytes: out.length, width: chk.width, height: chk.height,
+    sha256: await sha256Hex(out), license: compositeLicense(prod), attribution_text: productAttribution(prod), rights_confirmed: true,
+    source_url: prod!.kind === "stock" ? String(prod!.source_url ?? "") : "", author_name: prod!.kind === "stock" ? String(prod!.author_name ?? "") : "",
+    author_url: prod!.kind === "stock" ? String(prod!.author_url ?? "") : "",
+    parent_image_id: isUuid(meta.parent_image_id) ? meta.parent_image_id : "",
+    product_image_id: prod!.id, background_image_id: bg!.id, mask_id: meta.mask_id, layer,
+    scene: { v: 1, kind: "product", mode: "layer", mode_label: "상품 원본 보존 합성", template: spec.template, purpose: spec.purpose, angle: spec.angle, place: spec.place,
+      background_prompt_preset: String(bg!.preset ?? ""), note: "상품 픽셀은 원본 사진 그대로 (AI가 다시 그리지 않음), 배경만 AI" },
+    preset: PRODUCT_PRESETS.layer,
+  };
+  const r = await sb.rpc("image_save", { img, link, gen: null, fin: null });
+  if (r.error) { await sb.storage.from(BUCKET).remove([path]); rpcError(r.error); }
+  return json({ image: (await withUrls([(r.data as J).image as J]))[0], slot: (r.data as J).slot ?? null }, 201);
+}
+// 상품 디테일 검수 저장·승인 (사용자가 원본과 결과를 나란히 보고 아홉 칸을 고름). AI 검수 의견은 참고로 따로 — 여기 섞지 않음
+// 승인을 풀면 이 이미지를 쓰는 발행 준비·예약 글은 '검수 필요'로 되돌림 (게시 완료 글은 그대로 두고 발행 전 검사에 보임)
+async function productCheck(c: Ctx) {
+  await need018();
+  const b = await readJson(c.req, 5_000);
+  const src = (b.items && typeof b.items === "object" ? b.items : {}) as J;
+  const items: J = {};
+  for (const [k] of PRODUCT_CHECKS as [string, string][]) if (["ok", "issue", "unsure"].includes(String(src[k]))) items[k] = String(src[k]);
+  const approve = b.approve === true;
+  const { data: cur, error: e0 } = await sb.from("post_images").select("id, kind, composite_mode, product_check").eq("id", c.params[0]).is("deleted_at", null).maybeSingle();
+  if (e0) throw e0;
+  if (!cur) fail(404, "not_found");
+  const was = productApproved(cur);
+  const { data, error } = await sb.rpc("image_product_check", { p_image: c.params[0], p: { items, note: str(b.note, 500).trim(), approve } });
+  if (error) rpcError(error);
+  let demoted: string[] = [];
+  if (was && !approve) {
+    const { data: sl, error: e1 } = await sb.from("post_image_slots").select("post_id").eq("image_id", c.params[0]);
+    if (e1) throw e1;
+    const ids = [...new Set(((sl ?? []) as J[]).map((x) => String(x.post_id)))];
+    if (ids.length) {
+      const { data: d2, error: e2 } = await sb.from("posts").update({ stage: "review" }).in("id", ids).in("stage", ["ready", "scheduled"]).is("deleted_at", null).select("id");
+      if (e2) throw e2;
+      demoted = ((d2 ?? []) as J[]).map((x) => String(x.id));
+    }
+  }
+  return json({ image: (await withUrls([data as J]))[0], demoted });
+}
+// 발행 준비 완료·예약·게시 완료로 바꿀 때: 이 글의 자리에 연결된 상품 장면 이미지 중 승인 안 한 것 (018 전 DB면 그런 이미지가 있을 수 없어서 빈 목록)
+async function productGateFor(post: J): Promise<J[]> {
+  const { data, error } = await sb.from("post_image_slots").select("slot_key, image_id, post_images(kind, composite_mode, product_check)").eq("post_id", post.id).not("image_id", "is", null);
+  if (error) {
+    if (/composite_mode|product_check/.test(String(error.message ?? "")) || missingColumn(error, "composite_mode")) return [];
+    throw error;
+  }
+  return productGateErrors(post, ((data ?? []) as J[]).map((r) => ({ slot_key: r.slot_key, image: r.post_images }))) as J[];
+}
+// 상품 장면 결과의 내력: 원본 상품 사진 · (원본 보존 합성) 배경·마스크 · 비용 (모델 생성 비용과 배경 지우기 비용을 따로, 예상과 실제를 따로)
+async function productTrail(img: J): Promise<J | null> {
+  const mode = productSceneMode(img);
+  if (!mode) return null;
+  const ids = [img.product_image_id, mode === "layer" ? img.background_image_id : null].filter(isUuid) as string[];
+  const { data: rows } = ids.length ? await sb.from("post_images").select("*").in("id", ids) : { data: [] as J[] };
+  const list = (rows ?? []) as J[];
+  const prod = list.find((r) => r.id === img.product_image_id) ?? null;
+  const bg = mode === "layer" ? list.find((r) => r.id === img.background_image_id) ?? null : null;
+  const genId = mode === "layer" ? bg?.generation_id : img.generation_id;
+  const [gen, mask] = await Promise.all([
+    isUuid(genId) ? sb.from("image_generations").select(GEN_COLS).eq("id", genId).maybeSingle() : Promise.resolve({ data: null }),
+    mode === "layer" && isUuid(img.mask_id) ? sb.from("product_masks").select("*").eq("id", img.mask_id).maybeSingle() : Promise.resolve({ data: null }),
+  ]);
+  const live = [prod, bg].filter((x) => x && !x.deleted_at) as J[];
+  const signed = (await withUrls(live)) as J[];
+  const urlOf = (x: J | null) => (x ? signed.find((y) => y.id === x.id) ?? { ...x, url: "" } : null);
+  const m = (mask.data ?? null) as J | null;
+  const mUrl = m && !m.deleted_at && m.storage_path ? (await signPaths([String(m.storage_path)]))[String(m.storage_path)] ?? "" : "";
+  const g = (gen.data ?? null) as J | null;
+  return {
+    mode, product: urlOf(prod), background: urlOf(bg), mask: m ? { ...m, url: mUrl } : null,
+    costs: {
+      model: g ? { model: g.model, provider: g.provider, est_usd: g.est_usd, usage_usd: g.usage_usd, actual_usd: g.actual_usd, cost_status: g.cost_status, generation_id: g.id } : null,
+      cutout: mode === "layer" ? { method: m ? m.method : "", cost_usd: m ? Number(m.cost_usd ?? 0) : 0, cost_status: m ? String(m.cost_status ?? "청구 없음") : "청구 없음", where: "이 기기 (브라우저)" } : null,
+    },
+  };
 }
 
 async function stockGuard(provider: string) {
@@ -2006,7 +2261,10 @@ async function listImages(c: Ctx) {
   const before = c.url.searchParams.get("before");
   const postId = c.url.searchParams.get("post_id");
   let q = sb.from("post_images").select("*").is("deleted_at", null).order("created_at", { ascending: false }).limit(48);
-  if (kind) q = q.eq("kind", oneOf(kind, ["ai", "stock", "upload", "card"] as const, "kind"));
+  if (kind) q = q.eq("kind", oneOf(kind, ["ai", "stock", "upload", "card", "composite"] as const, "kind"));
+  // 1.5.1: 한 상품 사진으로 만든 장면(합성 결과·AI 실사 장면·합성 배경)만
+  const productId = c.url.searchParams.get("product_id");
+  if (productId) { if (!isUuid(productId)) fail(400, "bad_field", { field: "product_id" }); q = q.eq("product_image_id", productId); }
   if (postId) { if (!isUuid(postId)) fail(400, "bad_field", { field: "post_id" }); q = q.eq("origin_post_id", postId); }
   if (before) { if (isNaN(Date.parse(before))) fail(400, "bad_field", { field: "before" }); q = q.lt("created_at", before); }
   const { data, error } = await q;
@@ -2027,7 +2285,22 @@ async function getImage(c: Ctx) {
   if (decks.error) throw decks.error;
   // 1.5.0: 이 이미지의 AI 검수·사용자 평가 (017 전 DB면 빈 목록)
   const rv = await sb.from("image_reviews").select("*").eq("image_id", c.params[0]).order("created_at", { ascending: false }).limit(10);
-  return json({ image: (await withUrls([data as J]))[0], used_in: slots.data, decks: decks.data, generation: gen.data, reviews: rv.error ? [] : rv.data });
+  // 1.5.1: 상품 장면 결과면 원본 상품 사진·배경·마스크·비용 내력, 진짜 사진이면 그 사진의 마스크(최근 것)와 그 사진으로 만든 장면 수
+  const img = data as J;
+  const product = await productTrail(img).catch((e) => { console.error("product trail:", String((e as Error)?.message ?? e).slice(0, 200)); return null; });
+  let masks: J[] = [], scenes = 0;
+  if (img.kind === "upload" || img.kind === "stock") {
+    const [mk, sc] = await Promise.all([
+      sb.from("product_masks").select("*").eq("image_id", img.id).is("deleted_at", null).order("created_at", { ascending: false }).limit(5),
+      sb.from("post_images").select("id", { count: "exact", head: true }).eq("product_image_id", img.id).is("deleted_at", null),
+    ]);
+    if (!mk.error) {
+      const urls = await signPaths(((mk.data ?? []) as J[]).map((m) => String(m.storage_path ?? "")));
+      masks = ((mk.data ?? []) as J[]).map((m) => ({ ...m, url: urls[String(m.storage_path)] ?? "" }));
+    }
+    scenes = sc.error ? 0 : sc.count ?? 0;
+  }
+  return json({ image: (await withUrls([img]))[0], used_in: slots.data, decks: decks.data, generation: gen.data, reviews: rv.error ? [] : rv.data, product, masks, scenes });
 }
 async function patchImage(c: Ctx) {
   const b = await readJson(c.req, 10_000);
@@ -2046,7 +2319,15 @@ async function patchImage(c: Ctx) {
     p.source_type = sourceTypeOf(b.source_type);
   }
   if (!Object.keys(p).length) fail(400, "empty");
+  // 1.5.1: 상품 장면 이미지는 상품 디테일 검수를 승인해야 '사용 가능' (승인은 POST /images/{id}/product-check). DB 트리거도 같은 규칙으로 막음
+  if (p.review_status === "사용 가능") {
+    const { data: cur, error: e1 } = await sb.from("post_images").select("*").eq("id", c.params[0]).is("deleted_at", null).maybeSingle();
+    if (e1) throw e1;
+    if (!cur) fail(404, "not_found");
+    if (productSceneMode(cur) && !productApproved(cur)) fail(409, "product_check_needed");
+  }
   const { data, error } = await sb.from("post_images").update(p).eq("id", c.params[0]).is("deleted_at", null).select().maybeSingle();
+  if (error && /product_check_needed/.test(String(error.message ?? ""))) fail(409, "product_check_needed");
   if (error && "source_type" in p && missingColumn(error, "source_type")) fail(409, "db_update_needed", { migration: "015" }); // 015 전 DB
   if (error) throw error;
   if (!data) fail(404, "not_found");
@@ -2058,9 +2339,11 @@ async function deleteImage(c: Ctx) {
   if (error) rpcError(error);
   const path = String((data as J)?.storage_path ?? "");
   const small = String((data as J)?.ref_small_path ?? ""); // 1.5.0: 무료 모델용 작은 사본도 같이 지움
+  // 1.5.1: 이 사진의 상품 마스크 파일도 (합성 결과가 남아 있으면 DB가 먼저 거절해서 여기까지 안 옴)
+  const masks = (Array.isArray((data as J)?.mask_paths) ? (data as J).mask_paths as unknown[] : []).map(String).filter(Boolean);
   let removed = false;
   if (path) {
-    const r = await sb.storage.from(BUCKET).remove([path, small].filter(Boolean));
+    const r = await sb.storage.from(BUCKET).remove([path, small, ...masks].filter(Boolean));
     removed = !r.error;
     if (r.error) console.error("image file remove:", r.error.message);
   }
@@ -2096,7 +2379,13 @@ async function linkSlot(c: Ctx) {
     return json({ ok: true, slot: null });
   }
   if (!isUuid(b.image_id)) fail(400, "bad_field", { field: "image_id" });
-  const { slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
+  const { post, slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
+  // 1.5.1: 발행 준비 완료·예약·게시 완료 글에는 상품 디테일 검수를 승인한 상품 장면 이미지만 (검토 중인 글에는 넣어 두고 승인은 나중에 해도 됨)
+  if (["ready", "scheduled", ...LIVE].includes(String(post!.stage))) {
+    const { data: im, error: e0 } = await sb.from("post_images").select("*").eq("id", b.image_id).is("deleted_at", null).maybeSingle();
+    if (e0) throw e0;
+    if (im && productSceneMode(im) && !productApproved(im)) fail(409, "product_check_needed");
+  }
   // 용도를 따로 안 보내면 그 자리에 저장해 둔 용도를 그대로 (연결할 때마다 기본값으로 돌아가지 않게)
   let use = has(PURPOSES, b.purpose) ? String(b.purpose) : "";
   if (!use) {
@@ -2313,6 +2602,9 @@ const ROUTES: [string, RegExp, (c: Ctx) => Promise<Response>][] = [
   ["GET", R("images/compare-stats"), compareStats],
   ["POST", R("images/providers/check"), checkProviderRoute],
   ["POST", R(`images/${U}/small`), uploadSmallCopy],
+  ["POST", R("images/composite"), saveComposite],
+  ["POST", R(`images/${U}/mask`), saveMask],
+  ["POST", R(`images/${U}/product-check`), productCheck],
   ["POST", R(`images/${U}/review`), reviewImage],
   ["POST", R(`images/${U}/evaluate`), evaluateImage],
   ["GET", R(`images/${U}/lineage`), imageLineage],

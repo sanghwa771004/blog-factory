@@ -2,7 +2,7 @@
 // - OpenAI 이미지 생성·편집, 사진 공급자(지금은 Pexels만) 검색·한 장 가져오기, 이미지 내려받기
 // - 저장 흐름(생성 결과 저장·사진 고르기·파일 올리기)은 deps(DB 함수·파일 저장소)를 받아서 실행 → 테스트에서 가짜로 바꿔 끼움
 // 키는 서버 환경변수(Supabase Edge Function Secrets)로만 받음. 화면(app.js)으로는 키가 있는지 여부만 보냄.
-import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf, modelCaps, geminiSizeOf, reviewCaps, REVIEW_CHECKS, PROVIDERS } from './images.js';
+import { sniffImage, checkImageFile, stripMetadata, attributionFor, altTextFor, usageUsd, ctxOf, modelCaps, geminiSizeOf, reviewCaps, REVIEW_CHECKS, PRODUCT_CHECKS, PROVIDERS } from './images.js';
 
 export const OPENAI_URL = 'https://api.openai.com/v1';
 export const PEXELS_URL = 'https://api.pexels.com/v1';
@@ -374,8 +374,9 @@ export async function cloudflareImage({ fetchImpl, accountId, token, model, prom
 
 // ───────── AI 검수 (멀티모달 모델이 이미지를 보고 의견을 줌 — 품질 보증이 아님) ─────────
 // 답은 JSON 하나: { checks: { 항목: { verdict: ok|issue|unsure, reason, confidence 0~1 } }, summary, uncertainty, suggestions: [고칠 요청] }
-/** @param {{ slotText?: string, goal?: string, type?: string, ratio?: string, crops?: string[], refs?: number, composite?: boolean }} [o] */
-export function reviewPrompt({ slotText = '', goal = '', type = 'photo', ratio = '', crops = [], refs = 0, composite = false } = {}) {
+/** @param {{ slotText?: string, goal?: string, type?: string, ratio?: string, crops?: string[], refs?: number, composite?: boolean, product?: string }} [o] */
+export function reviewPrompt({ slotText = '', goal = '', type = 'photo', ratio = '', crops = [], refs = 0, composite = false, product = '' } = {}) {
+  if (product === 'layer' || product === 'reference') return productReviewPrompt({ slotText, goal, ratio, refs, mode: product });
   const keys = REVIEW_CHECKS.map(([k]) => k).filter((k) => k !== 'ref_match' || refs > 0);
   return [
     '너는 한국어 블로그에 넣을 AI 이미지를 검수하는 사람이야. 첫 번째 이미지가 검수할 이미지야.' + (refs ? ` 그 뒤 ${refs}장은 사용자가 준 참고 사진(실제 제품 등)이야.` : ''),
@@ -390,11 +391,35 @@ export function reviewPrompt({ slotText = '', goal = '', type = 'photo', ratio =
     '답은 JSON 객체 하나만: {"checks":{...},"summary":"","uncertainty":"","suggestions":[]}',
   ].filter(Boolean).join('\n');
 }
+// 1.5.1 상품 장면 검수 (참고용): 상품 디테일 아홉 항목 (images.js PRODUCT_CHECKS — 사용자 검수와 같은 항목). 두 방식을 분명히 나눠서 알려줌
+/** @param {{ slotText?: string, goal?: string, ratio?: string, refs?: number, mode?: string }} [o] */
+export function productReviewPrompt({ slotText = '', goal = '', ratio = '', refs = 0, mode = 'reference' } = {}) {
+  const layer = mode === 'layer';
+  return [
+    '너는 한국어 블로그·SNS에 넣을 상품 이미지를 검수하는 사람이야. 첫 번째 이미지가 검수할 결과 이미지야.' + (refs ? ` 그 뒤 ${refs}장은 실제 상품 원본 사진이야.` : ''),
+    layer
+      ? '이 결과는 [원본 보존 합성]이야: 실제 상품 사진에서 배경을 지운 상품 부분을 다시 그리지 않고 그대로, AI가 만든 배경 위에 얹었어. 상품 가장자리가 잘렸거나 원래 배경이 남았는지, 그림자·크기·원근·빛이 배경과 어색한지를 특히 봐.'
+      : '이 결과는 [AI 재생성]이야: AI가 실제 상품 사진을 참고해서 상품까지 포함한 장면 전체를 새로 그렸어. 상품의 모양·비율·색·소재·버튼·포트·인쇄 글자·로고가 원본과 달라진 곳을 꼼꼼히 찾아.',
+    `원고의 사진 자리 설명: ${slotText || '(없음)'}`,
+    goal ? `만들려던 것: ${goal}` : '',
+    `목표 비율: ${ratio || '(정하지 않음)'}`,
+    '아래 항목마다 verdict(ok = 문제없음, issue = 문제 있음, unsure = 이미지로는 판단 어려움), reason(한국어 한 문장, 이미지에서 본 근거), confidence(0~1)를 줘.',
+    ...PRODUCT_CHECKS.map(([k, label]) => `- ${k}: ${label}`),
+    refs ? '' : '- 원본 사진이 없어서 원본과 같아야 하는 항목(shape·color·details·text·parts)은 unsure 로 둬.',
+    '- artifacts: 상품에 없던 글자·가짜 로고·가짜 라벨이나 필요 없는 물체가 있으면 issue. consistency: 결과가 실제 사용 후기·인증 사진처럼 보이면 issue.',
+    '확실하지 않으면 unsure 로 두고 짐작으로 ok 를 주지 마. 네 의견은 참고용이고 합격 보증이 아니야 (승인은 사용자가 원본과 비교해서 함).',
+    'summary: 전체 의견 한두 문장. uncertainty: 이미지로 판단하기 어려운 점. suggestions: ' + (layer
+      ? '배경·그림자만 고치는 짧은 한국어 요청 0~3개 (상품은 고치지 않음 — 예: "상품이 놓일 탁자 위 빈자리를 조금 더 넓게").'
+      : '고칠 점이 있으면 이미지 편집 AI에 그대로 줄 수 있는 짧은 한국어 요청 0~3개 (예: "상품은 그대로 두고 뒤쪽 화분만 지워줘").'),
+    '답은 JSON 객체 하나만: {"checks":{...},"summary":"","uncertainty":"","suggestions":[]}',
+  ].filter(Boolean).join('\n');
+}
 const VERDICTS = ['ok', 'issue', 'unsure'];
 // 모델 답에서 JSON을 꺼내 정리 (모양이 틀리면 null). 모르는 항목·긴 글은 버림.
 // refs: 같이 보낸 참고 사진 수 — 0이면 '참고 사진과 같은지'(ref_match) 답은 버림 (비교할 사진이 없었으니까 — 1.5.0 검토)
-/** @param {unknown} raw @param {{ refs?: number | null }} [o] */
-export function parseReview(raw, { refs = null } = {}) {
+// product: 상품 장면이면 상품 디테일 아홉 항목으로 읽음 (1.5.1)
+/** @param {unknown} raw @param {{ refs?: number | null, product?: string }} [o] */
+export function parseReview(raw, { refs = null, product = '' } = {}) {
   const t = String(raw || '');
   const a = t.indexOf('{'), b = t.lastIndexOf('}');
   if (a < 0 || b <= a) return null;
@@ -402,10 +427,10 @@ export function parseReview(raw, { refs = null } = {}) {
   try { j = JSON.parse(t.slice(a, b + 1)); } catch { return null; }
   if (!j || typeof j !== 'object' || !j.checks || typeof j.checks !== 'object') return null;
   const checks = {};
-  for (const [k] of REVIEW_CHECKS) {
+  for (const [k] of product ? PRODUCT_CHECKS : REVIEW_CHECKS) {
     const c = j.checks[k];
     if (!c || typeof c !== 'object') continue;
-    if (k === 'ref_match' && refs === 0) continue;
+    if (!product && k === 'ref_match' && refs === 0) continue;
     const v = VERDICTS.includes(c.verdict) ? c.verdict : 'unsure';
     const conf = Number(c.confidence);
     checks[k] = { verdict: v, reason: scrub(c.reason || '', 300), confidence: Number.isFinite(conf) ? Math.min(1, Math.max(0, Math.round(conf * 100) / 100)) : null };
@@ -693,16 +718,21 @@ export async function runGeneration(d, gen, opt = {}) {
     return fail({ code: 'storage_failed', message: '만든 이미지를 저장하지 못했어. ' + billedNote, billed: isFree ? 'no' : 'maybe', usage: res.usage, requestId: res.requestId });
   }
   const text = opt.description || gen.slot_text || '';
+  // 1.5.1: 실제 사진을 참고한 AI 이미지는 출처에 'AI 합성 이미지'를 그대로 남김
+  const license = res.test ? '점검용 시험 이미지 (공급자를 부르지 않음 — 실제 이미지 아님)' : (opt.composite ? 'AI 합성 이미지 (실제 사진 참고) · ' : '') + (LICENSE[provider] || LICENSE.openai)(caps);
   const img = {
-    origin_post_id: gen.post_id || '', origin_slot_index: gen.slot_index ?? '', origin_slot_key: gen.slot_key || '',
+    // 원본 보존 합성의 배경(noSlot)은 사진 자리 후보로 보이지 않게 자리 정보를 남기지 않음 (합성 결과가 그 자리 후보)
+    origin_post_id: gen.post_id || '', origin_slot_index: opt.noSlot ? '' : gen.slot_index ?? '', origin_slot_key: opt.noSlot ? '' : gen.slot_key || '',
     kind: 'ai', provider: res.test ? '' : provider, model: gen.model, prompt: gen.prompt, user_prompt: gen.user_prompt, style: gen.style, purpose: gen.purpose,
     ratio: opt.ratio || '', description: text, alt_text: altTextFor(text), storage_path: path, mime: sn.mime, bytes: bytes.length, width: sn.width, height: sn.height,
     sha256: await sha256Hex(bytes), attribution_text: '',
-    license: res.test ? '점검용 시험 이미지 (공급자를 부르지 않음 — 실제 이미지 아님)' : (LICENSE[provider] || LICENSE.openai)(caps),
+    license: license.slice(0, 200),
     // 1.5.0: 수정 이력(고친 원본)·참고 사진·실제 사진 참고 여부·장면 설계서·이미지 종류
     parent_image_id: gen.mode === 'edit' && opt.base && opt.base.id ? opt.base.id : '',
     ref_images: (opt.refs || []).map((r) => ({ image_id: r.id, role: r.role, kind: r.kind || '' })),
     composite: !!opt.composite, scene: opt.scene || null, preset: opt.preset || gen.preset || '',
+    // 1.5.1: 상품 장면 — AI 실사 장면(reference)이면 원본 상품 사진 id (DB가 그 사진이 살아 있는지 다시 확인), 원본 보존 합성의 배경은 상품 사진 id 만
+    composite_mode: opt.compositeMode === 'reference' ? 'reference' : '', product_image_id: opt.productImageId || '',
   };
   // 점검용 가짜 모델은 청구가 없고 하루 횟수에도 안 셈
   const fin = res.test
