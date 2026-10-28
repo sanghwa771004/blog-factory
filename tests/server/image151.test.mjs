@@ -35,6 +35,9 @@ const COMP = '88888888-8888-4888-8888-888888888888';
 const COMP_OK = '99999999-9999-4999-8999-999999999999';
 const REF = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const MASK = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const BG_STOCK = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';   // Pexels 상품 사진용 빈 배경
+const GONE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';       // 지운 상품 사진
+const REF_GONE = 'ffffffff-ffff-4fff-8fff-ffffffffffff';   // 지운 상품 사진으로 만든 AI 실사 장면
 const BODY = [
   '## 원룸 전기요 고르는 기준', '원룸 전기요는 크기와 온도 조절 단계를 먼저 봐야 해요. 전자파 인증 표시도 확인하세요.',
   '- 크기가 침대와 맞는지', '- 온도 조절이 여러 단계인지', '[이미지: 침대 위에 깔린 전기요]', '[이미지: 전기요를 접는 손 (직접 찍기)]', '[이미지: 전기요 온도 조절기 버튼 (제품 사진)]',
@@ -60,6 +63,9 @@ const IMAGES = () => ({
   [COMP_OK]: base(COMP_OK, { kind: 'composite', provider: 'composite', storage_path: 'composite/ok.png', mime: 'image/png', composite_mode: 'layer', product_image_id: PROD, background_image_id: BG, mask_id: MASK, layer: LAYER,
     product_check: { mode: 'layer', approved: true, items: Object.fromEntries(PRODUCT_CHECKS.map(([k]) => [k, 'ok'])) }, review_status: '사용 가능' }),
   [REF]: base(REF, { kind: 'ai', provider: 'openai', storage_path: 'ai/ref.jpg', composite: true, composite_mode: 'reference', product_image_id: PROD, preset: 'pscene_ref', ref_images: [{ image_id: PROD, role: 'subject', kind: 'upload' }] }),
+  [BG_STOCK]: base(BG_STOCK, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/bg2.jpg', preset: 'pscene_layer', product_image_id: STOCK }),
+  [GONE]: base(GONE, { deleted_at: '2026-10-28T00:00:00Z' }),
+  [REF_GONE]: base(REF_GONE, { kind: 'ai', provider: 'openai', storage_path: 'ai/refg.jpg', composite: true, composite_mode: 'reference', product_image_id: GONE, preset: 'pscene_ref' }),
 });
 const SETTINGS = { id: 1, image_gen_model: 'cf-flux-2-klein-4b', image_edit_model: 'gpt-image-2.5-sunburst', image_quality: 'medium', image_daily_limit: 20, image_monthly_budget_usd: 5,
   image_fx_krw: null, image_fx_date: null, image_fx_source: '', image_prices: {}, image_modes: {}, image_review_model: '', image_request_cap_usd: 1, image_ratio_prefs: {} };
@@ -107,6 +113,7 @@ function fakeDb(st) {
     }
     if (t === 'posts') {
       if (method === 'PATCH') { st.postPatch.push({ query, body }); const ids = idsOf(query.id); return [200, ids.filter((id) => POSTS[id] && ['ready', 'scheduled'].includes(POSTS[id].stage)).map((id) => ({ id }))]; }
+      if (query.stage) return [200, idsOf(query.id).map((id) => POSTS[id]).filter((x) => x && idsOf(query.stage).includes(x.stage)).map((x) => ({ id: x.id }))];
       const p = POSTS[idsOf(query.id)[0]];
       return [200, one ? p || {} : p ? [p] : []];
     }
@@ -121,8 +128,8 @@ function fakeDb(st) {
         return [200, one ? images[id] : images[id] ? [images[id]] : []];
       }
       if (select.includes('count') || query.product_image_id) return [200, [], { 'content-range': '0-0/2' }];
-      const rows = idsOf(query.id).map((id) => images[id]).filter(Boolean);
-      return [200, one ? rows[0] || {} : rows];
+      const rows = idsOf(query.id).map((id) => images[id]).filter(Boolean).filter((r) => query.deleted_at !== 'is.null' || !r.deleted_at);
+      return [200, one ? rows[0] || (method === 'GET' && query.deleted_at === 'is.null' ? null : {}) : rows];
     }
     return undefined;
   };
@@ -177,13 +184,18 @@ describe('1.5.1 상품 장면 — 서버', () => {
     assert.deepEqual([miss.status, miss.j.field], [400, 'mask_id']);
     const fake = await srv.form('images/composite', form(new Uint8Array([1, 2, 3, 4]), 'image/png', { product_image_id: PROD, background_image_id: BG, mask_id: MASK }));
     assert.deepEqual([fake.status, fake.j.error], [400, 'bad_image']);
+    // 배경은 그 상품용 빈 배경만 (다른 상품의 배경·AI 실사 장면·일반 AI 이미지는 안 됨 — 1.5.1 검토)
+    for (const bad of [BG, REF, AI]) {
+      const x = await srv.form('images/composite', form(COMP_PNG, 'image/png', { product_image_id: STOCK, background_image_id: bad, mask_id: MASK }));
+      assert.deepEqual([x.status, x.j.error], [400, 'background_mismatch'], bad);
+    }
     const n = st.uploads.length;
-    const r = await srv.form('images/composite', form(COMP_PNG, 'image/png', { product_image_id: STOCK, background_image_id: BG, mask_id: MASK, purpose: 'ig_feed', ratio: '4:5',
+    const r = await srv.form('images/composite', form(COMP_PNG, 'image/png', { product_image_id: STOCK, background_image_id: BG_STOCK, mask_id: MASK, purpose: 'ig_feed', ratio: '4:5',
       layer: { ...LAYER, x: 2, rot: 99, ratio: '21:9' }, description: '침대 위에 놓인 전기요', spec: { mode: 'layer', template: 'table', purpose: 'ig_feed' } }));
     assert.equal(r.status, 201, JSON.stringify(r.j));
     const img = st.saves.at(-1).img;
     assert.deepEqual([img.kind, img.provider, img.product_image_id, img.background_image_id, img.mask_id, img.preset, img.purpose, img.ratio],
-      ['composite', 'composite', STOCK, BG, MASK, 'pscene_layer', 'ig_feed', '4:5']);
+      ['composite', 'composite', STOCK, BG_STOCK, MASK, 'pscene_layer', 'ig_feed', '4:5']);
     assert.deepEqual([img.layer.x, img.layer.rot, img.layer.ratio], [1, 45, '4:5'], '레이어 설정은 범위 안으로, 비율은 결과 비율');
     assert.match(img.storage_path, /^composite\/\d{4}\/\d{2}\/[0-9a-f-]{36}\.png$/);
     assert.match(img.license, /^원본 보존 합성 \(앱이 합성\) · 상품: Pexels 라이선스/);
@@ -270,11 +282,32 @@ describe('1.5.1 상품 장면 — 서버', () => {
     assert.equal(a.status, 202, JSON.stringify(a.j));
     const sa = await waitFor(() => st.saves.find((x) => x.gen === 'gen-' + st.begins.length));
     assert.deepEqual([sa.img.composite, sa.img.composite_mode, sa.img.product_image_id], [true, 'reference', PROD]);
-    // 상품 모양이 꼭 필요한 자리가 아니면(예: 반려동물 사진을 대상으로) 1.5.0 처럼 'AI 합성'만 표시
+    // 1.5.1 검토 뒤: 일반 자리여도 진짜 상품 사진을 '대상 모양 유지'로 넣으면 AI가 그 상품을 다시 그리는 거라 AI 실사 장면으로 기록 (검수 없이 쓰이지 않게)
     const b = await srv.call('POST', 'images/generate', { ...base1, request_key: 'req-' + Math.random().toString(36).slice(2, 12), slot_key: SLOT, refs: [{ image_id: PROD, role: 'subject' }] });
     assert.equal(b.status, 202, JSON.stringify(b.j));
     const sb2 = await waitFor(() => st.saves.find((x) => x.gen === 'gen-' + st.begins.length));
-    assert.deepEqual([sb2.img.composite, sb2.img.composite_mode], [true, '']);
+    assert.deepEqual([sb2.img.composite, sb2.img.composite_mode, sb2.img.product_image_id], [true, 'reference', PROD]);
+    // 구도·배경 참고(대상 아님)는 상품을 다시 그리는 게 아니라서 그대로
+    const c2 = await srv.call('POST', 'images/generate', { ...base1, request_key: 'req-' + Math.random().toString(36).slice(2, 12), slot_key: SLOT, refs: [{ image_id: PROD, role: 'style' }] });
+    assert.equal(c2.status, 202, JSON.stringify(c2.j));
+    const sc2 = await waitFor(() => st.saves.find((x) => x.gen === 'gen-' + st.begins.length));
+    assert.equal(sc2.img.composite_mode, '');
+  });
+
+  test('AI 실사 장면을 고칠 때 원본 상품 사진이 지워졌으면 공급자를 부르기 전에 멈춤 (만든 뒤 저장을 못 해 돈만 나가지 않게)', { skip }, async () => {
+    const n = st.begins.length;
+    const r = await srv.call('POST', 'images/generate', { request_key: 'req-' + Math.random().toString(36).slice(2, 12), model: 'gf-test-fake', quality: 'medium', confirm_usd: 0,
+      post_id: POST, slot_key: SLOT, purpose: 'blog_body', ratio: '4:3', mode: 'edit', base_image_id: REF_GONE, edit: '조명을 조금 더 따뜻하게' });
+    assert.deepEqual([r.status, r.j.error], [400, 'product_image_required'], JSON.stringify(r.j));
+    assert.equal(st.begins.length, n, '생성을 시작하지 않음');
+  });
+
+  test('카드뉴스 배경: 상품 디테일 검수를 승인하지 않은 상품 장면 이미지는 못 씀 (카드는 따로 검수하지 않아서)', { skip }, async () => {
+    const slides = [{ title: '원룸 전기요', text: '고르는 기준' }];
+    const r = await srv.call('POST', `posts/${POST}/cards`, { slides, bg_image_id: COMP });
+    assert.deepEqual([r.status, r.j.error], [409, 'product_check_needed']);
+    const r2 = await srv.call('POST', `posts/${POST}/cards`, { slides, bg_image_id: REF });
+    assert.deepEqual([r2.status, r2.j.error], [409, 'product_check_needed']);
   });
 
   test("승인 전에는 '사용 가능'으로 못 바꿈 (서버가 먼저 막고 DB도 막음), 승인한 것은 됨", { skip }, async () => {
@@ -299,12 +332,12 @@ describe('1.5.1 상품 장면 — 서버', () => {
     assert.deepEqual(r.j.demoted, []);
     // 승인한 이미지(COMP_OK)를 READY 글이 쓰는 중 → 승인을 풀면 READY 를 검수 필요로
     st.usedBy[COMP_OK] = [{ post_id: READY }, { post_id: POST }];
+    const np0 = st.postPatch.length;
     const un = await srv.call('POST', `images/${COMP_OK}/product-check`, { items: { shape: 'issue' }, approve: false });
     assert.equal(un.status, 200, JSON.stringify(un.j));
-    assert.deepEqual(un.j.demoted, [READY]);
-    const pp = st.postPatch.at(-1);
-    assert.deepEqual(pp.body, { stage: 'review' });
-    assert.equal(pp.query.stage, 'in.(ready,scheduled)', '게시 완료 글은 그대로');
+    assert.deepEqual(un.j.demoted, [READY], '발행 준비·예약 글만 (게시 완료 글은 그대로)');
+    // 실제로 '검수 필요'로 내리는 건 DB 트리거 (휴지통 글 포함, 한 번에 — sql_images_151 '승인을 풀면…'). 서버는 어느 글인지 찾아서 알려주기만
+    assert.equal(st.postPatch.length, np0);
     const np = await srv.call('POST', `images/${AI}/product-check`, { items: {}, approve: true });
     assert.deepEqual([np.status, np.j.error], [400, 'not_product_scene']);
   });

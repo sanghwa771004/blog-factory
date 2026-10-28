@@ -69,7 +69,6 @@ FX_IMG = {'4x3': ('/tests/fixtures/img/photo-4x3.jpg', 1280, 960), '16x9': ('/te
           'product': ('/tests/fixtures/img/product.png', 800, 600)}  # 1.5.1: 흰 배경 위 상품 (칸마다 색이 달라서 합성 결과에서 원본 칸을 찾을 수 있음)
 STORAGE = 'https://oxewhsqmdkiasckvnyua.supabase.co/storage/v1/object/sign/post-images/'  # 1.5.1: 마스크·합성 파일 (가짜 저장소 — 서명 주소 흉내)
 PRODUCT_KEYS = ['shape', 'color', 'details', 'text', 'parts', 'scale', 'placement', 'artifacts', 'consistency']
-REAL_NEEDED_MOCK = re.compile(r'구성품|제품 사진|버튼|화면|라벨|포장')  # 가짜 서버용 단순한 판단 (실제 판단은 images.js aiGate — 단위 시험)
 RATIO_SIZE = {'16:9': '1536x864', '4:3': '1280x960', '1:1': '1024x1024', '4:5': '1024x1280', '9:16': '864x1536'}
 
 
@@ -751,12 +750,12 @@ class Mock:
                 # 1.5.1 서버처럼: 상품 장면 기록. 원본 보존 합성의 배경은 상품 id 만(자리 후보 아님), AI 실사 장면·실제 상품 자리의 진짜 상품 참고는 reference
                 pr = g.get('product')
                 real_subject = next((r['image_id'] for r in refs if r.get('role') == 'subject' and (self.img(r['image_id']) or {}).get('kind') in ('upload', 'stock')), None)
-                slot_text = next((s['text'] for p in self.posts if p['id'] == g.get('post_id') for s in parse_slots(p['body']) if s['key'] == g.get('slot_key')), '')
                 if pr:
                     pextra = {'composite': pr.get('mode') == 'reference', 'composite_mode': 'reference' if pr.get('mode') == 'reference' else '', 'product_image_id': g.get('product_image_id')}
                 else:
                     base = self.img(g.get('base_image_id')) if g['mode'] == 'edit' else None
-                    ref_mode = (real_subject and REAL_NEEDED_MOCK.search(slot_text)) or (base and base.get('composite_mode') == 'reference')
+                    # 1.5.1 검토 뒤 서버처럼: 진짜 상품 사진을 '대상 모양 유지'로 넣으면 자리와 상관없이 AI 실사 장면
+                    ref_mode = real_subject or (base and base.get('composite_mode') == 'reference')
                     pextra = {'composite_mode': 'reference' if ref_mode else '', 'product_image_id': real_subject or (base or {}).get('product_image_id')}
                 slot_for = '' if pr and pr.get('mode') == 'layer' else g['slot_key']
                 i = self.add_image('ai', g['post_id'], slot_for, {'16:9': '16x9', '4:5': '4x5'}.get(g.get('ratio') or '', '4x3'), model=g['model'], provider=g.get('provider', 'openai'),
@@ -860,6 +859,8 @@ class Mock:
                 return 400, {'error': 'product_image_required'}
             if bg['kind'] != 'ai':
                 return 400, {'error': 'background_image_required'}
+            if bg.get('preset') != 'pscene_layer' or bg.get('composite_mode') or bg.get('product_image_id') != prod['id']:
+                return 400, {'error': 'background_mismatch'}  # 1.5.1 검토 뒤 서버·DB 처럼: 이 상품용 빈 배경에만
             if not mk or mk['image_id'] != prod['id']:
                 return 400, {'error': 'mask_mismatch'}
             data = body.get('file_bytes') or b''
@@ -2760,8 +2761,20 @@ def main():
             go = view.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
             expect(go).to_be_enabled()
             n0 = len(gen_bodies())
-            go.click()
+            # 만드는 동안에는 방식을 못 바꿈 (AI 실사 장면 결과가 원본 보존 합성의 배경으로 섞이지 않게 — 1.5.1 검토)
+            mock.hold_generate = True
+            try:
+                go.click()
+                expect(view.get_by_role('button', name=re.compile('^상품 원본 보존 합성'))).to_be_disabled(timeout=15000)
+                for _ in range(100):
+                    if mock.held:
+                        break
+                    page.wait_for_timeout(100)
+            finally:
+                mock.hold_generate = False
+                release_held()
             expect(view.get_by_role('heading', name=re.compile('장면 고르기'))).to_be_visible(timeout=60000)
+            expect(view.get_by_role('button', name=re.compile('^상품 원본 보존 합성'))).to_be_enabled()
             req = gen_bodies()[n0]
             assert req['product']['mode'] == 'reference' and req['product_image_id'] == prod['id'] and req['model'] == 'gpt-image-2.5-flare' and isinstance(req['confirm_usd'], (int, float)), req
             ref = next(i for i in mock.images if i['kind'] == 'ai' and i.get('composite_mode') == 'reference' and i.get('preset') == 'pscene_ref')
@@ -2867,22 +2880,31 @@ def main():
             row = sec.locator('.stack', has=page.locator('b', has_text='고품질 유료 생성')).last
             expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-sunburst')
             expect(row).to_contain_text('기본값: gpt-image-2.5-sunburst · 높음 — 기본값을 쓰는 중')
-            mock.settings['image_modes'] = {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'high'}}
-            page.get_by_role('button', name='새로고침').click()
-            page.wait_for_timeout(400)
-            goto_hash('settings/images')
-            row = page.locator('#sec-images .stack', has=page.locator('b', has_text='고품질 유료 생성')).last
+            def reload_settings(modes):
+                mock.settings['image_modes'] = modes
+                page.get_by_role('button', name='새로고침').click()
+                page.wait_for_timeout(400)
+                goto_hash('settings/images')
+                return page.locator('#sec-images .stack', has=page.locator('b', has_text='고품질 유료 생성')).last
+            # 사용자가 고른 값(Flare · 아주 높음)은 그대로 쓰고, 저장해도 덮어쓰지 않음
+            row = reload_settings({'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'xhigh'}})
             expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-flare')
             expect(row).to_contain_text('내가 저장한 값을 쓰는 중')
             page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
-            assert body['image_modes'] == {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'high'}}, ('저장해 둔 값은 덮어쓰지 않음', body['image_modes'])
+            assert body['image_modes'] == {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'xhigh'}}, ('저장해 둔 값은 덮어쓰지 않음', body['image_modes'])
             row.get_by_role('button', name='기본값으로').click()
             page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
             assert body['image_modes'] == {}, ('기본값으로 → 저장 안 함', body['image_modes'])
+            # 1.5.0 화면이 저장할 때 같이 저장된 그때 기본값(Flare · 높음)은 네가 고른 값이 아니라서 새 기본값을 쓰고, 그렇게 알려줌 (1.5.1 검토)
+            n_post = len([c for c in mock.calls if c['path'] == 'settings' and c['method'] == 'POST'])
+            row = reload_settings({'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'high'}, 'fast_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'medium'}})
+            expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-sunburst')
+            expect(row).to_contain_text('1.5.0 때 설정과 같이 저장된 예전 기본값(gpt-image-2.5-flare · 높음)은 네가 고른 값이 아니라서 새 기본값을 써')
+            assert len([c for c in mock.calls if c['path'] == 'settings' and c['method'] == 'POST']) == n_post, '앱이 혼자 저장하지 않음 (저장된 값은 그대로)'
             mock.settings['image_modes'] = {}
             no_overflow('설정 > 이미지 (1.5.1)')
         check('1.5.1 진입 버튼(원고 이미지 칸·빈 자리·보관함)·보관함 상품 합성 탭·비용 따로, 설정은 고품질 기본 Sunburst · 높음이고 저장한 값은 그대로, 기본값으로 되돌리기', t_product_entries_settings)

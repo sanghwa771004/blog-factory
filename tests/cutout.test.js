@@ -204,6 +204,31 @@ describe('원본 보존 합성 (지시서 9번 1·2·4·8)', () => {
     const inner = (prod.rect.y0 + 20) * 400 + prod.rect.x0 + 20;
     assert.deepEqual(Array.from(dc.slice(inner * 4, inner * 4 + 4)), Array.from(orig.slice(inner * 4, inner * 4 + 4)), '불투명한 안쪽은 그대로');
   });
+  test('줄여서 얹을 때 작은 글자·줄무늬가 깨지지 않게 면적 평균으로 먼저 줄임 (1.5.1 검토 — 2×2 칸만 보던 때는 43·213처럼 튐)', () => {
+    // 1px 줄무늬(작은 글자처럼)인 상품: 줄이면 회색(약 128) 근처여야 함
+    const W0 = 600, H0 = 600, d = new Uint8ClampedArray(W0 * H0 * 4), m = new Uint8ClampedArray(W0 * H0);
+    for (let y = 0; y < H0; y++) for (let x = 0; x < W0; x++) {
+      const inP = x >= 50 && x < 550 && y >= 50 && y < 550, v = inP && x % 2 ? 0 : 255, i = (y * W0 + x) * 4;
+      d[i] = v; d[i + 1] = v; d[i + 2] = v; d[i + 3] = 255; if (inP) m[y * W0 + x] = 255;
+    }
+    const bg = solid(800, 600, [128, 128, 128]);
+    for (const [h, lo, hi] of [[0.25, 95, 160], [0.105, 118, 138]]) {
+      const r = composite({ bg, prod: { data: d, w: W0, h: H0 }, mask: { data: m, w: W0, h: H0 }, layer: { x: 0.5, y: 0.9, h, rot: 0, ...NOSHADOW }, W: 800, H: 600 });
+      assert.ok(r.scale < 0.5, String(r.scale));
+      const y = Math.round(r.box.top + r.box.h / 2), vals = [];
+      for (let x = Math.ceil(r.box.left) + 2; x < Math.floor(r.box.left + r.box.w) - 2; x++) vals.push(r.data[(y * 800 + x) * 4]);
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      assert.ok(Math.min(...vals) >= lo && Math.max(...vals) <= hi, `h=${h}: ${Math.min(...vals)}~${Math.max(...vals)}`);
+      assert.ok(Math.abs(mean - 127.5) < 3, `h=${h} 평균 ${mean}`);
+    }
+    // 가장자리: 투명도로 곱해서 줄이니까 원래 배경(흰색)이 상품 테두리에 번지지 않음 — 검은 상품 + 흰 배경 사진
+    const k = new Uint8ClampedArray(W0 * H0 * 4);
+    for (let i = 0; i < W0 * H0; i++) { const inP = m[i] === 255; k[i * 4] = inP ? 0 : 255; k[i * 4 + 1] = inP ? 0 : 255; k[i * 4 + 2] = inP ? 0 : 255; k[i * 4 + 3] = 255; }
+    const r2 = composite({ bg: solid(800, 600, [0, 0, 0]), prod: { data: k, w: W0, h: H0 }, mask: { data: m, w: W0, h: H0 }, layer: { x: 0.5, y: 0.9, h: 0.25, rot: 0, ...NOSHADOW }, W: 800, H: 600 });
+    let maxv = 0;
+    for (let i = 0; i < 800 * 600; i++) maxv = Math.max(maxv, r2.data[i * 4]);
+    assert.ok(maxv <= 2, `검은 상품을 검은 배경에 얹었는데 흰 테두리가 남음: ${maxv}`);
+  });
   test('레이어 설정은 images.js cleanLayer 로 정리 (원본 크기 그대로 표시 포함)', () => {
     assert.equal(cleanLayer({ one: true }).one, true);
     assert.equal(cleanLayer({ one: 'yes' }).one, false);

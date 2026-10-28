@@ -8,6 +8,9 @@
 --                     product_check(상품 디테일 검수 — 사용자가 승인해야 '사용 가능'으로 바꿀 수 있음)
 --  3. 함수: image_save(새 칸 저장), image_mask_save, image_product_check(검수 저장·승인), image_delete(합성에 쓴 원본·배경은 못 지움,
 --           마스크 파일 경로도 돌려줌), image_usage(마스크 용량 포함). 승인 없이 '사용 가능'으로 바꾸면 DB가 막음(트리거)
+--  4. 발행 막기 (트리거 — 서버·화면과 같은 규칙을 DB도): 승인 안 한 상품 장면 이미지가 자리(본문·본문 밖·본문에서 사라진 자리)에 있으면
+--     발행 준비 완료·예약·게시 완료로 못 바꾸고, 그런 글의 자리에는 못 넣음. 승인을 풀면 그 이미지를 쓰는 발행 준비·예약 글(휴지통 포함)은
+--     '검수 필요'로, 휴지통에서 되살린 발행 준비·예약 글이 걸리면 '검수 필요'로
 
 -- 1 ───────── 상품 마스크 (원본 사진은 그대로 두고 마스크만 따로)
 create table if not exists public.product_masks (
@@ -87,10 +90,73 @@ end $$;
 drop trigger if exists post_images_product_gate on public.post_images;
 create trigger post_images_product_gate before insert or update on public.post_images for each row execute function public.post_images_product_gate();
 
+-- 이 글의 자리(본문·본문 밖·본문에서 사라진 자리 모두)에 연결된 상품 장면 이미지 중 상품 디테일 검수를 승인하지 않은 것의 수
+create or replace function public.post_product_unapproved(p_post uuid) returns int
+language sql stable set search_path = '' as $$
+  select count(*)::int from public.post_image_slots s join public.post_images i on i.id = s.image_id
+   where s.post_id = p_post
+     and (i.kind = 'composite' or i.composite_mode = 'reference')
+     and coalesce((i.product_check->>'approved')::boolean, false) is not true
+$$;
+
+-- 발행 준비 완료·예약·게시(완료 뒤 단계 포함) 글의 자리에는 승인 안 한 상품 장면 이미지를 넣지 못함 (자리 연결·맞바꾸기·같은 파일 다시 올리기 등 어느 길로든)
+create or replace function public.post_image_slots_product_gate() returns trigger
+language plpgsql set search_path = '' as $$
+declare
+  i public.post_images;
+  st text;
+begin
+  if new.image_id is not null and (tg_op = 'INSERT' or new.image_id is distinct from old.image_id) then
+    select * into i from public.post_images where id = new.image_id;
+    if (i.kind = 'composite' or i.composite_mode = 'reference') and coalesce((i.product_check->>'approved')::boolean, false) is not true then
+      select stage into st from public.posts where id = new.post_id;
+      if st in ('ready', 'scheduled', 'published', 'collecting', 'analyzed') then raise exception 'product_check_needed'; end if;
+    end if;
+  end if;
+  return new;
+end $$;
+drop trigger if exists post_image_slots_product_gate on public.post_image_slots;
+create trigger post_image_slots_product_gate before insert or update of image_id on public.post_image_slots
+  for each row execute function public.post_image_slots_product_gate();
+
+-- 글을 발행 준비 완료·예약·게시 완료로 바꿀 때 (어느 길로든) 승인 안 한 상품 장면 이미지가 자리에 있으면 막음.
+-- 휴지통에서 되살린 발행 준비·예약 글이 그사이 승인을 푼 이미지를 쓰고 있으면 '검수 필요'로
+create or replace function public.posts_product_gate() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if new.stage in ('ready', 'scheduled', 'published') and new.stage is distinct from old.stage
+     and public.post_product_unapproved(new.id) > 0 then
+    raise exception 'product_check_needed';
+  end if;
+  if old.deleted_at is not null and new.deleted_at is null and new.stage in ('ready', 'scheduled')
+     and public.post_product_unapproved(new.id) > 0 then
+    new.stage := 'review';
+  end if;
+  return new;
+end $$;
+drop trigger if exists posts_product_gate on public.posts;
+create trigger posts_product_gate before update of stage, deleted_at on public.posts for each row execute function public.posts_product_gate();
+
+-- 승인을 풀면 그 이미지를 쓰는 발행 준비 완료·예약 글을 '검수 필요'로 (휴지통에 있는 글도 — 되살렸을 때 그대로 발행 준비로 남지 않게)
+create or replace function public.post_images_product_demote() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if coalesce((old.product_check->>'approved')::boolean, false) is true
+     and coalesce((new.product_check->>'approved')::boolean, false) is not true then
+    update public.posts set stage = 'review'
+     where id in (select post_id from public.post_image_slots where image_id = new.id)
+       and stage in ('ready', 'scheduled');
+  end if;
+  return null;
+end $$;
+drop trigger if exists post_images_product_demote on public.post_images;
+create trigger post_images_product_demote after update of product_check on public.post_images
+  for each row execute function public.post_images_product_demote();
+
 -- 3 ───────── 함수
 -- 이미지 저장 (017과 같음 + 1.5.1 칸: 합성 방식·원본 상품 사진·배경·마스크·레이어 설정). 상품 장면 이미지는 늘 '검수 전'으로 시작.
 -- 상품 장면은 DB도 확인: 원본 상품 사진(직접 올림 — 쓸 권한 확인 · Pexels)이 살아 있어야 하고,
--- 원본 보존 합성(종류 composite)은 AI 배경·레이어 설정·그 상품 사진의 마스크가 있어야 함. 원본 상품 사진 줄은 바꾸지 않음
+-- 원본 보존 합성(종류 composite)은 이 상품용 빈 배경(pscene_layer)·레이어 설정·그 상품 사진의 마스크가 있어야 함. 원본 상품 사진 줄은 바꾸지 않음
 create or replace function public.image_save(img jsonb, link jsonb default null, gen uuid default null, fin jsonb default null) returns jsonb
 language plpgsql set search_path = '' as $$
 declare
@@ -107,18 +173,22 @@ begin
     select * into g from public.image_generations where id = gen for update;
     if g.id is null or g.status <> '생성 중' then raise exception 'generation is not running'; end if;
   end if;
-  if nullif(img->>'product_image_id', '') is not null then
-    select * into prod from public.post_images where id = (img->>'product_image_id')::uuid and deleted_at is null;
+  if mode <> '' then
+    -- 상품 장면 결과: 원본 상품 사진이 살아 있어야 함. 같은 때 지우는 요청과 겹치지 않게 잠가 두고 확인 (for share)
+    select * into prod from public.post_images where id = nullif(img->>'product_image_id', '')::uuid and deleted_at is null for share;
     if prod.id is null or prod.kind not in ('upload', 'stock') then raise exception 'product_image_required'; end if;
     if prod.kind = 'upload' and not prod.rights_confirmed then raise exception 'rights_required'; end if;
-  elsif mode <> '' then
-    raise exception 'product_image_required';
+  elsif nullif(img->>'product_image_id', '') is not null then
+    -- 원본 보존 합성용 빈 배경 등: 상품 사진을 가리키기만 함 (만드는 사이 상품 사진이 지워졌어도 이미 돈을 낸 결과는 버리지 않음)
+    select * into prod from public.post_images where id = (img->>'product_image_id')::uuid;
   end if;
   if mode = 'layer' then
-    select * into bg from public.post_images where id = nullif(img->>'background_image_id', '')::uuid and deleted_at is null;
+    -- 배경은 이 상품용으로 만든 '빈 배경'(원본 보존 합성 배경 · AI 실사 장면 아님)만 — AI가 상품을 다시 그린 이미지 위에 얹지 않게
+    select * into bg from public.post_images where id = nullif(img->>'background_image_id', '')::uuid and deleted_at is null for share;
     if bg.id is null or bg.kind <> 'ai' then raise exception 'background_image_required'; end if;
+    if bg.preset <> 'pscene_layer' or bg.composite_mode <> '' or bg.product_image_id is distinct from prod.id then raise exception 'background_mismatch'; end if;
     if jsonb_typeof(img->'layer') is distinct from 'object' then raise exception 'layer_required'; end if;
-    select * into m from public.product_masks where id = nullif(img->>'mask_id', '')::uuid and deleted_at is null;
+    select * into m from public.product_masks where id = nullif(img->>'mask_id', '')::uuid and deleted_at is null for share;
     if m.id is null or m.image_id is distinct from prod.id then raise exception 'mask_mismatch'; end if;
   end if;
   insert into public.post_images (origin_post_id, origin_slot_index, origin_slot_key, kind, provider, model, prompt, user_prompt, style, purpose, ratio, description, alt_text,
@@ -235,6 +305,11 @@ begin
             and ((r.composite_mode in ('layer', 'reference') and r.product_image_id = p_image)
                  or (r.composite_mode = 'layer' and r.background_image_id = p_image))) into uses;
   if uses > 0 then raise exception 'image in use: %', uses; end if;
+  -- 이 사진을 참고 사진·고칠 이미지로 지금 만드는 중이면 끝날 때까지 못 지움 (만든 결과를 저장하지 못해 돈만 나가지 않게)
+  if exists (select 1 from public.image_generations g where g.status = '생성 중' and g.started_at > now() - interval '15 minutes'
+               and (g.base_image_id = p_image or g.refs @> jsonb_build_array(jsonb_build_object('image_id', p_image::text)))) then
+    raise exception 'image_generating';
+  end if;
   update public.post_images set deleted_at = now() where id = p_image;
   select coalesce(jsonb_agg(storage_path), '[]'::jsonb) into paths from public.product_masks where image_id = p_image and deleted_at is null and storage_path <> '';
   update public.product_masks set deleted_at = now() where image_id = p_image and deleted_at is null;
@@ -268,9 +343,10 @@ alter table public.product_masks enable row level security;
 revoke all on public.product_masks from anon, authenticated;
 revoke execute on function
   public.image_save(jsonb, jsonb, uuid, jsonb), public.image_mask_save(jsonb), public.image_product_check(uuid, jsonb),
-  public.image_delete(uuid), public.image_usage(), public.post_images_product_gate()
+  public.image_delete(uuid), public.image_usage(), public.post_images_product_gate(), public.post_product_unapproved(uuid),
+  public.post_image_slots_product_gate(), public.posts_product_gate(), public.post_images_product_demote()
   from public, anon, authenticated;
 grant execute on function
   public.image_save(jsonb, jsonb, uuid, jsonb), public.image_mask_save(jsonb), public.image_product_check(uuid, jsonb),
-  public.image_delete(uuid), public.image_usage()
+  public.image_delete(uuid), public.image_usage(), public.post_product_unapproved(uuid)
   to service_role;

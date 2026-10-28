@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { runGeneration, bytesToB64 } from '../supabase/functions/blog-app/image_service.js';
+import { runGeneration, bytesToB64, saveUploaded } from '../supabase/functions/blog-app/image_service.js';
+import { captionHint } from '../images.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fx = (name) => new Uint8Array(readFileSync(join(ROOT, 'tests', 'fixtures', 'img', name)));
@@ -54,5 +55,20 @@ describe('1.5.1 생성 결과 기록', () => {
     const img = d.log.rpc.find((x) => x.name === 'image_save').args.img;
     assert.deepEqual([img.composite, img.composite_mode, img.product_image_id], [false, '', '']);
     assert.equal(img.license, 'AI 생성 이미지 (OpenAI 이용 약관을 따름)');
+  });
+});
+
+describe('1.5.1 검토 뒤: 상품 장면을 배경으로 쓴 카드뉴스', () => {
+  test('원본 보존 합성 배경: 카드 기록에도 AI 배경 표시와 상품 사진 출처(Pexels 사진가)가 남고, 캡션에도 나옴', async () => {
+    const d = deps(openaiOk);
+    d.findImage = async () => null;
+    const PNG = fx('product.png');
+    const bg = { kind: 'composite', provider: 'composite', rights_confirmed: true, attribution_text: '상품 사진: 김사진 (Pexels)', source_url: 'https://www.pexels.com/photo/1', author_name: '김사진', author_url: 'https://www.pexels.com/@kim' };
+    const r = await saveUploaded(d, { bytes: PNG, declaredMime: 'image/png', kind: 'card', post: { id: 'post-1' }, slot: null, purpose: 'cards', bg });
+    assert.equal(r.ok, true, JSON.stringify(r));
+    const img = d.log.rpc.find((x) => x.name === 'image_save').args.img;
+    assert.equal(img.license, '카드뉴스 (앱에서 직접 만듦) · 배경: 원본 보존 합성 (상품 사진 + AI 배경)');
+    assert.equal(img.attribution_text, '배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경 · 상품 사진: 김사진 (Pexels)');
+    assert.match(captionHint(img), /^※ 배경은 원본 보존 합성 이미지 — .* · 상품 사진: 김사진 \(Pexels\)$/);
   });
 });

@@ -2126,7 +2126,7 @@ function secTrash() {
   if (!S.trash.length) return [h('p', { class: 'hint' }, '휴지통이 비어 있어. 지운 원고는 30일 동안 여기에 있어.')];
   return [h('div', { class: 'list' }, S.trash.map((p) => h('div', { class: 'item' },
     h('div', { class: 'main', style: 'cursor:default' }, h('b', null, titleOf(p)), h('small', null, '지운 날 ' + L.fmtTime(p.deleted_at))),
-    h('div', { class: 'side' }, h('button', { type: 'button', class: 'copy', onclick: async (ev) => { const r = await run(ev.currentTarget, () => api(`/posts/${p.id}/restore`, { method: 'POST', body: {} }), '되살렸어'); if (r) await load(); } }, '되살리기')))))];
+    h('div', { class: 'side' }, h('button', { type: 'button', class: 'copy', onclick: async (ev) => { const r = await run(ev.currentTarget, () => api(`/posts/${p.id}/restore`, { method: 'POST', body: {} }), '되살렸어'); if (r) { if (r.demoted) toast("되살렸어 — 그사이 승인을 푼 상품 이미지가 있어서 '검수 필요'로 바꿨어", 5000); await load(); } } }, '되살리기')))))];
 }
 function secGuide() {
   const g = (title, ...kids) => h('div', { class: 'gsec' }, h('h3', null, title), ...kids);

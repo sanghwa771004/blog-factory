@@ -146,7 +146,7 @@ describe("018 — 상품 디테일 검수: 승인 전에는 '사용 가능'이 �
   before(async () => {
     db = await freshDb();
     prod = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p.jpg', rights_confirmed: true, sha256: 'p1' });
-    bg = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/bg.jpg', preset: 'pscene_layer' });
+    bg = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/bg.jpg', preset: 'pscene_layer', product_image_id: prod.id });
     m = await mask(db, { image_id: prod.id });
     comp = await save(db, { kind: 'composite', provider: 'composite', storage_path: 'composite/c.jpg', layer: LAYER, product_image_id: prod.id, background_image_id: bg.id, mask_id: m.id });
     ref = await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/r.jpg', composite_mode: 'reference', product_image_id: prod.id });
@@ -204,5 +204,102 @@ describe("018 — 상품 디테일 검수: 승인 전에는 '사용 가능'이 �
     const p3 = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p3.jpg', rights_confirmed: true, sha256: 'p3', bytes: 100 });
     await mask(db, { image_id: p3.id, bytes: 2000 });
     assert.equal(Number((await val(db, `select public.image_usage()`)).storage_bytes), before + 2100);
+  });
+});
+
+describe('018 — 검토 뒤: 원본 보존 합성의 배경은 이 상품용 빈 배경만, 발행 막기는 DB도, 지우기·되살리기', () => {
+  let db, prod, prod2, plate, plate2, refImg, generic, m, comp;
+  const slot = (post, key, image) => val(db, `select public.image_slot_upsert($1, $2::jsonb)`, [post, JSON.stringify({ slot_key: key, slot_index: 0, slot_text: '자리', image_id: image })]);
+  const newPost = (stage = 'review', body = '본문\n[이미지: 거실 탁자 위 전기요]\n끝') => val(db, `insert into public.posts (keyword, body, stage) values ('상품', $1, $2) returning id`, [body, stage]);
+  const KEY = 'k:거실 탁자 위 전기요#1';
+  before(async () => {
+    db = await freshDb();
+    prod = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p.jpg', rights_confirmed: true, sha256: 'p1' });
+    prod2 = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p2.jpg', rights_confirmed: true, sha256: 'p2' });
+    plate = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/plate.jpg', preset: 'pscene_layer', product_image_id: prod.id });
+    plate2 = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/plate2.jpg', preset: 'pscene_layer', product_image_id: prod2.id });
+    refImg = await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/ref.jpg', composite_mode: 'reference', product_image_id: prod.id, preset: 'pscene_layer' });
+    generic = await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/gen.jpg', preset: 'editorial' });
+    m = await mask(db, { image_id: prod.id });
+  });
+
+  test('AI 실사 장면·일반 AI 이미지·다른 상품용 배경 위에는 원본 상품을 얹지 못함 (두 방식이 섞이지 않게)', async () => {
+    const base = { kind: 'composite', provider: 'composite', storage_path: 'composite/c.png', layer: LAYER, product_image_id: prod.id, mask_id: m.id };
+    await assert.rejects(save(db, { ...base, background_image_id: refImg.id }), /background_mismatch/, 'AI가 상품을 다시 그린 이미지');
+    await assert.rejects(save(db, { ...base, background_image_id: generic.id }), /background_mismatch/, '빈 배경으로 만든 게 아닌 AI 이미지');
+    await assert.rejects(save(db, { ...base, background_image_id: plate2.id }), /background_mismatch/, '다른 상품용으로 만든 배경');
+    comp = await save(db, { ...base, background_image_id: plate.id });
+    assert.equal(comp.composite_mode, 'layer');
+  });
+  test('빈 배경을 만드는 사이 상품 사진이 지워져도 이미 만든(돈을 낸) 배경은 저장됨 — 결과(합성·AI 실사 장면)는 여전히 살아 있는 상품 사진이 필요', async () => {
+    const p3 = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p3.jpg', rights_confirmed: true, sha256: 'p3' });
+    await val(db, `select public.image_delete($1)`, [p3.id]);
+    const pl = await save(db, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/plate3.jpg', preset: 'pscene_layer', product_image_id: p3.id });
+    assert.equal(pl.product_image_id, p3.id);
+    await assert.rejects(save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/r3.jpg', composite_mode: 'reference', product_image_id: p3.id }), /product_image_required/);
+  });
+  test('승인 안 한 상품 장면 이미지가 자리에 있으면 발행 준비 완료·예약·게시 완료로 못 바꿈 — 본문에서 사라진 자리도 (DB)', async () => {
+    const post = await newPost();
+    await slot(post, KEY, comp.id); // 검토 중인 글에는 넣을 수 있음
+    for (const st of ['ready', 'scheduled', 'published']) {
+      await assert.rejects(db.query(`update public.posts set stage = $2 where id = $1`, [post, st]), /product_check_needed/, st);
+    }
+    await db.query(`update public.post_image_slots set image_id = null where post_id = $1`, [post]);
+    await slot(post, 'k:본문에서 지운 자리#1', comp.id);
+    await assert.rejects(db.query(`update public.posts set stage = 'ready' where id = $1`, [post]), /product_check_needed/, '사라진 자리도 봄');
+    assert.equal(await val(db, `select public.post_product_unapproved($1)`, [post]), 1);
+    await check(db, comp.id, { items: ALL_OK, approve: true });
+    await db.query(`update public.posts set stage = 'ready' where id = $1`, [post]);
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [post]), 'ready');
+  });
+  test('발행 준비 완료·게시 글의 자리에는 승인 안 한 상품 장면 이미지를 못 넣음 (자리 연결·맞바꾸기·같은 파일 다시 올리기 등 어느 길로든 — DB)', async () => {
+    const post = await newPost('ready');
+    const fresh = await save(db, { kind: 'ai', provider: 'openai', storage_path: 'ai/ref2.jpg', composite_mode: 'reference', product_image_id: prod.id });
+    await assert.rejects(slot(post, KEY, fresh.id), /product_check_needed/);
+    await assert.rejects(db.query(`insert into public.post_image_slots (post_id, slot_key, image_id) values ($1, 'x:cover', $2)`, [post, fresh.id]), /product_check_needed/);
+    const live = await newPost('published');
+    await assert.rejects(slot(live, KEY, fresh.id), /product_check_needed/);
+    // 승인한 이미지·상품 장면이 아닌 이미지는 그대로
+    await slot(post, KEY, comp.id);
+    await slot(post, 'x:cover', generic.id);
+  });
+  test('승인을 풀면 그 이미지를 쓰는 발행 준비·예약 글은 휴지통에 있어도 검수 필요로, 게시 완료 글은 그대로', async () => {
+    const ready = await newPost('review'), trashed = await newPost('review'), pub = await newPost('review');
+    for (const p of [ready, trashed, pub]) await slot(p, KEY, comp.id);
+    await db.query(`update public.posts set stage = 'ready' where id = $1`, [ready]);
+    await db.query(`update public.posts set stage = 'scheduled', publish_date = current_date + 3 where id = $1`, [trashed]);
+    await db.query(`update public.posts set stage = 'published', blog_url = 'https://blog.naver.com/x/1', published_on = current_date where id = $1`, [pub]);
+    await db.query(`update public.posts set deleted_at = now() where id = $1`, [trashed]);
+    await check(db, comp.id, { items: { ...ALL_OK, text: 'issue' } });
+    const st = Object.fromEntries((await all(db, `select id, stage from public.posts where id in ($1, $2, $3)`, [ready, trashed, pub])).map((r) => [r.id, r.stage]));
+    assert.deepEqual([st[ready], st[trashed], st[pub]], ['review', 'review', 'published']);
+    await check(db, comp.id, { items: ALL_OK, approve: true });
+  });
+  test('휴지통에서 되살린 발행 준비 글이 승인 안 한 상품 이미지를 쓰고 있으면 검수 필요로 되살아남', async () => {
+    const post = await newPost('review');
+    await slot(post, KEY, comp.id);
+    await db.query(`update public.posts set stage = 'ready' where id = $1`, [post]);
+    await db.query(`update public.posts set deleted_at = now() where id = $1`, [post]);
+    // (예전 흐름 흉내) 내려 두는 트리거를 잠깐 끄고 승인을 풂 → 휴지통의 글은 발행 준비 그대로
+    await db.exec(`alter table public.post_images disable trigger post_images_product_demote`);
+    await check(db, comp.id, { items: { ...ALL_OK, shape: 'issue' } });
+    await db.exec(`alter table public.post_images enable trigger post_images_product_demote`);
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [post]), 'ready');
+    await db.query(`update public.posts set deleted_at = null where id = $1`, [post]);
+    assert.equal(await val(db, `select stage from public.posts where id = $1`, [post]), 'review');
+    await check(db, comp.id, { items: ALL_OK, approve: true });
+  });
+  test('그 사진을 참고 사진·고칠 이미지로 지금 만드는 중이면 못 지움 (결과를 저장 못 해 돈만 나가지 않게)', async () => {
+    const p4 = await save(db, { kind: 'upload', provider: 'upload', storage_path: 'upload/p4.jpg', rights_confirmed: true, sha256: 'p4' });
+    const g = await val(db, `select public.image_gen_begin($1::jsonb)`, [JSON.stringify({ request_key: 'v151-ref-0001-abcdef', provider: 'openai', model: 'gpt-image-2.5-flare', size: '1024x768', quality: 'medium', est_usd: 0.02,
+      refs: [{ image_id: p4.id, role: 'subject' }] })]);
+    await assert.rejects(val(db, `select public.image_delete($1)`, [p4.id]), /image_generating/);
+    await db.query(`update public.image_generations set status = '실패' where id = $1`, [g.id]);
+    await val(db, `select public.image_delete($1)`, [p4.id]);
+  });
+  test('새 함수도 서버 키만', async () => {
+    assert.equal(await val(db, `select has_function_privilege('anon', 'public.post_product_unapproved(uuid)', 'execute')`), false);
+    assert.equal(await val(db, `select has_function_privilege('authenticated', 'public.post_product_unapproved(uuid)', 'execute')`), false);
+    assert.equal(await val(db, `select count(*)::int from pg_trigger where tgname in ('post_image_slots_product_gate', 'posts_product_gate', 'post_images_product_demote')`), 3);
   });
 });

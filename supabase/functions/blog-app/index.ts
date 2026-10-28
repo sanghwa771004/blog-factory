@@ -324,6 +324,8 @@ function rpcError(error: { message?: string; code?: string } | null): never {
   if (/not_product_scene/.test(m)) fail(400, "not_product_scene");
   if (/product_image_required/.test(m)) fail(400, "product_image_required");
   if (/background_image_required/.test(m)) fail(400, "background_image_required");
+  if (/background_mismatch/.test(m)) fail(400, "background_mismatch");
+  if (/image_generating/.test(m)) fail(409, "image_generating");
   if (/layer_required/.test(m)) fail(400, "bad_field", { field: "layer" });
   if (/mask_mismatch/.test(m)) fail(400, "mask_mismatch");
   if (/mask_real_only/.test(m)) fail(400, "mask_real_only");
@@ -684,12 +686,16 @@ async function patchPost(c: Ctx) {
   const finalStage = String(patch.stage ?? post.stage);
   if (!checked && Object.keys(patch).some((k) => RECHECK_KEYS.has(k)) && ["ready", "scheduled"].includes(finalStage)) {
     const { result, disclosure } = await runChecks({ ...post, ...patch });
-    if (result.errors.length) { patch.stage = "review"; demoted = result.errors; }
+    // 1.5.1: 상품 장면 승인 여부도 같이 (자리 연결은 본문을 고쳐도 남아 있어서 — 사라진 자리 포함)
+    const errs = [...result.errors, ...(await productGateFor({ ...post, ...patch }))];
+    if (errs.length) { patch.stage = "review"; demoted = errs; }
     else { patch.disclosure_text = disclosure; patch.disclosure_at = nowIso(); }
   }
 
   if (!Object.keys(patch).length) fail(400, "empty");
   const { data, error } = await sb.from("posts").update(patch).eq("id", id).select().single();
+  // DB도 같은 규칙으로 막음 (그사이 다른 기기에서 승인 안 한 상품 이미지를 넣은 경우 등)
+  if (error && /product_check_needed/.test(String(error.message ?? ""))) fail(409, "check_failed", { errors: await productGateFor(merged) });
   if (error && "refresh" in patch && missingColumn(error, "refresh")) fail(409, "db_update_needed", { migration: "016" }); // 016 전 DB
   if (error) throw error;
   // 본문이 바뀌면 사진 자리 연결을 새 본문에 맞춤 (설명을 조금 고친 자리는 옮기고, 사라진 자리의 이미지는 보관함에 그대로)
@@ -716,10 +722,13 @@ async function deletePost(c: Ctx) {
   return json({ ok: true });
 }
 async function restorePost(c: Ctx) {
+  const { data: before } = await sb.from("posts").select("stage").eq("id", c.params[0]).maybeSingle();
   const { data, error } = await sb.from("posts").update({ deleted_at: null }).eq("id", c.params[0]).not("deleted_at", "is", null).select().maybeSingle();
   if (error) throw error;
   if (!data) fail(404, "not_found");
-  return json({ post: data });
+  // 1.5.1: 휴지통에 있는 사이 상품 이미지 승인을 풀었으면 DB가 '검수 필요'로 되살림 → 화면에 알려줌
+  const demoted = !!before && ["ready", "scheduled"].includes(String((before as J).stage)) && (data as J).stage === "review";
+  return json({ post: data, demoted });
 }
 async function retryPost(c: Ctx) {
   await jobLimits(1);
@@ -1706,12 +1715,21 @@ async function generateImage(c: Ctx) {
   }
   const composite = product ? product.mode === "reference" : (mode === "edit" && base?.composite === true)
     || refRows.some((x) => x.kind !== "ai" && x.kind !== "card" && refs.find((r) => r.image_id === x.id && (r.role === "subject" || r.role === "background")));
-  // 1.5.1: 상품 모양이 중요한 AI 이미지(상품 장면의 AI 실사 장면 · 실제 상품이 보여야 하는 자리에 진짜 상품 사진을 '대상 모양 유지'로 넣은 것)는
-  // 'AI 실사 장면'(composite_mode reference)으로 기록 → 상품 디테일 검수를 승인해야 '사용 가능'. 원본 상품 사진 id 를 같이 남김
+  // 1.5.1: 진짜 상품 사진(직접 올림·Pexels)을 '대상 모양 유지'로 넣어 AI가 그 상품을 다시 그린 이미지는 자리와 상관없이
+  // 'AI 실사 장면'(composite_mode reference)으로 기록 → 상품 디테일 검수를 승인해야 '사용 가능'·발행 준비 완료 (1.5.1 검토: 일반 자리도)
+  // 원본 상품 사진 id 를 같이 남김. AI 실사 장면을 고친 것도 같은 방식, 원본 보존 합성용 빈 배경을 고친 것은 그대로 빈 배경(상품 사진은 가리키기만)
   const realSubject = refRows.find((x) => ["upload", "stock"].includes(String(x.kind)) && refs.some((r) => r.image_id === x.id && r.role === "subject"));
   const productImageId = product ? String(productRow!.id) : String(realSubject?.id ?? (mode === "edit" ? base?.product_image_id ?? "" : ""));
   const compositeMode = product ? (product.mode === "reference" ? "reference" : "")
-    : productImageId && (gate.composite === true || base?.composite_mode === "reference") ? "reference" : "";
+    : realSubject || base?.composite_mode === "reference" ? "reference" : "";
+  // AI 실사 장면을 고칠 때 원본 상품 사진이 지워졌으면 돈이 나가기 전에 멈춤 (만든 뒤 저장을 못 해 결과만 버려지지 않게 — 1.5.1 검토)
+  if (compositeMode === "reference" && !realSubject && !product) {
+    if (!isUuid(productImageId)) fail(400, "product_image_required");
+    const { data: pr, error: pe } = await sb.from("post_images").select("id, kind, rights_confirmed").eq("id", productImageId).is("deleted_at", null).maybeSingle();
+    if (pe) throw pe;
+    if (!pr || !["upload", "stock"].includes(String((pr as J).kind))) fail(400, "product_image_required");
+    if ((pr as J).kind === "upload" && (pr as J).rights_confirmed !== true) fail(400, "rights_required");
+  }
   const begin = await sb.rpc("image_gen_begin", {
     p: {
       request_key: requestKey, post_id: post ? post.id : "", slot_key: slot ? slot.key : "", slot_index: slot ? slot.index : "", slot_text: slot ? slot.text : "", mode, model, size, quality,
@@ -2038,7 +2056,7 @@ async function saveMask(c: Ctx) {
 async function saveComposite(c: Ctx) {
   await need018();
   const { bytes, type, meta } = await readImageForm(c, MAX_COMPOSITE_BYTES);
-  const chk = checkImageFile(bytes, type) as J;
+  const chk = checkImageFile(bytes, type, MAX_COMPOSITE_BYTES) as J;
   if (!chk.ok) fail(400, "bad_image", { reason: chk.code });
   if (Number(chk.width) > 4096 || Number(chk.height) > 4096) fail(400, "bad_image", { reason: "too_many_pixels" });
   for (const k of ["product_image_id", "background_image_id", "mask_id"]) if (!isUuid(meta[k])) fail(400, "bad_field", { field: k });
@@ -2052,6 +2070,8 @@ async function saveComposite(c: Ctx) {
   const bg = ((rows ?? []) as J[]).find((r) => r.id === meta.background_image_id);
   if (!prod) fail(404, "product_not_found");
   if (!bg) fail(404, "background_not_found");
+  // 배경은 이 상품용으로 만든 빈 배경만 (AI 실사 장면·일반 AI 이미지에 원본 상품을 또 얹지 않게 — DB도 같은 규칙, 1.5.1 검토)
+  if (bg!.kind !== "ai" || bg!.preset !== PRODUCT_PRESETS.layer || String(bg!.composite_mode ?? "") !== "" || bg!.product_image_id !== prod!.id) fail(400, "background_mismatch");
   // 사진 자리에 바로 넣기 (선택): 새 합성은 아직 상품 검수 전이라 발행 준비 완료·예약·게시 완료 글에는 못 넣음
   let post: J | null = null, slot: J | null = null, link: J | null = null;
   if (isUuid(meta.post_id)) ({ post, slot } = await slotTarget(meta, false));
@@ -2097,20 +2117,27 @@ async function productCheck(c: Ctx) {
   if (e0) throw e0;
   if (!cur) fail(404, "not_found");
   const was = productApproved(cur);
-  const { data, error } = await sb.rpc("image_product_check", { p_image: c.params[0], p: { items, note: str(b.note, 500).trim(), approve } });
-  if (error) rpcError(error);
+  // 승인을 풀면 DB(트리거)가 이 이미지를 쓰는 발행 준비·예약 글(휴지통 포함)을 '검수 필요'로 되돌림 → 어느 글인지 먼저 찾아서 알려줌
   let demoted: string[] = [];
   if (was && !approve) {
     const { data: sl, error: e1 } = await sb.from("post_image_slots").select("post_id").eq("image_id", c.params[0]);
     if (e1) throw e1;
     const ids = [...new Set(((sl ?? []) as J[]).map((x) => String(x.post_id)))];
     if (ids.length) {
-      const { data: d2, error: e2 } = await sb.from("posts").update({ stage: "review" }).in("id", ids).in("stage", ["ready", "scheduled"]).is("deleted_at", null).select("id");
+      const { data: d2, error: e2 } = await sb.from("posts").select("id").in("id", ids).in("stage", ["ready", "scheduled"]);
       if (e2) throw e2;
       demoted = ((d2 ?? []) as J[]).map((x) => String(x.id));
     }
   }
+  const { data, error } = await sb.rpc("image_product_check", { p_image: c.params[0], p: { items, note: str(b.note, 500).trim(), approve } });
+  if (error) rpcError(error);
   return json({ image: (await withUrls([data as J]))[0], demoted });
+}
+// 카드뉴스 배경으로 상품 장면 이미지를 쓸 때도 상품 디테일 검수를 승인한 것만 (카드는 따로 검수 대상이 아니라서 — 1.5.1 검토)
+async function productBgGate(id: string) {
+  const { data, error } = await sb.from("post_images").select("kind, composite_mode, product_check").eq("id", id).maybeSingle();
+  if (error) { if (missingColumn(error, "composite_mode") || /composite_mode|product_check/.test(String(error.message ?? ""))) return; throw error; }
+  if (data && productSceneMode(data as J) && !productApproved(data as J)) fail(409, "product_check_needed");
 }
 // 발행 준비 완료·예약·게시 완료로 바꿀 때: 이 글의 자리에 연결된 상품 장면 이미지 중 승인 안 한 것 (018 전 DB면 그런 이미지가 있을 수 없어서 빈 목록)
 async function productGateFor(post: J): Promise<J[]> {
@@ -2223,8 +2250,10 @@ async function uploadImage(c: Ctx) {
   // 카드뉴스 배경으로 쓴 이미지의 출처(사진가·AI 여부)를 카드 PNG 기록에도 남김
   let bg: J | null = null;
   if (meta.kind === "card" && isUuid(meta.bg_image_id)) {
+    await productBgGate(String(meta.bg_image_id));
     const cols = "kind, provider, source_url, author_name, author_url, attribution_text, license, rights_confirmed";
-    let r0 = await sb.from("post_images").select(cols + ", composite").eq("id", meta.bg_image_id).maybeSingle();
+    let r0 = await sb.from("post_images").select(cols + ", composite, composite_mode").eq("id", meta.bg_image_id).maybeSingle();
+    if (r0.error) r0 = await sb.from("post_images").select(cols + ", composite").eq("id", meta.bg_image_id).maybeSingle();
     if (r0.error && missingColumn(r0.error, "composite")) r0 = await sb.from("post_images").select(cols).eq("id", meta.bg_image_id).maybeSingle();
     bg = (r0.data as J | null) ?? null;
   }
@@ -2448,6 +2477,7 @@ async function saveCards(c: Ctx) {
   if (b.bg_image_id !== null && b.bg_image_id !== undefined && b.bg_image_id !== "") {
     if (!isUuid(b.bg_image_id)) fail(400, "bad_field", { field: "bg_image_id" });
     bg = String(b.bg_image_id);
+    await productBgGate(bg);
   }
   const row = {
     template: oneOf(b.template ?? "clean", Object.keys(CARD_TEMPLATES), "template"), ratio: oneOf(b.ratio ?? "4:5", CARD_RATIOS as string[], "ratio"),

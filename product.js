@@ -23,6 +23,8 @@ export const PRODUCT_ERR = {
   product_check_needed: '상품 디테일 검수를 승인해야 해. 승인 전에는 사용 가능·발행 준비 완료로 못 바꿔.',
   product_check_incomplete: '아홉 칸이 모두 \'괜찮아\'여야 승인할 수 있어.',
   not_product_scene: '상품 장면으로 만든 이미지가 아니라서 상품 디테일 검수를 하지 않아.',
+  background_mismatch: '원본 보존 합성은 이 상품용으로 만든 빈 배경에만 얹을 수 있어 (AI 실사 장면·다른 이미지 위에는 안 돼). 8번에서 배경을 만들어줘.',
+  image_generating: '이 사진으로 지금 이미지를 만드는 중이야. 끝난 뒤에 지워줘.',
 };
 
 export function createProduct(ui, kit) {
@@ -73,12 +75,12 @@ export function createProduct(ui, kit) {
         if (t.mask && t.mask.url) {
           const m = await CUT.maskFromPng(t.mask.url);
           if (PS !== ps) return;
-          ps.mask = m; ps.maskSaved = t.mask; ps.maskMethod = t.mask.method; ps.maskEdited = !!t.mask.edited; ps.maskDirty = false; ps.maskRev = (ps.maskRev || 0) + 1;
+          ps.mask = m; ps.maskSaved = t.mask; ps.maskSavedMask = { data: Uint8ClampedArray.from(m.data), w: m.w, h: m.h }; ps.maskMethod = t.mask.method; ps.maskEdited = !!t.mask.edited; ps.maskDirty = false; ps.maskRev = (ps.maskRev || 0) + 1;
         }
-        if (t.background) { ps.cands = [{ image: t.background, gen: null }]; ps.pick = 0; }
+        if (t.background) { ps.cands = [{ image: t.background, gen: null, mode: 'layer' }]; ps.pick = 0; }
       } else {
         ps.result = img;
-        ps.cands = [{ image: img, gen: j.generation || null }];
+        ps.cands = [{ image: img, gen: j.generation || null, mode: 'reference' }];
         ps.pick = 0;
       }
     } catch (e) { if (e && e.code !== 'auth') toast(ui.errText(e)); }
@@ -251,7 +253,7 @@ export function createProduct(ui, kit) {
       if (ps.mask) pushUndo(ps);
       ps.mask = { data: r.mask, w: small.w, h: small.h };
       ps.maskMethod = r.method; ps.maskEdited = false; ps.maskDirty = true; ps.maskView = null; ps.maskRev = (ps.maskRev || 0) + 1;
-      ps.segNote = r.error ? `자동 배경 지우기 도구를 쓰지 못해서 간단한 방법(테두리 색)으로 했어. 결과를 확인하고 칠해서 고쳐줘. (${r.error === 'model_hash' ? '받은 도구 파일이 달라서 안 썼어' : '이 기기·브라우저에서 안 될 수 있어'})` : '';
+      ps.segNote = r.error ? `자동 배경 지우기 도구를 쓰지 못해서 간단한 방법(테두리 색)으로 했어. 결과를 확인하고 칠해서 고쳐줘. (${r.error === 'model_hash' || r.error === 'wasm_hash' ? '받은 도구 파일이 달라서 안 썼어 — 다음에 다시 받아' : '이 기기·브라우저에서 안 될 수 있어'})` : '';
     } catch (e) {
       if (PS === ps) ps.segNote = '배경을 지우지 못했어: ' + ((e && e.message) || '이유 모름');
     } finally { if (button.isConnected) { button.disabled = false; button.textContent = label; } draw(); }
@@ -260,22 +262,33 @@ export function createProduct(ui, kit) {
     const ps = PS;
     const j = await run(button, () => CUT.maskFromPng(m.url));
     if (!j || PS !== ps) return;
-    ps.mask = j; ps.maskSaved = m; ps.maskDirty = false; ps.maskMethod = m.method; ps.maskEdited = !!m.edited; ps.maskView = null; ps.maskRev = (ps.maskRev || 0) + 1;
+    ps.mask = j; ps.maskSaved = m; ps.maskSavedMask = { data: Uint8ClampedArray.from(j.data), w: j.w, h: j.h }; ps.maskDirty = false; ps.maskMethod = m.method; ps.maskEdited = !!m.edited; ps.maskView = null; ps.maskRev = (ps.maskRev || 0) + 1;
     draw();
   }
+  // 마스크 저장: 누른 때의 마스크를 저장 (저장하는 동안 칠한 건 '아직 저장 안 함'으로 남김), 두 번 눌러도 한 번만 (1.5.1 검토)
   async function saveMask(button) {
     const ps = PS;
     if (!ps.mask || !ps.product) return null;
-    const m = ps.mask;
-    const blob = await CUT.toPngBlob(CUT.maskRGBA(m.data, m.w, m.h), m.w, m.h);
-    const fd = new FormData();
-    const bb = CUT.maskBBox(m.data, m.w, m.h, 128);
-    fd.append('meta', JSON.stringify({ method: ps.maskEdited && ps.maskMethod !== 'manual' ? ps.maskMethod : ps.maskMethod || 'manual', edited: ps.maskEdited,
-      params: { model: ps.maskMethod === 'auto_u2netp' ? 'u2netp' : '' }, bbox: bb, coverage: CUT.maskCoverage(m.data) }));
-    fd.append('file', blob, 'mask.png');
-    const j = await run(button, () => api(`/images/${ps.product.id}/mask`, { method: 'POST', body: fd }), '영역을 저장했어 (원본 사진은 그대로)');
-    if (j && j.mask && PS === ps) { ps.maskSaved = j.mask; ps.maskDirty = false; ps.savedMasks = [j.mask, ...ps.savedMasks]; draw(); }
-    return j && j.mask ? j.mask : null;
+    if (ps.maskSaving) return ps.maskSaving;
+    const job = (async () => {
+      const m = ps.mask, rev = ps.maskRev || 0;
+      const data = Uint8ClampedArray.from(m.data);
+      const blob = await CUT.toPngBlob(CUT.maskRGBA(data, m.w, m.h), m.w, m.h);
+      const fd = new FormData();
+      const bb = CUT.maskBBox(data, m.w, m.h, 128);
+      fd.append('meta', JSON.stringify({ method: ps.maskEdited && ps.maskMethod !== 'manual' ? ps.maskMethod : ps.maskMethod || 'manual', edited: ps.maskEdited,
+        params: { model: ps.maskMethod === 'auto_u2netp' ? 'u2netp' : '' }, bbox: bb, coverage: CUT.maskCoverage(data) }));
+      fd.append('file', blob, 'mask.png');
+      const j = await run(button, () => api(`/images/${ps.product.id}/mask`, { method: 'POST', body: fd }), '영역을 저장했어 (원본 사진은 그대로)');
+      if (j && j.mask && PS === ps) {
+        ps.maskSaved = j.mask; ps.maskSavedMask = { data, w: m.w, h: m.h };
+        ps.maskDirty = (ps.maskRev || 0) !== rev;
+        ps.savedMasks = [j.mask, ...ps.savedMasks]; draw();
+      }
+      return j && j.mask ? j.mask : null;
+    })();
+    ps.maskSaving = job;
+    try { return await job; } finally { ps.maskSaving = null; }
   }
 
   // ── 4. 제작 목적 ──
@@ -302,7 +315,9 @@ export function createProduct(ui, kit) {
     angleSel.addEventListener('change', () => { PS.angle = angleSel.value; if (PS.layer) PS.layer = null; PS.serverEst = null; draw(); });
     const placeSel = h('select', { value: PS.place, 'aria-label': '상품 놓을 자리' }, Object.entries(IMG.PRODUCT_PLACES).map(([k, v]) => opt(k, v.label)));
     placeSel.addEventListener('change', () => { PS.place = placeSel.value; if (PS.layer) PS.layer.x = IMG.PRODUCT_PLACES[PS.place].x; PS.serverEst = null; draw(); });
-    const modeCard = (k) => h('button', { type: 'button', class: 'modecard', 'aria-pressed': String(PS.mode === k), onclick: () => { if (PS.mode !== k) { PS.mode = k; PS.cands = []; PS.pick = -1; PS.result = null; PS.parentId = ''; PS.serverEst = null; draw(); } } },
+    // 만드는 중에는 방식을 못 바꿈 (AI 실사 장면 결과가 원본 보존 합성의 배경으로 섞이지 않게 — 1.5.1 검토)
+    const modeCard = (k) => h('button', { type: 'button', class: 'modecard', 'aria-pressed': String(PS.mode === k), disabled: !!PS.busy && PS.mode !== k,
+      onclick: () => { if (PS.busy) { toast('만드는 중에는 방식을 바꿀 수 없어. 끝난 뒤에 바꿔줘.'); return; } if (PS.mode !== k) { PS.mode = k; PS.cands = []; PS.pick = -1; PS.result = null; PS.parentId = ''; PS.serverEst = null; draw(); } } },
       h('b', null, IMG.PRODUCT_MODES[k].label), h('small', null, IMG.PRODUCT_MODES[k].hint));
     return step(5, '장면과 합성 방식',
       h('div', { class: 'modecards' }, modeCard('layer'), modeCard('reference')),
@@ -441,38 +456,45 @@ export function createProduct(ui, kit) {
     const ps = PS;
     const e = estimate();
     if (whyNot(e)) return;
-    // 원본 보존 합성: 마스크를 먼저 저장 (돈 안 듦) — 합성 기록이 이 마스크를 가리킴
-    if (ps.mode === 'layer' && (!ps.maskSaved || ps.maskDirty)) {
-      const m = await saveMask(null);
-      if (!m) return;
-    }
+    // 누른 즉시 잠금 (두 번 눌러도 한 번만 — 1.5.1 검토). 방식·장면·모델은 누른 때의 값으로 묶음 끝까지 (중간에 바꿔도 섞이지 않게)
     ps.busy = true;
-    const batch = ps.count > 1 ? { id: newUuid(), keys: Array.from({ length: ps.count }, () => newKey()) } : { id: null, keys: [newKey()] };
-    // 무료 모델(FLUX.2 klein)은 참고 사진을 512px보다 작은 사본으로 받음 → 없으면 먼저 만들어 올림 (원본은 그대로)
-    if (ps.mode === 'reference' && e.c.provider === 'cloudflare' && !isTest()) {
-      try { for (const im of [ps.product, ...ps.extras]) await ensureSmall(im); } catch (err) { ps.busy = false; toast('작은 사본을 만들지 못했어: ' + ((err && err.code ? ui.errText(err) : err && err.message) || '이유 모름'), 5000); draw(); return; }
-    }
+    const mode = ps.mode, specNow = spec(), refsNow = refsOut(), modelNow = modelOf();
+    say(h('span', null, '준비하는 중…'));
+    draw();
     const made = [];
-    for (let i = 0; i < ps.count; i++) {
-      const body = {
-        request_key: batch.keys[i], product: spec(), product_image_id: ps.product.id, refs: refsOut(), post_id: ps.postId || undefined, slot_key: ps.slotKey || undefined,
-        ratio: e.ratio, quality: e.quality, model: modelOf(), confirm_usd: e.est,
-        batch: ps.count > 1 ? { id: batch.id, kind: 'candidates', index: i, total: ps.count } : undefined,
-        reserve_usd: ps.count > 1 && e.est != null ? IMG.roundUsd(e.est * (ps.count - i)) : undefined,
-      };
-      const r = await sendOne(ps, body, i, e);
-      if (!r) break;
-      made.push(r);
-      if (!r.image) break;
+    try {
+      // 원본 보존 합성: 마스크를 먼저 저장 (돈 안 듦) — 합성 기록이 이 마스크를 가리킴
+      if (mode === 'layer' && (!ps.maskSaved || ps.maskDirty)) {
+        const m = await saveMask(null);
+        if (!m) return;
+      }
+      const batch = ps.count > 1 ? { id: newUuid(), keys: Array.from({ length: ps.count }, () => newKey()) } : { id: null, keys: [newKey()] };
+      // 무료 모델(FLUX.2 klein)은 참고 사진을 512px보다 작은 사본으로 받음 → 없으면 먼저 만들어 올림 (원본은 그대로)
+      if (mode === 'reference' && e.c.provider === 'cloudflare' && !isTest()) {
+        try { for (const im of [ps.product, ...ps.extras]) await ensureSmall(im); } catch (err) { toast('작은 사본을 만들지 못했어: ' + ((err && err.code ? ui.errText(err) : err && err.message) || '이유 모름'), 5000); return; }
+      }
+      for (let i = 0; i < ps.count; i++) {
+        const body = {
+          request_key: batch.keys[i], product: specNow, product_image_id: ps.product.id, refs: refsNow, post_id: ps.postId || undefined, slot_key: ps.slotKey || undefined,
+          ratio: e.ratio, quality: e.quality, model: modelNow, confirm_usd: e.est,
+          batch: ps.count > 1 ? { id: batch.id, kind: 'candidates', index: i, total: ps.count } : undefined,
+          reserve_usd: ps.count > 1 && e.est != null ? IMG.roundUsd(e.est * (ps.count - i)) : undefined,
+        };
+        const r = await sendOne(ps, body, i, e);
+        if (!r) break;
+        made.push(r);
+        if (!r.image) break;
+      }
+    } finally {
+      ps.busy = false;
+      if (PS === ps) { say(null); }
     }
-    ps.busy = false;
     if (PS !== ps) return;
-    say(null);
     const ok = made.filter((x) => x.image);
     if (ok.length) {
-      ps.cands.push(...ok);
-      if (ps.mode === 'reference' && ps.pick < 0) ps.pick = ps.cands.length - ok.length;
-      toast(ps.mode === 'layer' ? `배경 ${ok.length}장을 만들었어. 9번에서 골라서 합성해줘.` : `장면 ${ok.length}장을 만들었어. 원본과 비교해서 골라줘.`, 4000);
+      ps.cands.push(...ok.map((x) => ({ ...x, mode })));
+      if (mode === 'reference' && ps.pick < 0) ps.pick = ps.cands.length - ok.length;
+      toast(mode === 'layer' ? `배경 ${ok.length}장을 만들었어. 9번에서 골라서 합성해줘.` : `장면 ${ok.length}장을 만들었어. 원본과 비교해서 골라줘.`, 4000);
     }
     const failed = made.filter((x) => !x.image);
     if (failed.length) toast(failed[0].generation ? `못 만든 장: ${failed[0].generation.error_message || '이유 없음'}` : '못 만들었어', 5000);
@@ -499,8 +521,7 @@ export function createProduct(ui, kit) {
           ui.load();
         }
         if (err && err.code !== 'auth') toast(ui.errText(err) + ((err.risks || []).length ? ' — ' + err.risks.map((x) => x.msg).join(' / ') : ''), 5000);
-        ps.busy = false;
-        return null;
+        return null; // 잠금은 부른 쪽(submit·doEdit)이 끝날 때 풂
       }
     }
     if (!j) return null;
@@ -520,16 +541,19 @@ export function createProduct(ui, kit) {
   }
 
   // ── 9. 후보 고르기 · 원본과 비교 ──
+  // 지금 방식으로 만든 후보만 (다른 방식의 결과가 섞이지 않게 — 1.5.1 검토)
+  const candOf = (i) => { const c = i >= 0 ? PS.cands[i] : null; return c && (!c.mode || c.mode === PS.mode) ? c : null; };
   function secCandidates() {
-    if (!PS.product || !PS.cands.length) return null;
+    const vis = PS.cands.map((c, i) => [c, i]).filter(([c]) => !c.mode || c.mode === PS.mode);
+    if (!PS.product || !vis.length) return null;
     if (PS.mode === 'layer') {
       return step(9, '배경 고르기 (원본과 같이 보기)',
         h('p', { class: 'hint' }, '배경마다 상품을 원본 그대로 얹어 본 모습이야. 마음에 드는 배경을 골라서 10번에서 위치·크기·그림자를 맞춰줘.'),
-        h('div', { class: 'grid2' }, ...PS.cands.map((c, i) => candTile(c, i))));
+        h('div', { class: 'grid2' }, ...vis.map(([c, i]) => candTile(c, i))));
     }
     return step(9, '장면 고르기 · 원본과 비교',
       h('p', { class: 'notice' }, 'AI가 상품까지 다시 그린 이미지야. 원본 사진과 모양·색·버튼·글자·로고가 같은지 하나씩 비교해줘.'),
-      h('div', { class: 'grid2' }, ...PS.cands.map((c, i) => h('div', { class: 'slot' + (PS.pick === i ? ' on' : '') }, thumb(c.image, null),
+      h('div', { class: 'grid2' }, ...vis.map(([c, i]) => h('div', { class: 'slot' + (PS.pick === i ? ' on' : '') }, thumb(c.image, null),
         h('div', { class: 'chips' }, kindChip(c.image), reviewChip(c.image)),
         h('small', { class: 'hint' }, costText(c)),
         btn(PS.pick === i ? '고른 장면 ✓' : '이 장면 고르기', PS.pick === i ? 'sm' : 'sm ghost', () => { PS.pick = i; PS.result = c.image; draw(); })))));
@@ -576,7 +600,7 @@ export function createProduct(ui, kit) {
   function secResult() {
     if (!PS.product) return null;
     if (PS.mode === 'layer') return secComposer();
-    const img = PS.pick >= 0 && PS.cands[PS.pick] ? PS.cands[PS.pick].image : null;
+    const img = candOf(PS.pick) ? candOf(PS.pick).image : null;
     if (!img) return null;
     if (!PS.el.edit) { PS.el.edit = h('textarea', { maxlength: '300', style: 'min-height:56px', placeholder: '예: 상품은 그대로 두고 뒤쪽 화분만 지워줘' }); PS.el.edit.addEventListener('input', () => { PS.editText = PS.el.edit.value; }); }
     PS.el.edit.value = PS.editText;
@@ -589,7 +613,7 @@ export function createProduct(ui, kit) {
       h('div', { class: 'go' }, btn('부분 수정 (예상 비용 확인 후)', 'sm ghost', () => editSheet(img)), btn('다시 만들기 (8번)', 'sm ghost', () => { PS.pick = -1; PS.result = null; draw(); })));
   }
   function secComposer() {
-    const c = PS.pick >= 0 ? PS.cands[PS.pick] : null;
+    const c = candOf(PS.pick);
     if (!c || !PS.mask || !PS.src) return null;
     if (!PS.layer) PS.layer = IMG.defaultLayer(spec());
     const L0 = PS.layer;
@@ -685,25 +709,32 @@ export function createProduct(ui, kit) {
   // 원래 크기로 다시 그려서 저장 (원본 상품 사진·마스크 원래 크기 — 미리보기 사본이 아님)
   async function saveComposite(button, c) {
     const ps = PS;
-    if (!ps.maskSaved || ps.maskDirty) { const m = await saveMask(null); if (!m) return; }
-    // 누른 때의 설정으로 저장 (저장하는 동안 바꾼 위치·비율·마스크는 다음 저장에 — 저장한 마스크 기록과 합성에 쓴 마스크가 어긋나지 않게 복사)
-    const key = saveKey(ps, c);
-    const snap = { layer: JSON.parse(JSON.stringify(ps.layer)), purpose: ps.purpose, ratio: IMG.ratioOf(ps.purpose, ps.ratio || prefRatio(ps.purpose)),
-      mask: { ...ps.mask, data: Uint8ClampedArray.from(ps.mask.data) }, maskId: ps.maskSaved.id, spec: spec(), parent: ps.parentId, name: ps.name, template: ps.template };
-    const j = await run(button, async () => {
-      button.textContent = '저장하는 중…';
-      const bg = await bgOf(c);
-      const o = CUT.outputSize(snap.ratio, bg.w, bg.h, (IMG.PURPOSES[snap.purpose] || IMG.PURPOSES.blog_body).out);
-      const r = CUT.makeComposer(ps.src, snap.mask)(bg, { ...snap.layer, ratio: snap.ratio }, o.W, o.H);
-      if (r.warnings.includes('empty_mask')) throw { code: 'empty_mask' };
-      const blob = await CUT.toPngBlob(r.data, o.W, o.H);
-      const fd = new FormData();
-      const desc = clean(`${snap.name || '상품'} · ${IMG.PRODUCT_TEMPLATES[snap.template].label}`).slice(0, 120);
-      fd.append('meta', JSON.stringify({ product_image_id: ps.product.id, background_image_id: c.image.id, mask_id: snap.maskId, layer: { ...snap.layer, ratio: snap.ratio }, purpose: snap.purpose, ratio: snap.ratio,
-        description: desc, spec: snap.spec, parent_image_id: snap.parent || undefined, post_id: ps.postId || undefined }));
-      fd.append('file', blob, 'composite.png');
-      return api('/images/composite', { method: 'POST', body: fd, timeout: 60000 });
-    }, '합성 이미지를 새로 저장했어 (원본은 그대로)');
+    if (ps.saving) return; // 두 번 눌러도 한 번만
+    ps.saving = true;
+    let j = null, key = '';
+    try {
+      // 합성에 쓰는 마스크 = 서버에 저장한 그 마스크 (저장하는 동안 칠했으면 한 번 더 저장 — 기록과 그림이 어긋나지 않게, 1.5.1 검토)
+      for (let i = 0; i < 2 && (!ps.maskSaved || ps.maskDirty); i++) { const m = await saveMask(null); if (!m) return; }
+      if (ps.maskDirty || !ps.maskSavedMask) { toast('영역을 고치는 중이라 저장하지 않았어. 다 칠한 뒤 다시 눌러줘.', 4000); return; }
+      // 누른 때의 설정으로 저장 (저장하는 동안 바꾼 위치·비율은 다음 저장에)
+      key = saveKey(ps, c);
+      const snap = { layer: JSON.parse(JSON.stringify(ps.layer)), purpose: ps.purpose, ratio: IMG.ratioOf(ps.purpose, ps.ratio || prefRatio(ps.purpose)),
+        mask: ps.maskSavedMask, maskId: ps.maskSaved.id, spec: spec(), parent: ps.parentId, name: ps.name, template: ps.template };
+      j = await run(button, async () => {
+        button.textContent = '저장하는 중…';
+        const bg = await bgOf(c);
+        const o = CUT.outputSize(snap.ratio, bg.w, bg.h, (IMG.PURPOSES[snap.purpose] || IMG.PURPOSES.blog_body).out);
+        const r = CUT.makeComposer(ps.src, snap.mask)(bg, { ...snap.layer, ratio: snap.ratio }, o.W, o.H);
+        if (r.warnings.includes('empty_mask')) throw { code: 'empty_mask' };
+        const blob = await CUT.toPngBlob(r.data, o.W, o.H);
+        const fd = new FormData();
+        const desc = clean(`${snap.name || '상품'} · ${IMG.PRODUCT_TEMPLATES[snap.template].label}`).slice(0, 120);
+        fd.append('meta', JSON.stringify({ product_image_id: ps.product.id, background_image_id: c.image.id, mask_id: snap.maskId, layer: { ...snap.layer, ratio: snap.ratio }, purpose: snap.purpose, ratio: snap.ratio,
+          description: desc, spec: snap.spec, parent_image_id: snap.parent || undefined, post_id: ps.postId || undefined }));
+        fd.append('file', blob, 'composite.png');
+        return api('/images/composite', { method: 'POST', body: fd, timeout: 60000 });
+      }, '합성 이미지를 새로 저장했어 (원본은 그대로)');
+    } finally { ps.saving = false; }
     if (button.isConnected) button.textContent = '합성 저장 (새 이미지로)';
     if (!j || !j.image || PS !== ps) return;
     ps.result = j.image; ps.savedId = j.image.id; ps.parentId = j.image.id; ps.savedKey = key;
@@ -750,20 +781,26 @@ export function createProduct(ui, kit) {
     };
     sel.addEventListener('change', () => { modeId = sel.value; serverEst = null; upd(); });
     const doEdit = async () => {
+      if (ps.busy) return;
       const e = est();
+      const mode = ps.mode;
       const body = { request_key: newKey(), mode: 'edit', base_image_id: base.id, edit: text, product: spec(), product_image_id: ps.product.id, refs: refsOut(),
         post_id: ps.postId || undefined, slot_key: ps.slotKey || undefined, ratio: e.ratio, quality: e.q, model: m().model, confirm_usd: e.v };
-      if (IMG.modelCaps(cm()).provider === 'cloudflare' && m().model !== TEST_MODEL) {
-        try { for (const im of [base, ...(ps.mode === 'reference' ? [ps.product, ...ps.extras] : [])]) await ensureSmall(im); } catch (err) { toast('작은 사본을 만들지 못했어: ' + ((err && err.message) || ''), 4000); return; }
-      }
-      closeSheet();
-      ps.busy = true; draw();
-      const r = await sendOne(ps, body, 0, e).catch(() => null);
-      ps.busy = false;
+      ps.busy = true; // 누른 즉시 잠금 (두 번 눌러도 한 번만)
+      goB.disabled = true;
+      let r = null;
+      try {
+        if (IMG.modelCaps(cm()).provider === 'cloudflare' && m().model !== TEST_MODEL) {
+          try { for (const im of [base, ...(mode === 'reference' ? [ps.product, ...ps.extras] : [])]) await ensureSmall(im); } catch (err) { toast('작은 사본을 만들지 못했어: ' + ((err && err.message) || ''), 4000); return; }
+        }
+        closeSheet();
+        draw();
+        r = await sendOne(ps, body, 0, e).catch(() => null);
+      } finally { ps.busy = false; if (goB.isConnected) goB.disabled = false; }
       if (PS !== ps) return;
       say(null);
-      if (r && r.image) {
-        ps.cands.push({ image: r.image, gen: r.gen });
+      if (r && r.image && ps.mode === mode) {
+        ps.cands.push({ image: r.image, gen: r.gen, mode });
         ps.pick = ps.cands.length - 1;
         if (ps.mode === 'reference') ps.result = r.image;
         ps.editText = '';
@@ -780,7 +817,7 @@ export function createProduct(ui, kit) {
 
   // ── 11. 게시글 자리에 넣기 ──
   function secInsert() {
-    const img = PS.mode === 'layer' ? (PS.result && PS.result.kind === 'composite' ? PS.result : null) : PS.pick >= 0 && PS.cands[PS.pick] ? PS.cands[PS.pick].image : null;
+    const img = PS.mode === 'layer' ? (PS.result && PS.result.kind === 'composite' ? PS.result : null) : candOf(PS.pick) ? candOf(PS.pick).image : null;
     if (!img) return null;
     const box = h('div', { class: 'stack' });
     const approved = IMG.productApproved(img);

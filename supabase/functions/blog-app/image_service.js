@@ -797,8 +797,10 @@ export async function saveUploaded(d, a) {
   const desc = String(a.description || (a.slot && a.slot.text) || '').slice(0, 500);
   // 카드뉴스 배경으로 쓴 이미지의 출처를 같이 남김 (Pexels 사진가·AI 여부가 사라지지 않게)
   const bg = kind === 'card' && a.bg ? a.bg : null;
-  // 1.5.0: 실제 사진을 참고한 AI 합성 배경은 따로 밝힘
-  const bgNote = bg ? (bg.kind === 'ai' ? (bg.composite ? 'AI 합성 이미지 (실제 사진 참고)' : 'AI 생성 이미지') : bg.provider === 'pexels' ? `Pexels 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
+  // 1.5.0: 실제 사진을 참고한 AI 합성 배경은 따로 밝힘. 1.5.1: 원본 보존 합성(상품 사진 + AI 배경)도 AI 표시를 잃지 않게
+  const bgNote = bg ? (bg.kind === 'ai' ? (bg.composite ? 'AI 합성 이미지 (실제 사진 참고)' : 'AI 생성 이미지')
+    : bg.kind === 'composite' ? '원본 보존 합성 (상품 사진 + AI 배경)'
+    : bg.provider === 'pexels' ? `Pexels 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
   const img = {
     origin_post_id: a.post ? a.post.id : '', origin_slot_index: a.slot ? a.slot.index ?? '' : '', origin_slot_key: a.slot ? a.slot.key : '',
     kind, provider: kind === 'card' ? 'cardnews' : 'upload', purpose: a.purpose || '', description: desc, alt_text: altTextFor(desc),
@@ -806,7 +808,8 @@ export async function saveUploaded(d, a) {
     license: kind === 'card' ? '카드뉴스 (앱에서 직접 만듦)' + (bgNote ? ' · 배경: ' + bgNote : '') : '직접 올림 (사용 권한 확인함)',
     rights_confirmed: kind === 'card' ? !bg || !!bg.rights_confirmed || bg.kind !== 'upload' : true,
     source_url: bg ? bg.source_url || '' : '', author_name: bg ? bg.author_name || '' : '', author_url: bg ? bg.author_url || '' : '',
-    attribution_text: bg ? bg.attribution_text || (bg.kind === 'ai' ? (bg.composite ? '배경: 실제 사진을 참고해 AI로 만든 연출 이미지' : '배경: AI로 만든 예시 이미지') : '') : '',
+    attribution_text: bg ? (bg.kind === 'composite' ? ['배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경', bg.attribution_text].filter(Boolean).join(' · ')
+      : bg.attribution_text || (bg.kind === 'ai' ? (bg.composite ? '배경: 실제 사진을 참고해 AI로 만든 연출 이미지' : '배경: AI로 만든 예시 이미지') : '')) : '',
   };
   const r = await d.rpc('image_save', { img, link, gen: null, fin: null });
   if (r.error) { await d.remove([path]); return { ok: false, status: 500, code: 'server', error: r.error }; }

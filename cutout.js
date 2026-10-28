@@ -12,6 +12,7 @@ export const MODEL_URL = './models/u2netp.onnx';
 export const MODEL_SHA256 = '309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8';
 export const ORT_URL = './vendor/onnxruntime-web/ort.wasm.bundle.min.mjs';
 export const WASM_URL = './vendor/onnxruntime-web/ort-wasm-simd-threaded.wasm';
+export const WASM_SHA256 = '3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2';
 export const CACHE_NAME = 'gf-cutout-v1';
 
 const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v);
@@ -348,6 +349,25 @@ export function composite({ bg, prod, mask, layer, W, H, decon = true }) {
   const L = cleanLayer(layer);
   return render(prepareBg(bg, W, H), prepareLayer(prod, mask, { feather: L.mask.feather, shrink: L.mask.shrink, decon }), L, W, H);
 }
+// 상품 상자를 면적 평균으로 rw×rh 까지 줄인 레이어 (투명도로 곱한 색 → 줄임 → 다시 나눔). 결과: {rgb(Float32 RGBA), alpha(Float32 0~255), w, h, bbox}
+export function reducedLayer(lp, bb, rw, rh) {
+  const pm = new Float32Array(bb.w * bb.h * 4);
+  for (let y = 0; y < bb.h; y++) {
+    for (let x = 0; x < bb.w; x++) {
+      const si = (bb.y + y) * lp.w + bb.x + x, di = (y * bb.w + x) * 4, a = lp.alpha[si] / 255;
+      pm[di] = lp.rgb[si * 4] * a; pm[di + 1] = lp.rgb[si * 4 + 1] * a; pm[di + 2] = lp.rgb[si * 4 + 2] * a; pm[di + 3] = lp.alpha[si];
+    }
+  }
+  const f = resample(pm, bb.w, bb.h, rw, rh, 4);
+  const rgb = new Float32Array(rw * rh * 4), alpha = new Float32Array(rw * rh);
+  for (let p = 0; p < rw * rh; p++) {
+    const a = f[p * 4 + 3];
+    alpha[p] = a;
+    const k = a > 1e-6 ? 255 / a : 0;
+    rgb[p * 4] = Math.min(255, f[p * 4] * k); rgb[p * 4 + 1] = Math.min(255, f[p * 4 + 1] * k); rgb[p * 4 + 2] = Math.min(255, f[p * 4 + 2] * k); rgb[p * 4 + 3] = 255;
+  }
+  return { rgb, alpha, w: rw, h: rh, bbox: { x: 0, y: 0, w: rw, h: rh } };
+}
 function render(bp, lp, L, W, H) {
   const out = new Uint8ClampedArray(W * H * 4);
   // 1) 배경 + (고른 경우) 밝기·색온도
@@ -360,8 +380,7 @@ function render(bp, lp, L, W, H) {
     base[p * 3] = r; base[p * 3 + 1] = g; base[p * 3 + 2] = b;
   }
   // 2) 상품 상자
-  const { alpha, bbox: bb, rgb } = lp;
-  const prod = { w: lp.w, h: lp.h };
+  const bb = lp.bbox;
   const warnings = [];
   if (!bb) {
     for (let p = 0; p < W * H; p++) { out[p * 4] = Math.round(base[p * 3]); out[p * 4 + 1] = Math.round(base[p * 3 + 1]); out[p * 4 + 2] = Math.round(base[p * 3 + 2]); out[p * 4 + 3] = 255; }
@@ -374,13 +393,23 @@ function render(bp, lp, L, W, H) {
   const exact = Math.abs(scale - 1) < 1e-9 && !L.rot;
   if (exact) { left = Math.round(left); top = Math.round(top); }
   if (scale > 1.05) warnings.push('upscaled');
+  // 줄일 때: 원본에서 2×2 칸만 보고 뽑으면 작은 글자·줄무늬가 깨져 보여서(계단·물결), 먼저 면적 평균으로 그 크기까지 줄인 레이어를 만든 뒤
+  // 그걸 거의 1:1로 그림 (투명도로 곱한 색을 같이 줄여서 가장자리에 원래 배경색이 섞이지 않게 — 1.5.1 검토)
+  let src = lp, sb = bb, sx = scale, sy = scale;
+  if (!exact && scale < 0.999) {
+    const rw = Math.max(1, Math.round(dw)), rh = Math.max(1, Math.round(dh));
+    if (!lp.reduced || lp.reduced.w !== rw || lp.reduced.h !== rh) lp.reduced = reducedLayer(lp, bb, rw, rh);
+    src = lp.reduced; sb = src.bbox; sx = dw / rw; sy = dh / rh;
+  }
+  const { alpha, rgb } = src;
+  const prod = { w: src.w, h: src.h };
   const rad = (L.rot * Math.PI) / 180, cos = Math.cos(rad), sin = Math.sin(rad);
   const cx = left + dw / 2, cy = top + dh / 2;
   // 결과 칸 → 상품 사진 칸 (회전은 상품 가운데 기준)
   const toProd = (x, y) => {
     const dx = x - cx, dy = y - cy;
     const ux = dx * cos + dy * sin, uy = -dx * sin + dy * cos;
-    return [bb.x + bb.w / 2 + ux / scale, bb.y + bb.h / 2 + uy / scale];
+    return [sb.x + sb.w / 2 + ux / sx, sb.y + sb.h / 2 + uy / sy];
   };
   // 돌린 상자를 덮는 결과 칸 범위
   const corners = [[-dw / 2, -dh / 2], [dw / 2, -dh / 2], [-dw / 2, dh / 2], [dw / 2, dh / 2]].map(([u, v]) => [cx + u * cos - v * sin, cy + u * sin + v * cos]);
@@ -410,8 +439,8 @@ function render(bp, lp, L, W, H) {
       const i = (Math.floor(py) * prod.w + Math.floor(px)) * 4;
       r = rgb[i]; g = rgb[i + 1]; b = rgb[i + 2];
     } else {
-      const sx = Math.min(prod.w - 1, Math.max(0, px - 0.5)), sy = Math.min(prod.h - 1, Math.max(0, py - 0.5));
-      const x0 = Math.floor(sx), y0 = Math.floor(sy), x1 = Math.min(prod.w - 1, x0 + 1), y1 = Math.min(prod.h - 1, y0 + 1), tx = sx - x0, ty = sy - y0;
+      const sxp = Math.min(prod.w - 1, Math.max(0, px - 0.5)), syp = Math.min(prod.h - 1, Math.max(0, py - 0.5));
+      const x0 = Math.floor(sxp), y0 = Math.floor(syp), x1 = Math.min(prod.w - 1, x0 + 1), y1 = Math.min(prod.h - 1, y0 + 1), tx = sxp - x0, ty = syp - y0;
       const c = (ix, iy, k) => rgb[(iy * prod.w + ix) * 4 + k];
       const lerp = (k) => { const t = c(x0, y0, k) + (c(x1, y0, k) - c(x0, y0, k)) * tx, bt2 = c(x0, y1, k) + (c(x1, y1, k) - c(x0, y1, k)) * tx; return t + (bt2 - t) * ty; };
       r = lerp(0); g = lerp(1); b = lerp(2);
@@ -477,32 +506,46 @@ export const COMPOSE_WARN = {
 };
 
 // ───────── 브라우저 전용 ─────────
-async function cachedBytes(url) {
-  let cache = null;
-  try { cache = typeof caches !== 'undefined' ? await caches.open(CACHE_NAME) : null; } catch { cache = null; }
-  if (cache) { try { const hit = await cache.match(url); if (hit) return new Uint8Array(await hit.arrayBuffer()); } catch { /* 아래로 */ } }
-  const res = await fetch(url, { cache: 'force-cache' });
-  if (!res.ok) throw new Error('fetch ' + res.status);
-  const buf = new Uint8Array(await res.arrayBuffer());
-  if (cache) { try { await cache.put(url, new Response(buf.slice(), { headers: { 'content-type': res.headers.get('content-type') || 'application/octet-stream' } })); } catch { /* 저장 공간 부족 등 — 다음에 다시 받음 */ } }
-  return buf;
-}
+// 받은 파일은 해시가 맞을 때만 이 기기에 저장하고, 저장된 것도 쓸 때마다 해시를 확인 (와이파이 로그인 화면 같은 엉뚱한 응답이나
+// 같은 주소의 새 파일이 영영 남아서 배경 지우기가 계속 '간단히'로만 되지 않게 — 1.5.1 검토). 저장 이름에 해시를 넣어서 파일이 바뀌면 새로 받음
 async function sha256Hex(bytes) {
   const d = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
+async function cachedBytes(url, sha) {
+  const key = `${url}?sha=${sha.slice(0, 16)}`;
+  let cache = null;
+  try { cache = typeof caches !== 'undefined' ? await caches.open(CACHE_NAME) : null; } catch { cache = null; }
+  if (cache) {
+    try {
+      const hit = await cache.match(key);
+      if (hit) {
+        const b = new Uint8Array(await hit.arrayBuffer());
+        if ((await sha256Hex(b)) === sha) return b;
+        await cache.delete(key);
+      }
+    } catch { /* 아래로 */ }
+  }
+  const res = await fetch(url, { cache: 'no-cache' });
+  if (!res.ok) throw new Error('fetch ' + res.status);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if ((await sha256Hex(buf)) !== sha) throw new Error(url === MODEL_URL ? 'model_hash' : 'wasm_hash');
+  if (cache) { try { await cache.put(key, new Response(buf.slice(), { headers: { 'content-type': 'application/octet-stream' } })); } catch { /* 저장 공간 부족 등 — 다음에 다시 받음 */ } }
+  return buf;
+}
+async function dropCache() { try { if (typeof caches !== 'undefined') await caches.delete(CACHE_NAME); } catch { /* 무시 */ } }
 let segP = null;
 // 배경 지우기 모델 준비 (처음 한 번 약 19MB를 받아서 이 기기에 저장해 둠 — 다음부터는 바로). 받은 모델은 해시로 확인
 export function loadSegmenter() {
   if (segP) return segP;
   segP = (async () => {
     const ort = await import(ORT_URL);
-    const [wasm, model] = await Promise.all([cachedBytes(WASM_URL), cachedBytes(MODEL_URL)]);
-    if ((await sha256Hex(model)) !== MODEL_SHA256) throw new Error('model_hash');
+    const [wasm, model] = await Promise.all([cachedBytes(WASM_URL, WASM_SHA256), cachedBytes(MODEL_URL, MODEL_SHA256)]);
     ort.env.wasm.numThreads = 1;      // GitHub Pages 는 여러 스레드를 못 씀 (cross-origin isolation 없음)
     ort.env.wasm.proxy = false;
     ort.env.wasm.wasmBinary = wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength);
-    const session = await ort.InferenceSession.create(model, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' });
+    let session;
+    try { session = await ort.InferenceSession.create(model, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' }); } catch (e) { await dropCache(); throw e; }
     return {
       async run(rgba, w, h) {
         const input = segInput(rgba, w, h);

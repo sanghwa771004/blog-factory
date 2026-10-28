@@ -6,6 +6,7 @@ import {
   IMAGE_MODES, resolveModes, modeOverrides, modelCaps, PRODUCT_MODES, PRODUCT_TEMPLATES, PRODUCT_PURPOSES, PRODUCT_PRESETS, PRODUCT_CHECKS, cleanProductSpec, buildProductScene,
   promptFromProductScene, productGate, productCheckState, preservedChecks, productSceneMode, productApproved, cleanLayer, defaultLayer, layerBox, LAYER_BG_RULES,
   productAttribution, compositeLicense, refDownscaleNote, productGateErrors, imageChecks, originLabel, captionHint, KIND_LABEL, PROMPT_RULES, isProductPreset, PRESETS, presetOf,
+  MODE_DEFAULTS_150, checkImageFile, MAX_UPLOAD_BYTES,
 } from '../images.js';
 import { reviewPrompt, productReviewPrompt, parseReview } from '../supabase/functions/blog-app/image_service.js';
 
@@ -25,6 +26,28 @@ describe('지시서 5번: 모델 기본값 — 고품질은 Sunburst(high), 빠�
   test('사용자가 예전에 저장해 둔 고품질 모드(Flare 등)는 덮어쓰지 않고 그대로 씀', () => {
     const r = resolveModes({ image_modes: { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'medium' } } }).find((m) => m.id === 'hq_paid');
     assert.deepEqual([r.model, r.quality, r.saved, r.custom], ['gpt-image-2.5-flare', 'medium', true, true]);
+  });
+  test('1.5.0 화면이 설정을 저장할 때 같이 저장한 그때 기본값(Flare · 높음)은 사용자가 고른 값으로 보지 않고 새 기본값을 씀 (1.5.1 검토)', () => {
+    assert.deepEqual(MODE_DEFAULTS_150.hq_paid, { model: 'gpt-image-2.5-flare', quality: 'high' });
+    // 1.5.0 화면은 저장할 때마다 네 모드를 다 썼음
+    const v150 = { free_draft: { model: 'cf-flux-2-klein-4b', quality: 'medium' }, fast_paid: { model: 'gpt-image-2.5-flare', quality: 'medium' },
+      hq_paid: { model: 'gpt-image-2.5-flare', quality: 'high' }, gemini_hq: { model: 'gemini-3-pro-image', quality: 'high' } };
+    const ms = resolveModes({ image_modes: v150 });
+    const hq = ms.find((m) => m.id === 'hq_paid');
+    assert.deepEqual([hq.model, hq.quality, hq.saved, hq.legacy], ['gpt-image-2.5-sunburst', 'high', false, true]);
+    // 다른 모드는 그때 기본값과 지금 기본값이 같아서 그대로 (저장해 둔 값)
+    assert.deepEqual(ms.filter((m) => m.legacy).map((m) => m.id), ['hq_paid']);
+    // 1.5.0 기본값과 다른 고품질 설정(사용자가 바꾼 것)은 그대로
+    const mine = resolveModes({ image_modes: { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'xhigh' } } }).find((m) => m.id === 'hq_paid');
+    assert.deepEqual([mine.model, mine.quality, mine.saved, mine.legacy], ['gpt-image-2.5-flare', 'xhigh', true, false]);
+    // 화면이 저장할 때: 예전 기본값은 '저장해 둔 값'이 아니라서, 기본값 그대로 두면 저장하지 않음 (저장된 값을 앱이 몰래 바꾸지는 않음 — 사용자가 저장을 누를 때만)
+    assert.deepEqual(modeOverrides(ms.map((m) => ({ id: m.id, model: m.model, quality: m.quality })), ms.filter((m) => m.saved).map((m) => m.id)),
+      { free_draft: v150.free_draft, fast_paid: v150.fast_paid, gemini_hq: v150.gemini_hq });
+  });
+  test('Flare·Sunburst 는 화면에서 이름으로 구분돼 보임', () => {
+    assert.equal(modelCaps('gpt-image-2.5-flare').label, 'GPT Image 2.5 Flare');
+    assert.equal(modelCaps('gpt-image-2.5-sunburst').label, 'GPT Image 2.5 Sunburst');
+    assert.equal(modelCaps('gpt-image-2').label, 'GPT Image 2');
   });
   test('설정 저장은 기본값과 다른 모드만 (그대로 둔 모드는 저장 안 함 → 기본값이 바뀌면 따름), 예전에 저장한 값은 지우지 않음', () => {
     const rows = IMAGE_MODES.map((m) => ({ id: m.id, model: m.model, quality: m.quality }));
@@ -132,9 +155,12 @@ describe('지시서 6번: 상품 디테일 검수 — 아홉 칸 모두 괜찮�
     assert.deepEqual(productCheckState({ ...ok, parts: 'unsure' }).unsure, ['parts']);
     assert.deepEqual(productCheckState({ ...ok, scale: undefined }).missing, ['scale']);
   });
-  test('원본 보존 합성은 픽셀이 원본이라 모양·버튼·글자는 미리 채울 수 있음 (밝기를 바꿨으면 색은 직접)', () => {
-    assert.deepEqual(preservedChecks({ tone: { b: 0, w: 0 } }), ['shape', 'color', 'details', 'text']);
-    assert.deepEqual(preservedChecks({ tone: { b: 0.1, w: 0 } }), ['shape', 'details', 'text']);
+  test('원본 보존 합성: 원본 크기 그대로·회전 0이면 픽셀이 원본이라 모양·색·버튼·글자를 미리 채움, 줄이거나 돌리면 버튼·글자는 직접 (1.5.1 검토), 밝기를 바꾸면 색도 직접', () => {
+    assert.deepEqual(preservedChecks({ one: true, rot: 0, tone: { b: 0, w: 0 } }), ['shape', 'color', 'details', 'text']);
+    assert.deepEqual(preservedChecks({ one: true, rot: 0, tone: { b: 0.1, w: 0 } }), ['shape', 'details', 'text']);
+    assert.deepEqual(preservedChecks({ one: false, tone: { b: 0, w: 0 } }), ['shape', 'color'], '줄이면 작은 글자가 흐려질 수 있음');
+    assert.deepEqual(preservedChecks({ one: true, rot: 5, tone: { b: 0, w: 0 } }), ['shape', 'color'], '돌리면 다시 뽑음');
+    assert.deepEqual(preservedChecks(null), ['shape', 'color']);
   });
   test('어느 방식인지·승인했는지 (예전 1.5.0 AI 합성은 상품 장면으로 보지 않음)', () => {
     assert.equal(productSceneMode({ kind: 'composite' }), 'layer');
@@ -184,6 +210,14 @@ describe('지시서 9번 7: 상품 디테일 검수 경고와 발행 막기', ()
     assert.match(e[0].msg, /3곳 있어 \(사진 1, 사진 3, /);
     assert.deepEqual(productGateErrors({ body }, rows.map((r) => ({ ...r, image: { ...r.image, product_check: { approved: true } } }))), []);
   });
+  test('발행 막기: 본문에서 사라진 자리에 남은 연결도 봄 (그 줄을 다시 쓰면 연결이 되살아나서 — 1.5.1 검토)', () => {
+    const gone = { slot_key: 'k:지워진 자리#1', image: { kind: 'composite', composite_mode: 'layer', product_check: null } };
+    const e = productGateErrors({ body }, [gone]);
+    assert.equal(e.length, 1);
+    assert.match(e[0].msg, /1곳 있어 \(본문에서 사라진 자리 1곳\)/);
+    assert.match(e[0].fix, /연결을 빼도 돼/);
+    assert.deepEqual(productGateErrors({ body }, [{ ...gone, image: { ...gone.image, product_check: { approved: true } } }]), []);
+  });
 });
 
 describe('AI 검수(참고용): 상품 장면은 아홉 항목으로, 두 방식을 분명히 알려줌', () => {
@@ -203,5 +237,32 @@ describe('AI 검수(참고용): 상품 장면은 아홉 항목으로, 두 방식
     const r = parseReview(raw, { refs: 1, product: 'reference' });
     assert.deepEqual(Object.keys(r.checks), ['shape', 'text']);
     assert.deepEqual(Object.keys(parseReview(raw, { refs: 1 }).checks), ['match'], '일반 검수는 예전 항목');
+  });
+});
+
+describe('1.5.1 검토 뒤 고친 것: 카드뉴스 AI 표시 · 원본 보존 합성 배경 지시문 · 합성 파일 크기', () => {
+  test('상품 장면을 배경으로 쓴 카드뉴스도 AI 표시를 잃지 않음 (Pexels 상품 사진이면 사진가도)', () => {
+    assert.equal(captionHint({ kind: 'card', license: '카드뉴스 (앱에서 직접 만듦) · 배경: 원본 보존 합성 (상품 사진 + AI 배경)', attribution_text: '배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경 · 상품 사진: 김사진 (Pexels)' }),
+      '※ 배경은 원본 보존 합성 이미지 — 실제 상품 사진에 AI로 만든 배경을 합성 (실제 사용 사진 아님) · 상품 사진: 김사진 (Pexels)');
+    assert.match(captionHint({ kind: 'card', license: '카드뉴스 (앱에서 직접 만듦) · 배경: AI 합성 이미지 (실제 사진 참고)', attribution_text: '' }), /^※ 배경은 AI 합성 이미지 — /);
+    assert.equal(captionHint({ kind: 'card', license: '카드뉴스 (앱에서 직접 만듦) · 배경: AI 생성 이미지', attribution_text: '배경: AI로 만든 예시 이미지' }), '※ 배경은 AI로 만든 예시 이미지');
+  });
+  test('원본 보존 합성의 빈 배경 지시문은 상품을 놓으라거나 상품 옆에 두라고 하지 않음 (반려동물·사용 상황·야외)', () => {
+    for (const t of ['pet', 'in_use', 'outdoor']) {
+      const p = promptFromProductScene(buildProductScene({ spec: { ...SPEC, template: t }, ratio: '4:3', size: '1280×960' }));
+      const body = p.split('\nRules:')[0];
+      assert.doesNotMatch(body, /beside the product|this kind of product|where the product would be used/i, t);
+      assert.match(p, /Do NOT draw the product/);
+    }
+    // AI 실사 장면은 상품과 함께 (그대로)
+    assert.match(promptFromProductScene(buildProductScene({ spec: { ...SPEC, mode: 'reference', template: 'pet' }, ratio: '4:3', size: '1280×960', refs: [{ image_id: 'p', role: 'subject' }] })), /The pet stays beside the product/);
+  });
+  test('파일 검사 한도는 부르는 쪽이 정함 (직접 올리기 8MB, 앱이 만든 합성 PNG는 서버가 더 크게)', () => {
+    const png = new Uint8Array(MAX_UPLOAD_BYTES + 10);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 3, 0x20, 0, 0, 2, 0x58, 8, 6, 0, 0, 0]);
+    assert.equal(checkImageFile(png, 'image/png').code, 'too_big');
+    const ok = checkImageFile(png, 'image/png', 12 * 1024 * 1024);
+    assert.equal(ok.ok, true, JSON.stringify(ok));
+    assert.deepEqual([ok.width, ok.height], [800, 600]);
   });
 });

@@ -982,15 +982,21 @@ export const IMAGE_MODES = [
 ];
 // 설정의 image_modes({모드: {model, quality}})를 반영한 모드 목록. 모르는 모델이면 그 모드는 기본 모델로 (사용자에게 알림은 설정 화면에서)
 // saved: 사용자가 저장한 값이 있는 모드인지 (기본값과 구분 — 1.5.1). custom: 기본 모델과 다른 모델인지
+// 1.5.0 화면은 설정을 저장할 때마다 모드 넷을 그때의 기본값까지 모두 저장했어. 그래서 1.5.0 기본값과 똑같이 저장된 모드는
+// 사용자가 고른 값이 아니라 그때의 기본값으로 봄 → 바뀐 기본값을 씀 (저장된 값을 지우거나 바꾸지는 않음 — 설정 화면에 그렇게 알림, 1.5.1 검토)
+export const MODE_DEFAULTS_150 = { hq_paid: { model: 'gpt-image-2.5-flare', quality: 'high' } };
 export function resolveModes(settings) {
   const o = (settings && settings.image_modes && typeof settings.image_modes === 'object') ? settings.image_modes : {};
   return IMAGE_MODES.map((d) => {
-    const x = o[d.id] && typeof o[d.id] === 'object' ? o[d.id] : {};
+    let x = o[d.id] && typeof o[d.id] === 'object' ? o[d.id] : {};
+    const old = MODE_DEFAULTS_150[d.id];
+    const legacy = !!old && x.model === old.model && (typeof x.quality === 'string' ? x.quality : old.quality) === old.quality && (old.model !== d.model || old.quality !== d.quality);
+    if (legacy) x = {};
     const model = typeof x.model === 'string' && modelCaps(x.model).known && modelCaps(x.model).usable ? x.model : d.model;
     const caps = modelCaps(model);
     const saved = typeof x.model === 'string' && model === x.model;
     return { id: d.id, label: d.label, model, quality: normQuality(model, typeof x.quality === 'string' ? x.quality : d.quality), caps, paid: !caps.free, custom: model !== d.model,
-      saved, default_model: d.model, default_quality: d.quality };
+      saved, legacy, default_model: d.model, default_quality: d.quality };
   });
 }
 // 설정 화면에서 저장할 모드: 기본값(모델·품질)과 다른 것만 (1.5.1) — 그대로 둔 모드는 저장하지 않아서 나중에 기본값이 바뀌면 그걸 따름.
@@ -1086,13 +1092,17 @@ export const PRODUCT_TEMPLATES = {
   window: { label: '자연광이 들어오는 실내', modes: ['layer', 'reference'], setting_ko: '창가 자연광이 드는 실내',
     setting_en: 'in a bright room near a window', light_en: 'soft natural daylight coming from a side window, gentle shadows' },
   outdoor: { label: '야외 환경', modes: ['layer', 'reference'], setting_ko: '제품과 어울리는 야외',
-    setting_en: 'outdoors in a calm setting that suits this kind of product (for example a patio table or a park bench)', light_en: 'natural outdoor light, not harsh midday sun' },
+    setting_en: 'outdoors in a calm setting that suits this kind of product (for example a patio table or a park bench)', light_en: 'natural outdoor light, not harsh midday sun',
+    // 원본 보존 합성의 빈 배경에는 '제품' 이야기를 하지 않음 (상품을 그리게 할 수 있어서 — 1.5.1 검토)
+    layer_setting_en: 'outdoors in a calm, pleasant setting such as a patio table or a park bench' },
   in_use: { label: '제품을 사용하는 상황', modes: ['layer', 'reference'], setting_ko: '이런 제품을 보통 쓰는 자리',
     setting_en: 'in the place where this kind of product is normally used, shown as an ordinary situation',
+    layer_setting_en: 'in an ordinary, lived-in everyday place (follow the author\'s extra direction for the exact place, if given)',
     note_en: 'If a person is needed, show only hands or a back view with no face. It must not look like a customer review, testimonial or proof-of-use photo.',
     note_ko: '사람이 필요하면 손이나 뒷모습만 — 후기·인증 사진처럼 보이면 안 됨' },
   pet: { label: '반려동물과 함께 있는 장면', modes: ['layer', 'reference'], setting_ko: '반려동물이 근처에 있는 집 안',
     setting_en: 'at home with a pet resting calmly nearby', note_en: 'The pet stays beside the product and does not cover it; natural anatomy.',
+    layer_note_en: 'The pet rests calmly to one side, away from the empty resting spot; it never steps onto, covers or casts a shadow over that spot; natural anatomy.',
     note_ko: '반려동물은 제품 옆에 — 제품을 가리지 않게' },
   studio: { label: '깔끔한 제품 스튜디오', modes: ['layer', 'reference'], setting_ko: '이음매 없는 배경지의 스튜디오',
     setting_en: 'in a clean photo studio with a seamless backdrop and a simple surface', light_en: 'a large softbox key light with gentle fill light' },
@@ -1175,12 +1185,12 @@ export function promptFromProductScene(sc) {
     else L.push('Keep the product exactly as it is in the image (same shape, colors, buttons, printing and logos); keep the composition, background and lighting unless the request asks otherwise.');
   } else if (layer) {
     L.push(`Image type: Photograph — an empty background plate for product compositing; the final picture should read as ${Pp.look_en}.`);
-    L.push(`Scene: ${T.setting_en}.${T.light_en ? ` Light: ${T.light_en}.` : ''}`);
+    L.push(`Scene: ${T.layer_setting_en || T.setting_en}.${T.light_en ? ` Light: ${T.light_en}.` : ''}`);
     L.push(`Empty resting spot: a clear, flat, uncluttered part of the surface ${Pl.en}, large enough for an object about ${Math.round(Pp.size * 100)}% of the image height to stand on.`);
     L.push(`Camera: ${A.en}. Keep perspective natural and surface lines level so a product photographed from this angle fits in.`);
     L.push('Light direction: soft and consistent, coming from one side, so a product added later can match; no colored light and no strong spotlight on the empty spot.');
-    if (T.note_en && sc.template !== 'in_use') L.push(T.note_en);
-    if (sc.template === 'in_use') L.push('Show only the setting where the product would be used; no people.');
+    if ((T.layer_note_en || T.note_en) && sc.template !== 'in_use') L.push(T.layer_note_en || T.note_en);
+    if (sc.template === 'in_use') L.push('Show only the setting itself; no people.');
   } else {
     L.push(`Image type: Photograph — ${Pp.look_en}.`);
     L.push(`Scene: the product from the reference photo(s) ${T.setting_en}, placed ${Pl.en}.${T.light_en ? ` Light: ${T.light_en}.` : ''}`);
@@ -1226,9 +1236,12 @@ export const PRODUCT_CHECKS = [
 ];
 export const PRODUCT_VERDICTS = { ok: '괜찮아', issue: '문제 있어', unsure: '모르겠어' };
 // 원본 보존 합성에서 미리 '괜찮아'로 채우는 칸 (픽셀을 다시 만들지 않았으니까). 상품 밝기를 바꿨으면 색은 빼고, 구성품은 배경 지우기에서 잘렸을 수 있어서 늘 직접 확인
+// 줄이거나 돌리면 원본 픽셀을 다시 뽑아서 작은 글자·버튼이 흐려질 수 있어 → 그 칸은 '원본 크기 그대로'·회전 0일 때만 미리 채움 (1.5.1 검토)
 export function preservedChecks(layer) {
-  const tone = layer && layer.tone && (Number(layer.tone.b) || Number(layer.tone.w));
-  return tone ? ['shape', 'details', 'text'] : ['shape', 'color', 'details', 'text'];
+  const L = layer && typeof layer === 'object' ? layer : {};
+  const tone = L.tone && (Number(L.tone.b) || Number(L.tone.w));
+  const exact = L.one === true && !Number(L.rot);
+  return ['shape', ...(tone ? [] : ['color']), ...(exact ? ['details', 'text'] : [])];
 }
 // 검수 상태: 모든 칸이 '괜찮아'여야 승인할 수 있음 (하나라도 '문제 있어'·'모르겠어'·빈칸이면 못 함)
 export function productCheckState(items) {
@@ -1309,16 +1322,19 @@ export function refDownscaleNote(model, mode = 'reference') {
   if (mode !== 'reference' || !c.known || !c.refSmall) return '';
   return `${c.label}은 참고 사진을 ${c.refSmall}px보다 작게 줄여서 받아. 작은 로고·상품 글자·버튼은 남지 않거나 바뀔 수 있어 — 초안으로만 쓰고, 상품 모양이 중요하면 '원본 보존 합성'을 써줘.`;
 }
-// 발행 준비 완료·예약·게시 완료로 바꿀 때 막는 것: 지금 본문 자리에 연결된 상품 장면 이미지 중 상품 디테일 검수를 승인하지 않은 것 (서버·화면 같은 판단)
+// 발행 준비 완료·예약·게시 완료로 바꿀 때 막는 것: 이 글의 자리(본문·본문 밖·본문에서 사라진 자리 모두)에 연결된 상품 장면 이미지 중
+// 상품 디테일 검수를 승인하지 않은 것 (서버·화면·DB 같은 판단 — 사라진 자리도 보는 건 그 줄을 다시 쓰면 연결이 되살아나서, 1.5.1 검토)
 // rows: [{slot_key, image: {kind, composite_mode, product_check}}]
 export function productGateErrors(post, rows) {
   const slots = parseSlots(post && post.body);
-  const byKey = new Map((rows || []).filter((r) => r && r.image).map((r) => [r.slot_key, r.image]));
-  const ns = slots.filter((s) => { const img = byKey.get(s.key); return img && productSceneMode(img) && !productApproved(img); }).map((s) => '사진 ' + s.n);
-  // 본문 밖 자리(대표 이미지 등)도 같이 봄
-  for (const r of rows || []) if (r && r.image && isExtraKey(r.slot_key) && productSceneMode(r.image) && !productApproved(r.image)) ns.push((extraSlot(r.slot_key) || {}).label || '본문 밖 자리');
-  return ns.length ? [{ code: 'product_check_needed', msg: `상품 디테일 검수를 승인하지 않은 상품 이미지가 ${ns.length}곳 있어 (${ns.join(', ')}).`,
-    fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘. 승인 전에는 발행 준비 완료·예약·게시 완료로 못 바꿔." }] : [];
+  const byKey = new Map(slots.map((s) => [s.key, s]));
+  const bad = (rows || []).filter((r) => r && r.image && productSceneMode(r.image) && !productApproved(r.image));
+  const body = bad.map((r) => byKey.get(r.slot_key)).filter(Boolean).sort((a, b) => a.n - b.n).map((s) => '사진 ' + s.n);
+  const extra = bad.filter((r) => !byKey.has(r.slot_key) && isExtraKey(r.slot_key)).map((r) => (extraSlot(r.slot_key) || {}).label || '본문 밖 자리');
+  const gone = bad.filter((r) => !byKey.has(r.slot_key) && !isExtraKey(r.slot_key)).length;
+  const ns = [...body, ...extra, ...(gone ? [`본문에서 사라진 자리 ${gone}곳`] : [])];
+  return bad.length ? [{ code: 'product_check_needed', msg: `상품 디테일 검수를 승인하지 않은 상품 이미지가 ${bad.length}곳 있어 (${ns.join(', ')}).`,
+    fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘 (본문에서 사라진 자리면 그 연결을 빼도 돼). 승인 전에는 발행 준비 완료·예약·게시 완료로 못 바꿔." }] : [];
 }
 
 // 프롬프트 토큰 수 어림: 영어·숫자는 약 3.5글자에 1토큰, 한글 등은 1글자에 1.2토큰으로 넉넉하게 (실제 사용량이 오면 그걸로 다시 계산)
@@ -1500,10 +1516,11 @@ export function sniffImage(bytes) {
   return null;
 }
 // 올린 파일이 쓸 수 있는지: 형식(실제 내용)·크기·가로세로·움직이는 이미지 여부
-export function checkImageFile(bytes, declaredMime) {
+// maxBytes: 직접 올리기는 8MB, 앱이 만든 합성 PNG(다시 압축하지 않음)는 서버가 더 크게 (1.5.1)
+export function checkImageFile(bytes, declaredMime, maxBytes = MAX_UPLOAD_BYTES) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
   if (!b.length) return { ok: false, code: 'empty', msg: '파일이 비어 있어.' };
-  if (b.length > MAX_UPLOAD_BYTES) return { ok: false, code: 'too_big', msg: `파일이 너무 커. ${Math.round(MAX_UPLOAD_BYTES / 1048576)}MB까지 올릴 수 있어.` };
+  if (b.length > maxBytes) return { ok: false, code: 'too_big', msg: `파일이 너무 커. ${Math.round(maxBytes / 1048576)}MB까지 올릴 수 있어.` };
   const s = sniffImage(b);
   if (!s) return { ok: false, code: 'bad_type', msg: 'JPEG·PNG·WebP 이미지만 올릴 수 있어. (파일 이름만 바꾼 파일도 안 돼)' };
   if (declaredMime && ALLOWED_MIME.includes(declaredMime) && declaredMime !== s.mime) return { ok: false, code: 'type_mismatch', msg: '파일 내용과 형식이 달라. 원래 이미지 파일을 올려줘.' };
@@ -1654,7 +1671,14 @@ export function captionHint(img) {
   if (img.provider === 'pexels') return attributionFor(img);
   // 카드뉴스: 배경으로 쓴 이미지의 출처를 그대로 (AI 배경이면 AI 표시, Pexels 배경이면 사진가)
   if (img.kind === 'card') {
-    if (/배경: AI|AI로 만든/.test(String(img.license || '') + ' ' + String(img.attribution_text || ''))) return '※ 배경은 AI로 만든 예시 이미지';
+    const t = String(img.license || '') + ' ' + String(img.attribution_text || '');
+    // 1.5.1: 상품 장면을 배경으로 쓴 카드도 AI 표시를 잃지 않게 (원본 보존 합성 · AI 합성 이미지)
+    if (/원본 보존 합성/.test(t)) {
+      const credit = /상품 사진: [^·]+\(Pexels\)/.exec(String(img.attribution_text || ''));
+      return '※ 배경은 원본 보존 합성 이미지 — 실제 상품 사진에 AI로 만든 배경을 합성 (실제 사용 사진 아님)' + (credit ? ` · ${credit[0].trim()}` : '');
+    }
+    if (/AI 합성 이미지|실제 사진을 참고해 AI/.test(t)) return '※ 배경은 AI 합성 이미지 — 실제 사진을 참고해 AI로 만든 연출 이미지 (실제 사용 사진 아님)';
+    if (/배경: AI|AI로 만든/.test(t)) return '※ 배경은 AI로 만든 예시 이미지';
     return String(img.attribution_text || '');
   }
   // 직접 올린 사진: 고른 출처대로 (직접 촬영·출처 미확인은 캡션 없음). 구체적인 출처 이름은 이미지 검사 '참고'에서 적으라고 알려줌

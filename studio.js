@@ -807,7 +807,8 @@ export function createStudio(ui) {
         !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).msg || sr.msg) : '',
         !own && realNeeded && f.refs.some((r) => r.role === 'subject' && !IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "AI로 만든 이미지는 '대상 모양 유지'로 넣어도 진짜 제품 사진이 아니라서 실제 상품 자리를 채우지 못해. 직접 올린 사진이나 Pexels 사진을 넣어줘.") : '',
         !own && realNeeded ? genericRow : '',
-        gate.composite ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼. 상품 모양이 중요한 자리라 상품 디테일 검수에서 원본과 비교해 승인해야 써 (상품을 원본 그대로 쓰려면 '이 상품으로 장면 만들기'의 원본 보존 합성).") : '');
+        // 1.5.1: 진짜 상품 사진을 '대상 모양 유지'로 넣으면 자리와 상관없이 AI 실사 장면으로 기록 → 상품 디테일 검수 필요 (서버와 같은 판단)
+        gate.composite || f.refs.some((r) => r.role === 'subject' && IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼. AI가 상품을 다시 그려서 상품 디테일 검수에서 원본과 비교해 승인해야 써 (상품을 원본 그대로 쓰려면 '이 상품으로 장면 만들기'의 원본 보존 합성).") : '');
       const u = usage();
       const fx = Number(st.image_fx_krw) || 0;
       const over = u && lastTotal != null && Number(u.month_usd) + lastTotal > Number(u.budget_usd) + 1e-9;
@@ -1020,7 +1021,7 @@ export function createStudio(ui) {
         h('div', { class: 'chips' }, kindChip(img), reviewChip(img)),
         h('p', { class: 'hint' }, `${g.model} · ${img.width}×${img.height} · 품질 ${IMG.qualityLabel(g.model, g.quality)}${secs ? ` · ${secs}초` : ''} · 비용 ${usd(c.usd)} (${c.label})`),
         btn(single ? `이 이미지 쓰기 → ${slotName(s)}에 연결` : `이걸로 쓰기 → ${slotName(s)}`, single ? 'wide' : 'sm', async (ev) => { const j = await linkTo(p, s, img, ev.currentTarget, IMG.PURPOSES[g.purpose] ? { purpose: g.purpose } : null); if (j) closeSheet(); }),
-        IMG.productSceneMode(img) ? h('p', { class: 'notice' }, "실제 상품이 보여야 하는 자리에 진짜 상품 사진을 참고해서 만든 'AI 합성 이미지'야. 상품 디테일 검수에서 원본과 비교해서 승인해야 써.") : null,
+        IMG.productSceneMode(img) ? h('p', { class: 'notice' }, "진짜 상품 사진을 참고해서 AI가 상품까지 다시 그린 'AI 합성 이미지'야. 상품 디테일 검수에서 원본과 비교해서 승인해야 써.") : null,
         h('div', { class: 'go' },
           IMG.productSceneMode(img) ? btn('상품 디테일 검수', 'sm', () => prd().checkSheet(img, { onDone: (im) => { Object.assign(img, im); refresh(p.id); } })) : null,
           btn('AI 검수 (참고용)', 'sm ghost', () => reviewSheet(p, img, { back: () => (single ? showResult(g, img) : showBatch()), slot: s })),
@@ -1791,8 +1792,9 @@ export function createStudio(ui) {
     const ad = h('input', { type: 'checkbox', checked: !!dk.ad_label, onchange: (e) => { dk.ad_label = e.target.checked; changed(); } });
     const bgBox = h('div', { class: 'grid3' });
     const bgNote = h('div');
-    // '사용 안 함'으로 표시한 이미지는 배경 후보에서 뺌
-    const bgChoices = (d.images || []).filter((i) => i.kind !== 'card' && (i.review_status !== '사용 안 함' || i.id === dk.bg_image_id));
+    // '사용 안 함'으로 표시한 이미지는 배경 후보에서 뺌. 1.5.1: 상품 디테일 검수를 승인하지 않은 상품 장면 이미지도 (카드는 따로 검수하지 않아서 — 서버도 막음)
+    const bgChoices = (d.images || []).filter((i) => i.kind !== 'card' && (i.review_status !== '사용 안 함' || i.id === dk.bg_image_id)
+      && (!IMG.productSceneMode(i) || IMG.productApproved(i) || i.id === dk.bg_image_id));
     const drawBg = () => {
       put(bgBox,
         h('button', { type: 'button', class: 'pick' + (!dk.bg_image_id ? ' sel' : ''), onclick: () => { dk.bg_image_id = null; drawBg(); changed(); } }, h('span', { class: 'ph' }, '배경 없음'), h('small', null, '표지 배경')),
@@ -1801,7 +1803,9 @@ export function createStudio(ui) {
       put(bgNote,
         cur && cur.kind === 'ai' ? h('p', { class: 'notice' }, "AI로 만든 배경이야. 인스타에 올릴 때 캡션에 'AI로 만든 이미지'라고 같이 적어줘 (실제 사진처럼 보이지 않게).") : null,
         cur && cur.kind === 'stock' ? h('p', { class: 'hint' }, `배경 사진: ${cur.attribution_text || 'Pexels'} — 캡션에 출처를 같이 적으면 좋아.`) : null,
-        cur && cur.review_status === '사용 안 함' ? h('p', { class: 'badbox' }, "'사용 안 함'으로 표시한 이미지야. 다른 배경을 골라줘.") : null);
+        cur && cur.review_status === '사용 안 함' ? h('p', { class: 'badbox' }, "'사용 안 함'으로 표시한 이미지야. 다른 배경을 골라줘.") : null,
+        cur && IMG.productSceneMode(cur) && !IMG.productApproved(cur) ? h('p', { class: 'badbox' }, '상품 디테일 검수를 승인해야 카드뉴스 배경으로 쓸 수 있어. 다른 배경을 고르거나 먼저 승인해줘.') : null,
+        cur && cur.kind === 'composite' ? h('p', { class: 'notice' }, "원본 보존 합성 이미지야 (상품은 실제 사진, 배경은 AI). 캡션에 '실제 상품 사진에 AI 배경을 합성한 이미지'라고 같이 적어줘.") : null);
     };
     drawBg();
     const list = h('div', { class: 'stack' });
@@ -2120,21 +2124,25 @@ export function createStudio(ui) {
       const info = h('small', { class: 'hint' });
       const tag = h('small', { class: 'hint' });
       const row = { m, ms, qs, keep: m.saved };
+      let resetQ = '';
       const draw = () => {
         const c = IMG.modelCaps(ms.value);
-        const cur = qs.value || m.quality;
+        const cur = resetQ || qs.value || m.quality;
+        resetQ = '';
         put(qs, ...IMG.qualitiesFor(ms.value).map((q) => opt(q, IMG.qualityLabel(ms.value, q))));
         qs.value = IMG.normQuality(ms.value, cur);
         const size = IMG.sizeFor('blog_body', '4:3', ms.value, qs.value);
         const est = IMG.estimateUsd({ quality: qs.value, size, promptTokens: 900, prices: pr, model: ms.value });
         info.textContent = `${IMG.PROVIDERS[c.provider] ? IMG.PROVIDERS[c.provider].label : '?'} · ${c.free ? '무료' : est == null ? '가격 계산 못 함' : `블로그 본문 4:3 한 장 예상 약 ${usd(est)}`} · 참고 사진 ${c.refsMax ? c.refsMax + '장까지' : '못 받음'} · 고치기 ${c.edit ? '됨' : '안 됨'}`;
         const isDefault = ms.value === m.default_model && qs.value === IMG.normQuality(m.default_model, m.default_quality);
-        tag.textContent = `기본값: ${m.default_model} · ${IMG.qualityLabel(m.default_model, m.default_quality)} — ${row.keep ? (isDefault ? '저장해 둔 값 (기본값과 같음)' : '내가 저장한 값을 쓰는 중') : isDefault ? '기본값을 쓰는 중 (앱이 기본값을 바꾸면 따라감)' : '바꾼 값 (저장하면 이걸로)'}`;
+        const legacyNote = m.legacy && !row.keep && isDefault ? ` · 1.5.0 때 설정과 같이 저장된 예전 기본값(${IMG.MODE_DEFAULTS_150[m.id].model} · ${IMG.qualityLabel(IMG.MODE_DEFAULTS_150[m.id].model, IMG.MODE_DEFAULTS_150[m.id].quality)})은 네가 고른 값이 아니라서 새 기본값을 써 — 예전 값을 쓰려면 골라서 저장해` : '';
+        tag.textContent = `기본값: ${m.default_model} · ${IMG.qualityLabel(m.default_model, m.default_quality)} — ${row.keep ? (isDefault ? '저장해 둔 값 (기본값과 같음)' : '내가 저장한 값을 쓰는 중') : isDefault ? '기본값을 쓰는 중 (앱이 기본값을 바꾸면 따라감)' : '바꾼 값 (저장하면 이걸로)'}${legacyNote}`;
       };
       ms.addEventListener('change', () => { qs.value = ''; draw(); });
       qs.addEventListener('change', draw);
       draw();
-      const reset = btn('기본값으로', 'sm ghost', () => { row.keep = false; ms.value = m.default_model; qs.value = ''; draw(); ui.markDirty(); toast(`'${m.label}'을 기본값으로 바꿨어. 저장을 눌러줘.`); });
+      // 기본값으로: 모델과 품질 둘 다 기본값 (저장해 둔 품질이 남지 않게)
+      const reset = btn('기본값으로', 'sm ghost', () => { row.keep = false; ms.value = m.default_model; resetQ = m.default_quality; draw(); ui.markDirty(); toast(`'${m.label}'을 기본값으로 바꿨어. 저장을 눌러줘.`); });
       row.el = h('div', { class: 'stack' }, h('b', null, m.label), h('div', { class: 'row' }, field('모델', ms), field('품질', qs)), info, h('div', { class: 'go' }, tag, reset));
       return row;
     });
