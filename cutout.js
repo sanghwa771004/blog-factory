@@ -532,7 +532,7 @@ export async function decodeImage(src, maxSide = 0) {
   const data = ctx.getImageData(0, 0, w, h).data;
   if (bmp.close) bmp.close();
   cv.width = 0; cv.height = 0;
-  return { data, w, h, blob };
+  return { data, w, h, blob, srcW: W, srcH: H, scaled: s < 1 }; // scaled: 원래 사진이 maxSide 보다 커서 줄여 읽었는지
 }
 export function rgbaCanvas(data, w, h) {
   const cv = document.createElement('canvas');

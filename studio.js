@@ -568,7 +568,9 @@ export function createStudio(ui) {
         img && img.kind === 'ai' ? btn('이 이미지 고쳐서 만들기 (편집)', 'wide ghost', () => genSheet(p, s, { base: img })) : null,
         btn('실제 사진 찾기 (Pexels)', 'wide ghost', () => stockSheet(p, s)),
         btn('파일 올리기', 'wide ghost', () => uploadSheet(p, s)),
-        btn('보관함에서 고르기', 'wide ghost', () => pickSheet(p, s))));
+        btn('보관함에서 고르기', 'wide ghost', () => pickSheet(p, s)),
+        // 1.5.1: 상품 사진으로 장면 만들기 ('(직접 찍기)' 자리는 빼고)
+        s.n && IMG.isOwnPhotoSlot(s.text) ? null : btn('상품 사진으로 장면 만들기', 'wide ghost', () => { closeSheet(); prd().start({ postId: p.id, slotKey: s.key }); })));
   }
   function moveSheet(p, d, o, img) {
     const slots = d.slots || [];
@@ -2015,6 +2017,11 @@ export function createStudio(ui) {
         j.scenes ? h('span', { class: 'hint' }, `이 사진으로 만든 장면 ${j.scenes}개`) : null) : null,
       IMG.productSceneMode(img) ? h('div', { class: 'stack' },
         h('p', { class: img.kind === 'composite' ? 'hint' : 'notice' }, img.kind === 'composite' ? '원본 보존 합성 — 상품은 원본 사진 픽셀 그대로, 배경은 AI.' : 'AI 실사 장면 — AI가 상품까지 다시 그렸어 (작은 글자·로고가 바뀌었을 수 있어).'),
+        // 무엇으로 만들었는지: 원본 상품 사진 · AI 배경 · 합성 설정·마스크 (지워졌으면 그렇게)
+        j.product ? h('div', { class: 'cmp' },
+          h('figure', null, j.product.product ? thumb(j.product.product, null) : h('p', { class: 'hint' }, '지워진 사진'), h('figcaption', null, '원본 상품 사진')),
+          img.kind === 'composite' ? h('figure', null, j.product.background ? thumb(j.product.background, null) : h('p', { class: 'hint' }, '지워진 배경'), h('figcaption', null, 'AI 배경')) : null) : null,
+        img.kind === 'composite' && img.layer ? h('p', { class: 'hint' }, layerLine(img.layer, j.product && j.product.mask)) : null,
         j.product && j.product.costs ? h('p', { class: 'hint' }, [j.product.costs.model ? `모델 비용 ${usd(genCost(j.product.costs.model) ? genCost(j.product.costs.model).usd : 0)} (${j.product.costs.model.cost_status})` : '', j.product.costs.cutout ? `배경 지우기 ${usd(j.product.costs.cutout.cost_usd)} (${j.product.costs.cutout.cost_status})` : ''].filter(Boolean).join(' · ')) : null,
         h('div', { class: 'go' }, btn(IMG.productApproved(img) ? '상품 디테일 검수 (승인함)' : '상품 디테일 검수 · 승인', 'sm', () => prd().checkSheet(img, { onDone: () => { if (onChange) onChange(); } })),
           btn('상품 장면 화면에서 이어 하기', 'sm ghost', () => { closeSheet(); prd().start({ resume: img.id }); }))) : null,
@@ -2027,6 +2034,15 @@ export function createStudio(ui) {
         }, { disabled: false })),
       h('p', { class: 'hint' }, inUse ? '원고(휴지통 포함)나 카드뉴스에서 쓰는 중이라 지울 수 없어. 먼저 연결을 빼줘.' : '지우면 파일은 없어지고, 비용·출처 기록은 남아.'));
     ui.setSheetOnClose(() => { if (ctrl && !orig) ctrl.abort(); });
+  }
+
+  // 원본 보존 합성의 설정 한 줄 (보관함 미리보기)
+  function layerLine(layer, mk) {
+    const c = IMG.cleanLayer(layer);
+    const pct = (v) => Math.round(v * 100) + '%';
+    return ['합성 설정: 가로 ' + pct(c.x) + ' · 바닥 ' + pct(c.y), c.one ? '원본 크기 그대로' : '크기 ' + pct(c.h), `회전 ${c.rot}°`, '그림자 ' + pct(c.shadow.o),
+      c.tone.b || c.tone.w ? '상품 밝기·색온도 바꿈' : '상품 색 그대로', c.ratio ? '비율 ' + c.ratio : '',
+      mk ? `마스크: ${IMG.MASK_METHODS[mk.method] || mk.method || '직접 칠함'}${mk.edited ? ' · 손으로 고침' : ''}` : ''].filter(Boolean).join(' · ');
   }
 
   // ═════════ 설정 > 이미지 ═════════

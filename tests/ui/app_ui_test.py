@@ -787,7 +787,7 @@ class Mock:
                 return 200, {'provider': 'pexels', 'photos': [], 'total': 0, 'page': 1, 'has_next': False, 'remaining': 199}
             photos = [{'id': 1000 + n, 'width': w, 'height': h, 'alt': f'사진 {n}', 'photographer': f'사진가 {n}', 'photographer_url': f'https://www.pexels.com/@p{n}',
                        'url': f'https://www.pexels.com/photo/{1000 + n}/', 'avg_color': '#AABBCC', 'thumb': url, 'preview': url, 'download': url}
-                      for n, (url, w, h) in enumerate(FX_IMG.values(), 1)]
+                      for n, (url, w, h) in enumerate((FX_IMG[k] for k in ('4x3', '16x9', '4x5')), 1)]  # 검색 결과는 사진 3장 (1.5.1 상품 시험 사진은 빼고)
             return 200, {'provider': 'pexels', 'label': 'Pexels', 'site': 'https://www.pexels.com', 'license_url': 'https://www.pexels.com/license/', 'photos': photos,
                          'total': 3, 'page': 1, 'has_next': False, 'remaining': 198}
         if path == 'stock/select' and method == 'POST':
@@ -1820,7 +1820,9 @@ def main():
             mode = sheet.locator('select[name=mode]')
             opts = mode.locator('option').all_inner_texts()
             assert len(opts) == 4, opts
-            assert any('FLUX.2 [klein] 4B (무료)' in o for o in opts) and any('GPT Image 2.5 (유료)' in o for o in opts) and any('Gemini 3 Pro Image (유료)' in o for o in opts), opts
+            assert any('FLUX.2 [klein] 4B (무료)' in o for o in opts) and any('GPT Image 2.5 Flare (유료)' in o for o in opts) and any('Gemini 3 Pro Image (유료)' in o for o in opts), opts
+            # 1.5.1: 고품질 유료 생성 기본은 Sunburst · 높음 — Flare 와 이름으로 구분돼 보임
+            assert any(o.startswith('고품질 유료 생성') and 'GPT Image 2.5 Sunburst (유료)' in o for o in opts), opts
             expect(mode).to_have_value('fast_paid')  # 설정의 모델(gpt-image-2.5-flare)·기본 품질(보통)과 같은 모드로 열림
             expect(sheet).to_contain_text('OpenAI · gpt-image-2.5-flare')
             preset = sheet.locator('select[name=preset]')
@@ -1914,21 +1916,23 @@ def main():
 
             def add_upload_ref():
                 open_ai(1)
-                sheet.locator('summary', has_text='참고 사진').click()
-                sheet.get_by_role('button', name='보관함에서 참고 사진 고르기').click()
-                sheet.locator('button.pick').first.click()
+                pick = sheet.get_by_role('button', name='보관함에서 참고 사진 고르기')
+                if not pick.is_visible():  # 접힌 칸은 열 때만 (열린 상태를 기억해서 다시 누르면 닫힘)
+                    sheet.locator('summary', has_text='참고 사진').click()
+                pick.click()
+                sheet.locator('button.pick', has_text='직접').first.click()  # 직접 올린 사진 (AI 이미지가 먼저 있을 수 있어서 골라서)
             add_upload_ref()
             expect(sheet.locator('select[aria-label="참고 사진 역할"]')).to_have_value('subject')
             expect(sheet).to_contain_text("결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼")
             expect(sheet.get_by_label(re.compile('일반 장면으로 만들게'))).to_have_count(0)
             go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
             expect(go).to_be_enabled()
-            up = next(i for i in mock.images if i['kind'] == 'upload' and not i.get('deleted_at'))
             n0 = len(gen_bodies())
             go.click()
             expect(sheet).to_contain_text('다 만들었어', timeout=20000)
             req = gen_bodies()[n0]
-            assert req['refs'] == [{'image_id': up['id'], 'role': 'subject'}] and 'generic_ok' not in req, req
+            up = mock.img(req['refs'][0]['image_id'])
+            assert up['kind'] == 'upload' and req['refs'] == [{'image_id': up['id'], 'role': 'subject'}] and 'generic_ok' not in req, req
             expect(sheet).to_contain_text('참고한 제품 사진과 모양·글자·버튼이 같은지')
             new = next(i for i in mock.images if i['kind'] == 'ai')
             assert new['composite'] is True and new['ref_images'][0]['role'] == 'subject'
@@ -2017,13 +2021,13 @@ def main():
         check('1.5.0 고치기·수정 이력: 설정의 편집 모델, 예시 문장, 원본은 그대로·새 이미지가 원본을 가리킴, 미리보기에서 원본부터 이력, 다시 만들기는 같은 원본을 다시 고치는 창', t_studio_edit_history)
 
         def t_studio_compare():
-            reload_keys(cloudflare=False)  # 비교 기본값이 서로 다른 두 모델(OpenAI·Gemini)이 되게
+            reload_keys(cloudflare=False)  # 비교 기본값: 키가 있는 모드 중 모델이 서로 다른 첫 두 개 (1.5.1부터 Flare·Sunburst — 고품질 기본이 Sunburst라서)
             open_p8()
             open_ai(0)
             sheet.get_by_role('button', name='여러 모델로 비교하기').click()
             expect(sheet).to_contain_text('한두 번 비교로 어느 모델이 늘 낫다고 단정할 수는 없어')
             checked = [l.inner_text() for l in sheet.locator('label.chk').all() if l.locator('input').is_checked()]
-            assert len(checked) == 2 and any('GPT Image 2.5' in t for t in checked) and any('Gemini 3 Pro Image' in t for t in checked), checked
+            assert len(checked) == 2 and any('GPT Image 2.5 Flare' in t for t in checked) and any('GPT Image 2.5 Sunburst' in t for t in checked), checked
             expect(sheet.locator('.costbox')).to_contain_text('합계 예상 $')
             go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ \(2장\) · 비교 만들기'))
             expect(go).to_be_enabled()
@@ -2031,7 +2035,7 @@ def main():
             go.click()
             expect(sheet).to_contain_text('내 평가 (AI 평가와 따로 저장)', timeout=40000)
             reqs = gen_bodies()[n0:]
-            assert [r['model'] for r in reqs] == ['gpt-image-2.5-flare', 'gemini-3-pro-image'], [r['model'] for r in reqs]
+            assert [r['model'] for r in reqs] == ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'], [r['model'] for r in reqs]
             assert all(r['batch']['kind'] == 'compare' and r['batch']['total'] == 2 and r['batch']['id'] == reqs[0]['batch']['id'] for r in reqs)
             assert reqs[0]['reserve_usd'] > reqs[1]['reserve_usd'], '남은 장의 예상 비용만큼 예약'
             same = lambda k: len({json.dumps(r.get(k), sort_keys=True) for r in reqs}) == 1
@@ -2779,53 +2783,77 @@ def main():
             close_sheet()
             ref = PSPEC['ref']
             # 승인 안 한 상품 장면 이미지를 원고 자리에 두면: 발행 준비 완료 잠김 (검사 오류), 미리보기의 '사용 가능'은 상품 검수로
-            key = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])[2]['key']
-            mock.link(P8, key, ref['id'])
-            reload_keys()
-            goto_hash('content/post/' + P8)
-            expect(page.locator('ul.checks')).to_contain_text('상품 디테일 검수를 승인하지 않은 상품 이미지가 1곳 있어', timeout=10000)
-            expect(page.get_by_role('button', name='발행 준비 완료로')).to_be_disabled()
-            card = page.locator('section.studio .slot').nth(2)
-            expect(card).to_contain_text('상품 디테일 검수 전이야')
-            card.get_by_role('button', name='미리보기·내려받기').click()
-            n_patch = len([c for c in mock.calls if c['path'] == f"images/{ref['id']}" and c['method'] == 'POST'])
-            sheet.locator('[aria-label="검수 상태"]').get_by_role('button', name='사용 가능').click()
-            expect(sheet).to_contain_text('상품 디테일 검수')
-            expect(sheet.locator('.modebadge')).to_be_visible()
-            assert len([c for c in mock.calls if c['path'] == f"images/{ref['id']}" and c['method'] == 'POST']) == n_patch, "승인 없이 '사용 가능'을 보내지 않음"
-            close_sheet()
-            card.get_by_role('button', name='미리보기·내려받기').click()
-            expect(sheet.get_by_role('button', name=re.compile('내려받기 \\(상품 검수 전\\)'))).to_be_visible(timeout=15000)
-            close_sheet()
-            # 발행 준비 완료 원고에는 승인 전 상품 이미지를 못 넣음 (서버가 409)
-            p2 = next(p for p in mock.posts if p['id'] == mock.ids['P2'])
-            st0 = p2['stage']
-            p2['stage'] = 'ready'
+            # (앞 시험들이 P8 자리에 넣어 둔 이미지는 잠깐 빼 두고 끝나면 되돌림 — 시험끼리 섞이지 않게. 본문을 고친 시험 뒤에는 자리가 2곳일 수 있음)
+            saved = [dict(r) for r in mock.slots if r['post_id'] == P8]
+            mock.slots = [r for r in mock.slots if r['post_id'] != P8]
+            slots8 = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])
+            idx = len(slots8) - 1
+            key = slots8[idx]['key']
             try:
-                r = page.evaluate(f"""async () => {{ const s = JSON.parse(localStorage.getItem('gf-session')); const r = await fetch('{API}/posts/{mock.ids['P2']}/images/link', {{ method: 'POST', headers: {{ 'content-type': 'application/json', 'x-app-session': s }}, body: JSON.stringify({{ image_id: '{ref['id']}', slot_key: 'x:cover' }}) }}); return [r.status, (await r.json()).error]; }}""")
-                assert r == [409, 'product_check_needed'], r
+                mock.link(P8, key, ref['id'])
+                reload_keys()
+                goto_hash('content/post/' + P8)
+                expect(page.locator('ul.checks')).to_contain_text('상품 디테일 검수를 승인하지 않은 상품 이미지가 1곳 있어', timeout=10000)
+                expect(page.get_by_role('button', name='발행 준비 완료로')).to_be_disabled()
+                card = page.locator('section.studio .slot').nth(idx)
+                expect(card).to_contain_text('상품 디테일 검수 전이야')
+                card.get_by_role('button', name='미리보기·내려받기').click()
+                n_patch = len([c for c in mock.calls if c['path'] == f"images/{ref['id']}" and c['method'] == 'POST'])
+                sheet.locator('[aria-label="검수 상태"]').get_by_role('button', name='사용 가능').click()
+                expect(sheet).to_contain_text('상품 디테일 검수')
+                expect(sheet.locator('.modebadge')).to_be_visible()
+                assert len([c for c in mock.calls if c['path'] == f"images/{ref['id']}" and c['method'] == 'POST']) == n_patch, "승인 없이 '사용 가능'을 보내지 않음"
+                close_sheet()
+                card.get_by_role('button', name='미리보기·내려받기').click()
+                expect(sheet.get_by_role('button', name=re.compile('내려받기 \\(상품 검수 전\\)'))).to_be_visible(timeout=15000)
+                close_sheet()
+                # 발행 준비 완료 원고에는 승인 전 상품 이미지를 못 넣음 (서버가 409)
+                p2 = next(p for p in mock.posts if p['id'] == mock.ids['P2'])
+                st0 = p2['stage']
+                p2['stage'] = 'ready'
+                try:
+                    r = page.evaluate(f"""async () => {{ const s = JSON.parse(localStorage.getItem('gf-session')); const r = await fetch('{API}/posts/{mock.ids['P2']}/images/link', {{ method: 'POST', headers: {{ 'content-type': 'application/json', 'x-app-session': s }}, body: JSON.stringify({{ image_id: '{ref['id']}', slot_key: 'x:cover' }}) }}); return [r.status, (await r.json()).error]; }}""")
+                    assert r == [409, 'product_check_needed'], r
+                finally:
+                    p2['stage'] = st0
             finally:
-                p2['stage'] = st0
-            mock.link(P8, key, None)
-            reload_keys()
+                mock.slots = [r for r in mock.slots if r['post_id'] != P8] + saved
+                reload_keys()
         check("1.5.1 승인 전 막기: 발행 준비 완료 잠김(검사 오류), 미리보기 '사용 가능'은 상품 검수로, 내려받아도 저절로 승인 안 됨, 발행 준비 원고 자리에는 못 넣음", t_product_gates)
 
         def t_product_entries_settings():
             close_sheet()
             prod = PSPEC['prod']
-            # 진입 버튼: 원고 이미지 칸·빈 자리·보관함의 상품 사진·미리보기
-            open_p8()
-            studio = page.locator('section.studio')
-            expect(studio.get_by_role('button', name='이 상품으로 장면 만들기')).to_be_visible()
-            expect(studio.locator('.slot').nth(0).get_by_role('button', name='상품 사진으로 장면 만들기')).to_have_count(1)
-            studio.get_by_role('button', name='이 상품으로 장면 만들기').click()
-            expect(page.locator('.view.product')).to_contain_text('원고: 원룸 무선청소기 보관 방법')
+            # 진입 버튼: 원고 이미지 칸 · 빈 자리 · 이미지가 있는 자리의 '바꾸기' 창 · 보관함 (첫 자리는 잠깐 비우고 끝나면 되돌림)
+            saved = [dict(r) for r in mock.slots if r['post_id'] == P8]
+            key0 = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])[0]['key']
+            mock.slots = [r for r in mock.slots if not (r['post_id'] == P8 and r['slot_key'] == key0)]
+            try:
+                reload_keys()
+                open_p8()
+                studio = page.locator('section.studio')
+                expect(studio.get_by_role('button', name='이 상품으로 장면 만들기')).to_be_visible()
+                expect(studio.locator('.slot').nth(0).get_by_role('button', name='상품 사진으로 장면 만들기')).to_have_count(1)
+                studio.get_by_role('button', name='이 상품으로 장면 만들기').click()
+                expect(page.locator('.view.product')).to_contain_text('원고: 원룸 무선청소기 보관 방법')
+                mock.link(P8, key0, prod['id'])
+                reload_keys()
+                open_p8()
+                page.locator('section.studio .slot').nth(0).get_by_role('button', name='바꾸기', exact=True).click()
+                sheet.get_by_role('button', name='상품 사진으로 장면 만들기').click()
+                expect(page.locator('.view.product')).to_contain_text('원고: 원룸 무선청소기 보관 방법')
+            finally:
+                mock.slots = [r for r in mock.slots if r['post_id'] != P8] + saved
+                reload_keys()
             goto_hash('content/images')
             page.locator('.view').get_by_role('button', name='상품 합성').click()
             expect(page.locator('.grid2 .pick').first).to_be_visible()
             page.locator('.grid2 .pick').first.click()
             expect(sheet).to_contain_text('원본 보존 합성 — 상품은 원본 사진 픽셀 그대로')
             expect(sheet).to_contain_text('배경 지우기 $0')
+            expect(sheet.locator('.cmp figcaption')).to_have_text(['원본 상품 사진', 'AI 배경'])  # 무엇으로 만들었는지
+            expect(sheet).to_contain_text('합성 설정:')
+            expect(sheet).to_contain_text('마스크: ')
             close_sheet()
             # 설정: 고품질 모드 기본은 Sunburst · 높음, 기본값과 저장한 값을 구분
             goto_hash('settings/images')

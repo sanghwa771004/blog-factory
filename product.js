@@ -611,7 +611,9 @@ export function createProduct(ui, kit) {
       h('p', { class: 'hint' }, '사진을 끌어서 상품 위치를 옮겨. 상품은 원본 픽셀 그대로고, 여기서 바꾸는 건 위치·크기·그림자·밝기뿐이야 (상품을 다시 그리지 않아).'),
       h('div', { class: 'compwrap' }, cv),
       PS.el.warn,
-      h('label', { class: 'chk' }, one, ' 원본 크기 그대로 (늘리거나 줄이지 않음 — 회전도 0이면 상품 칸이 원본 픽셀과 한 칸도 안 달라)'),
+      h('label', { class: 'chk' }, one, PS.src.scaled
+        ? ` 원본 크기 그대로 (늘리거나 줄이지 않음 — 이 사진은 ${PS.src.srcW}×${PS.src.srcH}로 커서 긴 변 ${Math.max(PS.src.w, PS.src.h)}px로 줄여 읽었어. 줄인 사진의 픽셀 그대로야)`
+        : ' 원본 크기 그대로 (늘리거나 줄이지 않음 — 회전도 0이면 상품 칸이 원본 픽셀과 한 칸도 안 달라)'),
       L0.one ? null : slider('크기 (그림 높이 대비)', () => PS.layer.h, (v) => { PS.layer.h = v; }, 0.1, 1, 0.01, pct),
       slider('회전', () => PS.layer.rot, (v) => { PS.layer.rot = v; }, -30, 30, 0.5, (v) => `${v}°`),
     ];

@@ -904,7 +904,8 @@ const MODEL_FAMILIES = [
   // edits 는 이미지 16장까지 (고치기면 고칠 이미지 포함). input_fidelity 는 2.5에서 되는지 문서로 확인 못 해서 안 보냄
   // 2026-10-28: Sunburst = '이미지 생성·고치기에서 가장 뛰어난 모델'(성능 Highest), Flare = '가장 빠른 고품질 일상 생성' (모델 페이지) → 고품질 모드 기본은 Sunburst
   { id: 'gpt-image-2.5', re: /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: QUALITIES, settingsPrices: true, edit: true, refsMax: 16,
-    label: 'GPT Image 2.5', checked: '2026-10-28', url: 'https://developers.openai.com/api/docs/guides/image-generation' },
+    label: 'GPT Image 2.5', labelFor: (m) => (/sunburst/.test(m) ? 'GPT Image 2.5 Sunburst' : 'GPT Image 2.5 Flare'), // 1.5.1: 두 모델이 화면에서 같은 이름으로 보이지 않게
+    checked: '2026-10-28', url: 'https://developers.openai.com/api/docs/guides/image-generation' },
   // GPT Image 2 (2026-04-21): 품질은 high까지. 가격 페이지 표에는 Batch(반값)만 있고 표준 값은 'GPT Image 2 토큰 가격을 쓴다'는 문구로만 알 수 있어서
   //   2.5와 같은 표준 값($5·$8·$30)으로 셈 (예상치 — 2026-10-28 확인)
   { id: 'gpt-image-2', re: /^gpt-image-2(-\d{4}-\d{2}-\d{2})?$/, flexible: true, qualities: Q3, settingsPrices: true, edit: true, refsMax: 16, label: 'GPT Image 2', checked: '2026-10-28',
@@ -948,7 +949,7 @@ export function modelCaps(model) {
   if (!f) return { id: '', known: false, flexible: false, qualities: Q3, conservative: true, settingsPrices: false, provider: '', label: m, edit: false, refsMax: 0, free: false, usable: false };
   return { id: f.id, known: true, flexible: f.flexible, qualities: f.qualities, conservative: !!f.conservative, settingsPrices: !!f.settingsPrices, deprecated: !!f.deprecated, prices: f.prices || null, perImage: f.perImage || null, url: f.url || '',
     provider: f.provider || 'openai', free: !!f.free, noEdit: !!f.noEdit, fixedSize: f.fixedSize || '', cfModel: f.cfModel || '', steps: f.steps || null,
-    sizes: f.sizes || null, multipart: !!f.multipart, label: f.label || f.id, edit: !!f.edit && !f.noEdit, refsMax: Number(f.refsMax || 0), refSmall: Number(f.refSmall || 0),
+    sizes: f.sizes || null, multipart: !!f.multipart, label: (f.labelFor && f.labelFor(m)) || f.label || f.id, edit: !!f.edit && !f.noEdit, refsMax: Number(f.refsMax || 0), refSmall: Number(f.refSmall || 0),
     aspect: !!f.aspect, aspects: f.aspects || null, imageSizes: f.imageSizes || null, qualityLabels: f.qualityLabels || null, gemini: f.gemini || null, maxInlineBytes: Number(f.maxInlineBytes || 0),
     inputFidelity: !!f.inputFidelity, retired: f.retired || '', shutdown: f.shutdown || '', usable: !f.retired,
     status: f.retired ? 'retired' : f.status || (f.deprecated ? 'deprecated' : 'ga'), checked: f.checked || MODEL_CHECKED };
