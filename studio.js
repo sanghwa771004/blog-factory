@@ -805,7 +805,7 @@ export function createStudio(ui) {
         !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).msg || sr.msg) : '',
         !own && realNeeded && f.refs.some((r) => r.role === 'subject' && !IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "AI로 만든 이미지는 '대상 모양 유지'로 넣어도 진짜 제품 사진이 아니라서 실제 상품 자리를 채우지 못해. 직접 올린 사진이나 Pexels 사진을 넣어줘.") : '',
         !own && realNeeded ? genericRow : '',
-        gate.composite ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성'으로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼.") : '');
+        gate.composite ? h('p', { class: 'notice' }, "진짜 제품 사진을 참고해서 만들어. 결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼. 상품 모양이 중요한 자리라 상품 디테일 검수에서 원본과 비교해 승인해야 써 (상품을 원본 그대로 쓰려면 '이 상품으로 장면 만들기'의 원본 보존 합성).") : '');
       const u = usage();
       const fx = Number(st.image_fx_krw) || 0;
       const over = u && lastTotal != null && Number(u.month_usd) + lastTotal > Number(u.budget_usd) + 1e-9;

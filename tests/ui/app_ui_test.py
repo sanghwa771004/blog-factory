@@ -65,7 +65,11 @@ EXTRA = [{'key': 'x:cover', 'label': '블로그 대표 이미지', 'purpose': 'b
          {'key': 'x:threads', 'label': '쓰레드 게시물 이미지', 'purpose': 'threads', 'file': 'threads'},
          {'key': 'x:ig_feed', 'label': '인스타그램 피드 이미지', 'purpose': 'ig_feed', 'file': 'instagram'},
          {'key': 'x:ig_story', 'label': '인스타 스토리·릴스 이미지', 'purpose': 'ig_story', 'file': 'story'}]
-FX_IMG = {'4x3': ('/tests/fixtures/img/photo-4x3.jpg', 1280, 960), '16x9': ('/tests/fixtures/img/photo-16x9.jpg', 1536, 864), '4x5': ('/tests/fixtures/img/photo-4x5.jpg', 1080, 1350)}
+FX_IMG = {'4x3': ('/tests/fixtures/img/photo-4x3.jpg', 1280, 960), '16x9': ('/tests/fixtures/img/photo-16x9.jpg', 1536, 864), '4x5': ('/tests/fixtures/img/photo-4x5.jpg', 1080, 1350),
+          'product': ('/tests/fixtures/img/product.png', 800, 600)}  # 1.5.1: 흰 배경 위 상품 (칸마다 색이 달라서 합성 결과에서 원본 칸을 찾을 수 있음)
+STORAGE = 'https://oxewhsqmdkiasckvnyua.supabase.co/storage/v1/object/sign/post-images/'  # 1.5.1: 마스크·합성 파일 (가짜 저장소 — 서명 주소 흉내)
+PRODUCT_KEYS = ['shape', 'color', 'details', 'text', 'parts', 'scale', 'placement', 'artifacts', 'consistency']
+REAL_NEEDED_MOCK = re.compile(r'구성품|제품 사진|버튼|화면|라벨|포장')  # 가짜 서버용 단순한 판단 (실제 판단은 images.js aiGate — 단위 시험)
 RATIO_SIZE = {'16:9': '1536x864', '4:3': '1280x960', '1:1': '1024x1024', '4:5': '1024x1280', '9:16': '864x1536'}
 
 
@@ -195,6 +199,7 @@ class Mock:
         self.gen_boot_error = False  # 생성 전용 서버가 올라가 있지만 켜지지 못하는 것처럼 (Supabase 503 BOOT_ERROR)
         self.hold_generate = False  # 생성 요청의 응답을 붙잡아 둠 (보낸 뒤 창 닫기 시험)
         self.held = []
+        self.masks, self.files, self.no018 = [], {}, False  # 1.5.1 상품 마스크·저장소 파일(마스크·합성)·018 전 DB 흉내
         self.settings.update({'image_gen_model': 'gpt-image-2.5-flare', 'image_edit_model': 'gpt-image-2.5-sunburst', 'image_quality': 'medium',
                               'image_daily_limit': 5, 'image_monthly_budget_usd': 2, 'image_fx_krw': 1400, 'image_fx_date': D(-1), 'image_fx_source': '테스트 환율',
                               'image_prices': {'image_output_per_m': 30, 'image_input_per_m': 8, 'text_input_per_m': 5, 'checked_at': '2026-10-22',
@@ -246,12 +251,13 @@ class Mock:
 
     def add_image(self, kind, post_id, slot_key, fx='4x3', **extra):
         url, w, h = FX_IMG[fx]
-        i = {'id': self.new_id(), 'kind': kind, 'provider': {'ai': 'openai', 'stock': 'pexels', 'upload': 'upload', 'card': 'cardnews'}[kind], 'model': '',
+        i = {'id': self.new_id(), 'kind': kind, 'provider': {'ai': 'openai', 'stock': 'pexels', 'upload': 'upload', 'card': 'cardnews', 'composite': 'composite'}[kind], 'model': '',
              'prompt': '', 'user_prompt': '', 'style': '', 'purpose': 'blog_body', 'ratio': '', 'description': '', 'alt_text': '', 'storage_path': f'{kind}/2026/10/{self.seq}.jpg',
              'mime': 'image/png' if kind == 'card' else 'image/jpeg', 'bytes': 15000, 'width': w, 'height': h, 'sha256': '', 'source_url': '', 'source_id': '',
              'author_name': '', 'author_url': '', 'license': '', 'attribution_text': '', 'rights_confirmed': kind != 'ai', 'review_status': '검수 전', 'review_note': '',
              'generation_id': None, 'downloaded_at': None, 'created_at': NOW, 'updated_at': NOW, 'deleted_at': None, 'origin_post_id': post_id, 'source_type': '',
-             'origin_slot_key': slot_key or '', 'origin_slot_index': None, 'url': url, **extra}
+             'origin_slot_key': slot_key or '', 'origin_slot_index': None, 'url': url, 'composite': False, 'composite_mode': '', 'product_image_id': None,
+             'background_image_id': None, 'mask_id': None, 'layer': None, 'product_check': None, **extra}
         self.images.insert(0, i)
         return i
 
@@ -302,6 +308,25 @@ class Mock:
             b['usd'] = round(b['usd'] + usd(g), 6)
         return {'from': None, 'to': None, 'totals': tot, 'by_post': list(by.values())}
 
+    def product_mode(self, i):
+        return 'layer' if i.get('kind') == 'composite' else 'reference' if i.get('kind') == 'ai' and i.get('composite_mode') == 'reference' else ''
+
+    def approved(self, i):
+        return bool((i.get('product_check') or {}).get('approved') is True)
+
+    def product_trail(self, i):
+        mode = self.product_mode(i)
+        if not mode:
+            return None
+        prod = next((x for x in self.images if x['id'] == i.get('product_image_id')), None)
+        bg = next((x for x in self.images if x['id'] == i.get('background_image_id')), None) if mode == 'layer' else None
+        mk = next((x for x in self.masks if x['id'] == i.get('mask_id')), None) if mode == 'layer' else None
+        g = next((x for x in self.gens if x['id'] == (bg or i).get('generation_id')), None) if (bg or i) else None
+        return {'mode': mode, 'product': self.with_uses(prod) if prod else None, 'background': self.with_uses(bg) if bg else None,
+                'mask': {**mk, 'url': STORAGE + mk['storage_path'] + '?token=t'} if mk else None,
+                'costs': {'model': {'model': g['model'], 'provider': g.get('provider'), 'est_usd': g['est_usd'], 'usage_usd': g['usage_usd'], 'actual_usd': g.get('actual_usd'), 'cost_status': g['cost_status'], 'generation_id': g['id']} if g else None,
+                          'cutout': {'method': mk['method'] if mk else '', 'cost_usd': 0, 'cost_status': '청구 없음', 'where': '이 기기 (브라우저)'} if mode == 'layer' else None}}
+
     def with_uses(self, i):
         uses = [r for r in self.slots if r['image_id'] == i['id']]
         return {**i, 'uses': len(uses), 'used_posts': len({r['post_id'] for r in uses})}
@@ -327,7 +352,7 @@ class Mock:
             i = self.img(r['image_id'])
             if r['image_id'] and i:
                 out.append({**{k: r[k] for k in ('post_id', 'slot_key', 'slot_index', 'image_id', 'purpose', 'used_at', 'downloaded_at')},
-                            'post_images': {k: i[k] for k in ('kind', 'provider', 'review_status', 'mime', 'author_name', 'description', 'license', 'attribution_text')}})
+                            'post_images': {k: i.get(k) for k in ('kind', 'provider', 'review_status', 'mime', 'author_name', 'description', 'license', 'attribution_text', 'source_type', 'composite', 'composite_mode', 'product_check')}})
         return out
 
     def state(self):
@@ -521,6 +546,11 @@ class Mock:
             return 200, self.post_images(m.group(1))
         m = re.fullmatch(r'posts/([0-9a-f-]{36})/images/link', path)
         if m and method == 'POST':
+            post = next(p for p in self.posts if p['id'] == m.group(1))
+            im = self.img(body.get('image_id')) if body.get('image_id') else None
+            # 1.5.1 서버처럼: 발행 준비 완료·예약·게시 글에는 상품 검수를 승인한 상품 장면 이미지만
+            if im and post['stage'] in ('ready', 'scheduled', 'published', 'collecting', 'analyzed') and self.product_mode(im) and not self.approved(im):
+                return 409, {'error': 'product_check_needed'}
             return 200, {'slot': self.link(m.group(1), body['slot_key'], body.get('image_id'), body.get('purpose'))}
         m = re.fullmatch(r'posts/([0-9a-f-]{36})/images/swap', path)
         if m and method == 'POST':
@@ -647,6 +677,22 @@ class Mock:
                 todo += [(c, lv + 1) for c in self.images if c.get('parent_image_id') == x['id']]
             return 200, {'root_id': root['id'], 'items': items}
         if path == 'images/generate' and method == 'POST':
+            # 1.5.1 상품 장면: 원본 상품 사진(직접 올림·Pexels)이 있어야 하고, 원본 보존 합성은 참고 사진을 안 받음, AI 실사 장면은 상품 사진을 첫 대상 참고 사진으로
+            product = body.get('product')
+            if product:
+                prod = self.img(body.get('product_image_id'))
+                if not prod:
+                    return 404, {'error': 'product_not_found'}
+                if prod['kind'] not in ('upload', 'stock'):
+                    return 400, {'error': 'product_image_required'}
+                if product.get('mode') == 'layer' and body.get('refs'):
+                    return 400, {'error': 'layer_no_refs'}
+                if any((self.img(r['image_id']) or {}).get('kind') == 'composite' for r in body.get('refs') or []):
+                    return 400, {'error': 'ref_composite'}
+                if product.get('mode') == 'reference':
+                    body = {**body, 'refs': [{'image_id': prod['id'], 'role': 'subject'}] + [r for r in body.get('refs') or [] if r['image_id'] != prod['id']]}
+                body = {**body, 'post_id': body.get('post_id'), 'slot_key': body.get('slot_key') or '', 'purpose': product.get('purpose', 'blog_body'),
+                        'preset': 'pscene_layer' if product.get('mode') == 'layer' else 'pscene_ref', 'text': product.get('name') or '상품', 'extra': product.get('custom', '')}
             # 1.5.0 서버처럼: 요청의 모델(화면에서 고른 모드)이 먼저, 없으면 설정의 모델. 모르는·종료된 모델은 거절, 공급자마다 키 확인
             model = body.get('model') or self.settings['image_edit_model' if body.get('mode') == 'edit' else 'image_gen_model']
             prov = PROVIDER_OF.get(model)
@@ -683,7 +729,8 @@ class Mock:
             if self.min_est and body['confirm_usd'] + 1e-9 < self.min_est:
                 return 409, {**changed, 'est_usd': self.min_est}
             free = prov == 'cloudflare'
-            g = {'id': self.new_id(), 'request_key': body['request_key'], 'post_id': body['post_id'], 'slot_key': body['slot_key'], 'mode': body.get('mode', 'generate'),
+            g = {'id': self.new_id(), 'request_key': body['request_key'], 'post_id': body.get('post_id'), 'slot_key': body.get('slot_key') or '', 'mode': body.get('mode', 'generate'),
+                 'product': product, 'product_image_id': body.get('product_image_id'),
                  'model': model, 'provider': prov, 'size': size, 'quality': quality,
                  'purpose': body.get('purpose'), 'style': body.get('style'), 'user_prompt': '\n'.join(x for x in (body.get('text', ''), body.get('extra', '')) if x),
                  'ratio': body.get('ratio') or '', 'status': '생성 중', 'provider_called': True, 'refs': refs, 'batch': body.get('batch'), 'preset': body.get('preset', ''),
@@ -701,12 +748,23 @@ class Mock:
             if g['status'] == '생성 중' and self.polls[g['id']] >= 2:
                 refs = g.get('refs') or []
                 composite = any(r.get('role') in ('subject', 'background') and (self.img(r['image_id']) or {}).get('kind') not in ('ai', 'card', None) for r in refs)
-                i = self.add_image('ai', g['post_id'], g['slot_key'], {'16:9': '16x9', '4:5': '4x5'}.get(g.get('ratio') or '', '4x3'), model=g['model'], provider=g.get('provider', 'openai'),
+                # 1.5.1 서버처럼: 상품 장면 기록. 원본 보존 합성의 배경은 상품 id 만(자리 후보 아님), AI 실사 장면·실제 상품 자리의 진짜 상품 참고는 reference
+                pr = g.get('product')
+                real_subject = next((r['image_id'] for r in refs if r.get('role') == 'subject' and (self.img(r['image_id']) or {}).get('kind') in ('upload', 'stock')), None)
+                slot_text = next((s['text'] for p in self.posts if p['id'] == g.get('post_id') for s in parse_slots(p['body']) if s['key'] == g.get('slot_key')), '')
+                if pr:
+                    pextra = {'composite': pr.get('mode') == 'reference', 'composite_mode': 'reference' if pr.get('mode') == 'reference' else '', 'product_image_id': g.get('product_image_id')}
+                else:
+                    base = self.img(g.get('base_image_id')) if g['mode'] == 'edit' else None
+                    ref_mode = (real_subject and REAL_NEEDED_MOCK.search(slot_text)) or (base and base.get('composite_mode') == 'reference')
+                    pextra = {'composite_mode': 'reference' if ref_mode else '', 'product_image_id': real_subject or (base or {}).get('product_image_id')}
+                slot_for = '' if pr and pr.get('mode') == 'layer' else g['slot_key']
+                i = self.add_image('ai', g['post_id'], slot_for, {'16:9': '16x9', '4:5': '4x5'}.get(g.get('ratio') or '', '4x3'), model=g['model'], provider=g.get('provider', 'openai'),
                                    prompt='Image type: Photograph — … Text and logos: none', description=g['user_prompt'],
                                    alt_text=g['user_prompt'][:120], generation_id=g['id'], purpose=g['purpose'] or 'blog_body', ratio=g.get('ratio') or '',
                                    ref_images=[{'image_id': r['image_id'], 'role': r['role'], 'kind': (self.img(r['image_id']) or {}).get('kind', '')} for r in refs],
-                                   composite=composite, parent_image_id=g.get('base_image_id') if g['mode'] == 'edit' else None, preset=g.get('preset', ''), scene=g.get('scene'),
-                                   user_prompt=g['user_prompt'])
+                                   parent_image_id=g.get('base_image_id') if g['mode'] == 'edit' else None, preset=g.get('preset', ''), scene=g.get('scene'),
+                                   user_prompt=g['user_prompt'], **{'composite': composite, **pextra})
                 free = g.get('provider') == 'cloudflare'
                 g.update({'status': '성공', 'image_id': i['id'], 'usage_usd': 0 if free else 0.01107, 'cost_status': '청구 없음' if free else '사용량 기준', 'finished_at': NOW})
             if g['image_id']:
@@ -752,7 +810,8 @@ class Mock:
             return 200, {'image': self.with_uses(i), 'slot': slot, 'reused': False}
         if path == 'images' and method == 'GET':
             kind = query.get('kind', [None])[0]
-            return 200, {'images': [self.with_uses(i) for i in self.images if not i.get('deleted_at') and (not kind or i['kind'] == kind)], 'usage': self.usage(), 'next': None}
+            pid = query.get('product_id', [None])[0]
+            return 200, {'images': [self.with_uses(i) for i in self.images if not i.get('deleted_at') and (not kind or i['kind'] == kind) and (not pid or i.get('product_image_id') == pid)], 'usage': self.usage(), 'next': None}
         if path == 'images/downloaded' and method == 'POST':
             for it in body['items']:
                 i = self.img(it['image_id'])
@@ -762,16 +821,104 @@ class Mock:
                     if r['post_id'] == it.get('post_id') and r['slot_key'] == it.get('slot_key') and r['image_id'] == it['image_id']:
                         r['downloaded_at'] = NOW
             return 200, {'ok': True, 'at': NOW}
+        # ── 1.5.1 상품 장면: 마스크·합성 저장·상품 디테일 검수 (서버·DB 와 같은 규칙만 흉내) ──
+        m = re.fullmatch(r'images/([0-9a-f-]{36})/mask', path)
+        if m and method == 'POST':
+            if self.no018:
+                return 409, {'error': 'db_update_needed', 'migration': '018'}
+            i = self.img(m.group(1))
+            if not i:
+                return 404, {'error': 'not_found'}
+            data = body.get('file_bytes') or b''
+            if body.get('mime') != 'image/png' or not data.startswith(b'\x89PNG'):
+                return 400, {'error': 'bad_image', 'reason': 'mask_png'}
+            from PIL import Image
+            mw, mh = Image.open(io.BytesIO(data)).size
+            if mw > i['width'] + 1 or mh > i['height'] + 1 or abs(mw / mh - i['width'] / i['height']) > (i['width'] / i['height']) * 0.02:
+                return 400, {'error': 'mask_size_mismatch'}
+            if i['kind'] not in ('upload', 'stock'):
+                return 400, {'error': 'mask_real_only'}
+            path_ = f"mask/2026/10/{self.new_id()}.png"
+            self.files[path_] = data
+            meta = body.get('meta') or {}
+            row = {'id': self.new_id(), 'image_id': i['id'], 'storage_path': path_, 'width': mw, 'height': mh, 'bytes': len(data), 'method': meta.get('method') or 'manual',
+                   'edited': bool(meta.get('edited')), 'params': meta.get('params') or {}, 'bbox': meta.get('bbox'), 'coverage': meta.get('coverage'), 'cost_usd': 0,
+                   'cost_status': '청구 없음', 'created_at': NOW, 'deleted_at': None}
+            self.masks.insert(0, row)
+            return 201, {'mask': {**row, 'url': STORAGE + path_ + '?token=t'}}
+        if path == 'images/composite' and method == 'POST':
+            if self.no018:
+                return 409, {'error': 'db_update_needed', 'migration': '018'}
+            meta = body.get('meta') or {}
+            prod, bg = self.img(meta.get('product_image_id')), self.img(meta.get('background_image_id'))
+            mk = next((x for x in self.masks if x['id'] == meta.get('mask_id') and not x['deleted_at']), None)
+            if not prod:
+                return 404, {'error': 'product_not_found'}
+            if not bg:
+                return 404, {'error': 'background_not_found'}
+            if prod['kind'] not in ('upload', 'stock'):
+                return 400, {'error': 'product_image_required'}
+            if bg['kind'] != 'ai':
+                return 400, {'error': 'background_image_required'}
+            if not mk or mk['image_id'] != prod['id']:
+                return 400, {'error': 'mask_mismatch'}
+            data = body.get('file_bytes') or b''
+            if body.get('mime') not in ('image/png', 'image/jpeg', 'image/webp'):
+                return 400, {'error': 'bad_image', 'reason': 'bad_type'}
+            from PIL import Image
+            w, h = Image.open(io.BytesIO(data)).size
+            post = next((p for p in self.posts if p['id'] == meta.get('post_id')), None)
+            if meta.get('link') and post and post['stage'] in ('ready', 'scheduled', 'published', 'collecting', 'analyzed'):
+                return 409, {'error': 'product_check_needed'}
+            path_ = f"composite/2026/10/{self.new_id()}.png"
+            self.files[path_] = data
+            i = self.add_image('composite', meta.get('post_id'), meta.get('slot_key') if meta.get('link') else '', 'product', width=w, height=h, bytes=len(data), mime='image/png',
+                               storage_path=path_, url=STORAGE + path_ + '?token=t', composite_mode='layer', product_image_id=prod['id'], background_image_id=bg['id'], mask_id=mk['id'],
+                               layer=meta.get('layer'), parent_image_id=meta.get('parent_image_id'), description=meta.get('description', ''), purpose=meta.get('purpose', 'blog_body'),
+                               ratio=(meta.get('layer') or {}).get('ratio', ''), preset='pscene_layer', rights_confirmed=True,
+                               license='원본 보존 합성 (앱이 합성) · 상품: ' + (prod.get('license') or '직접 올림 (사용 권한 확인함)') + ' · 배경: AI 생성 이미지',
+                               attribution_text=('상품 사진: ' + (prod.get('author_name') or '사진가') + ' (Pexels)') if prod['kind'] == 'stock' else '',
+                               scene={'v': 1, 'kind': 'product', 'mode': 'layer', **{k: (meta.get('spec') or {}).get(k) for k in ('template', 'purpose', 'angle', 'place')}})
+            return 201, {'image': self.with_uses(i), 'slot': None}
+        m = re.fullmatch(r'images/([0-9a-f-]{36})/product-check', path)
+        if m and method == 'POST':
+            if self.no018:
+                return 409, {'error': 'db_update_needed', 'migration': '018'}
+            i = self.img(m.group(1))
+            if not i:
+                return 404, {'error': 'not_found'}
+            mode = self.product_mode(i)
+            if not mode:
+                return 400, {'error': 'not_product_scene'}
+            items = {k: v for k, v in (body.get('items') or {}).items() if k in PRODUCT_KEYS and v in ('ok', 'issue', 'unsure')}
+            approve = body.get('approve') is True
+            if approve and not all(items.get(k) == 'ok' for k in PRODUCT_KEYS):
+                return 400, {'error': 'product_check_incomplete'}
+            was = self.approved(i)
+            i['product_check'] = {'mode': mode, 'items': items, 'note': body.get('note', ''), 'approved': approve, 'approved_at': NOW if approve else None, 'updated_at': NOW}
+            i['review_status'] = '사용 가능' if approve else ('검수 전' if i['review_status'] == '사용 가능' else i['review_status'])
+            demoted = []
+            if was and not approve:
+                for r in self.slots:
+                    p = next((x for x in self.posts if x['id'] == r['post_id']), None)
+                    if r['image_id'] == i['id'] and p and p['stage'] in ('ready', 'scheduled') and p['id'] not in demoted:
+                        p['stage'] = 'review'
+                        demoted.append(p['id'])
+            return 200, {'image': self.with_uses(i), 'demoted': demoted}
         m = re.fullmatch(r'images/([0-9a-f-]{36})', path)
         if m:
             i = self.img(m.group(1))
             if not i:
                 return 404, {'error': 'not_found'}
+            if method == 'POST' and body.get('review_status') == '사용 가능' and self.product_mode(i) and not self.approved(i):
+                return 409, {'error': 'product_check_needed'}  # 1.5.1 서버·DB 처럼
             if method == 'GET':
                 used = [{**{k: r[k] for k in ('post_id', 'slot_key', 'slot_index', 'slot_text', 'used_at', 'downloaded_at')},
                          'posts': {'titles': next(p for p in self.posts if p['id'] == r['post_id'])['titles'], 'keyword': '', 'deleted_at': None}} for r in self.slots if r['image_id'] == i['id']]
                 return 200, {'image': self.with_uses(i), 'used_in': used, 'decks': [], 'generation': next((g for g in self.gens if g['id'] == i['generation_id']), None),
-                             'reviews': [r for r in self.reviews + self.evals if r['image_id'] == i['id']]}
+                             'reviews': [r for r in self.reviews + self.evals if r['image_id'] == i['id']], 'product': self.product_trail(i),
+                             'masks': [{**x, 'url': STORAGE + x['storage_path'] + '?token=t'} for x in self.masks if x['image_id'] == i['id'] and not x['deleted_at']][:5] if i['kind'] in ('upload', 'stock') else [],
+                             'scenes': sum(1 for x in self.images if x.get('product_image_id') == i['id'] and not x.get('deleted_at'))}
             if method == 'POST':
                 if 'source_type' in body:
                     if i['kind'] != 'upload' or body['source_type'] not in ('', 'own', 'official', 'external'):
@@ -810,9 +957,14 @@ def serve():
 
 
 RESULTS = []
+# 개발할 때만: UI_ONLY=정규식 이면 이름이 맞는 시험과 로그인 시험만 돌림 (결과 줄에 '일부만'이라고 표시 — 전체 통과로 보면 안 됨)
+ONLY = re.compile(__import__('os').environ['UI_ONLY']) if __import__('os').environ.get('UI_ONLY') else None
+ALWAYS = ('예전 링크(?k=틀린 코드)', '접속 코드 로그인')
 
 
 def check(name, fn):
+    if ONLY and not ONLY.search(name) and not name.startswith(ALWAYS):
+        return
     try:
         fn()
         RESULTS.append((name, True, ''))
@@ -820,7 +972,7 @@ def check(name, fn):
     except Exception as e:  # noqa: BLE001
         RESULTS.append((name, False, f'{type(e).__name__}: {e}'))
         print('실패', name, '\n   ', type(e).__name__, str(e).split('\n')[0][:300])
-        traceback.print_exc(limit=1)
+        traceback.print_exc(limit=None if ONLY else 1)
 
 
 def main():
@@ -880,8 +1032,19 @@ def main():
                 r, st, dt, co = mock.held.pop(0)
                 r.fulfill(status=st, headers={**co, 'Content-Type': 'application/json; charset=utf-8'}, body=json.dumps(dt, ensure_ascii=False))
 
+        def storage_route(route):
+            # 1.5.1: 마스크·합성 파일 (가짜 저장소의 서명 주소)
+            u = urlparse(route.request.url)
+            key = u.path.split('/post-images/', 1)[1] if '/post-images/' in u.path else ''
+            data = mock.files.get(key)
+            hdr = {'Access-Control-Allow-Origin': '*', 'Content-Type': 'image/png'}
+            if data is None:
+                return route.fulfill(status=404, headers=hdr, body='')
+            route.fulfill(status=200, headers=hdr, body=data)
+
         ctx.route(API + '/**', api_route)
         ctx.route(GEN + '/**', api_route)
+        ctx.route(STORAGE + '**', storage_route)
         ctx.route(re.compile(r'https://fonts\.(googleapis|gstatic)\.com/.*'), lambda r: r.fulfill(status=200, content_type='text/css', body=''))
         page = ctx.new_page()
         dialogs = []
@@ -1743,10 +1906,20 @@ def main():
             reload_keys()
             open_p8()
             card = page.locator('section.studio .slot').nth(1)
+            # 1.5.1: 미리보기의 '이 사진을 참고해서…' 버튼은 '이 상품으로 장면 만들기'로 바뀜 → 일반 AI 만들기 창에서 참고 사진을 골라 넣음
             card.get_by_role('button', name='미리보기·내려받기').click()
-            sheet.get_by_role('button', name='이 사진을 참고해서 AI로 새로 만들기').click()
+            expect(sheet.get_by_role('button', name='이 상품으로 장면 만들기')).to_be_visible()
+            expect(sheet.get_by_role('button', name='이 사진을 참고해서 AI로 새로 만들기')).to_have_count(0)
+            close_sheet()
+
+            def add_upload_ref():
+                open_ai(1)
+                sheet.locator('summary', has_text='참고 사진').click()
+                sheet.get_by_role('button', name='보관함에서 참고 사진 고르기').click()
+                sheet.locator('button.pick').first.click()
+            add_upload_ref()
             expect(sheet.locator('select[aria-label="참고 사진 역할"]')).to_have_value('subject')
-            expect(sheet).to_contain_text("결과는 'AI 합성'으로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼")
+            expect(sheet).to_contain_text("결과는 'AI 합성 이미지'로 표시되고, 실제로 써본 사진처럼 쓰면 안 돼")
             expect(sheet.get_by_label(re.compile('일반 장면으로 만들게'))).to_have_count(0)
             go = sheet.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
             expect(go).to_be_enabled()
@@ -1759,11 +1932,14 @@ def main():
             expect(sheet).to_contain_text('참고한 제품 사진과 모양·글자·버튼이 같은지')
             new = next(i for i in mock.images if i['kind'] == 'ai')
             assert new['composite'] is True and new['ref_images'][0]['role'] == 'subject'
+            # 1.5.1: 실제 상품이 보여야 하는 자리 + 진짜 상품 사진 참고 → AI 실사 장면(reference)으로 기록, 상품 디테일 검수 안내·버튼
+            assert new['composite_mode'] == 'reference' and new['product_image_id'] == up['id'], new
+            expect(sheet).to_contain_text('상품 디테일 검수에서 원본과 비교해서 승인해야 써')
+            expect(sheet.get_by_role('button', name='상품 디테일 검수')).to_be_visible()
             sheet.get_by_role('button', name='보관함에만 두고 닫기').click()
             # 무료 모델로 같은 참고 사진: 512px보다 작은 사본을 먼저 올리고(원본은 그대로) 그다음 생성
             open_p8()
-            card.get_by_role('button', name='미리보기·내려받기').click()
-            sheet.get_by_role('button', name='이 사진을 참고해서 AI로 새로 만들기').click()
+            add_upload_ref()
             sheet.locator('select[name=mode]').select_option('free_draft')
             expect(sheet).to_contain_text('500px 안으로 줄인 사본')
             n_calls = len(mock.calls)
@@ -1894,7 +2070,8 @@ def main():
             expect(page.locator('#toast')).to_contain_text('저장했어')
             body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
             assert body['image_modes']['gemini_hq'] == {'model': 'gemini-nano-banana-2.1', 'quality': 'high'}, body['image_modes']
-            assert body['image_modes']['free_draft']['model'] == 'cf-flux-2-klein-4b' and 'image_gen_model' not in body, '다른 모드는 그대로, 안 바꾼 기본 모델은 안 보냄'
+            # 1.5.1: 기본값 그대로인 모드는 저장하지 않음 (나중에 앱 기본값이 바뀌면 따라감) — 바꾼 모드만
+            assert set(body['image_modes']) == {'gemini_hq'} and 'image_gen_model' not in body, ('바꾼 모드만 저장, 안 바꾼 기본 모델은 안 보냄', body['image_modes'])
             assert body['image_review_model'] == 'gemini-3.5-flash-lite' and body['image_request_cap_usd'] == 0.5
             assert 'gemini-nano-banana-2.1' in body['image_prices'] and 'gemini-2.5-flash-image' not in body['image_prices'], list(body['image_prices'])
             html = page.content() + json.dumps(page.evaluate('() => Object.values(localStorage)'), ensure_ascii=False)
@@ -1964,7 +2141,7 @@ def main():
             expect(roles).to_have_value('subject')
             expect(sheet.locator('select[name=preset]')).to_have_value('product_still')
             expect(sheet).to_contain_text('전에 쓴 참고 사진 1장은 찾지 못해서 빠졌어')  # 이 글에 없는 사진은 서버에 물어보고, 없으면(지움) 알려줌
-            expect(sheet).to_contain_text("결과는 'AI 합성'으로 표시되고")
+            expect(sheet).to_contain_text("결과는 'AI 합성 이미지'로 표시되고")
             go = sheet.get_by_role('button', name=re.compile(r'· 만들기$'))
             expect(go).to_be_enabled()
             n0 = len(gen_bodies())
@@ -2339,6 +2516,343 @@ def main():
             expect(page.get_by_role('button', name='새로고침')).to_be_enabled()
         check('1.4.0 검토 수정: 요청 원고만큼 자동 글 줄이기 · 겹치는 검색어 기간 · 본문 없는 기록의 개선안 · 못 읽은 표는 데이터 없음 · 주간은 기간 안 실적만 · 통계 실패 · 예약 원고', t_review_140)
 
+        # ───────── 1.5.1 상품 사진으로 장면 만들기 ─────────
+        # 이 화면 시험은 가짜 서버로 돌려서 '실제 AI 이미지 품질'을 보지 않아. 배경 지우기(U²-Netp)와 합성 계산은 이 브라우저에서 실제로 돌림
+        PSPEC = {}
+
+        def b_set():
+            return {40 + a * 50 + b * 20 for a in range(3) for b in range(3)}
+
+        def decode_png(data):
+            from PIL import Image
+            im = Image.open(io.BytesIO(data)).convert('RGB')
+            return im.size, im.load()
+
+        def prod_pixels():
+            from PIL import Image
+            im = Image.open(FIX / 'img' / 'product.png').convert('RGB')
+            return im.load()
+
+        # 합성 결과에서 상품 칸 찾기: 상품 사진은 칸마다 색이 달라서(R=x%256, G=y%256, B=x·y 구간) 한 칸 색으로 원본 자리를 거꾸로 알 수 있음.
+        # 배경 칸이 우연히 같은 규칙의 색일 수 있어서, 둘레 25칸이 모두 원본과 같을 때만 그 자리로 봄
+        def product_offset(size, px):
+            W, H = size
+            P = prod_pixels()
+            B = b_set()
+            near = [(dx, dy) for dy in (-9, -3, 0, 4, 10) for dx in (-10, -4, 0, 3, 9)]
+            for yy in range(0, H, 5):
+                for xx in range(0, W, 5):
+                    r, g, b = px[xx, yy]
+                    if b not in B:
+                        continue
+                    k = b - 40
+                    x, y = r + 256 * (k // 50), g + 256 * ((k % 50) // 20)
+                    if not (300 <= x < 500 and 160 <= y < 470):
+                        continue
+                    if all(0 <= xx + dx < W and 0 <= yy + dy < H and px[xx + dx, yy + dy] == P[x + dx, y + dy] for dx, dy in near):
+                        return xx - x, yy - y
+            return None
+
+        def interior_match(size, px, off):
+            P = prod_pixels()
+            ox, oy = off
+            n = same = 0
+            for y in range(130, 500, 3):          # 둥근 모서리·가장자리(2px 부드럽게)에서 충분히 안쪽만
+                for x in range(270, 530, 3):
+                    cx, cy = min(max(x, 290), 510), min(max(y, 150), 480)
+                    if (x - cx) ** 2 + (y - cy) ** 2 > 30 ** 2:
+                        continue
+                    n += 1
+                    if 0 <= x + ox < size[0] and 0 <= y + oy < size[1] and px[x + ox, y + oy] == P[x, y]:
+                        same += 1
+            return n, same
+
+        def comp_calls():
+            return [c for c in mock.calls if c['path'] == 'images/composite']
+
+        # 합성 저장: 요청이 실제로 가고 '저장됨 ✓'이 될 때까지 기다림 (앞에서 뜬 알림 문구로 착각하지 않게)
+        def save_composite(view):
+            n = len(comp_calls())
+            view.get_by_role('button', name='합성 저장 (새 이미지로)').click()
+            for _ in range(300):
+                if len(comp_calls()) > n:
+                    break
+                page.wait_for_timeout(100)
+            assert len(comp_calls()) > n, '합성 저장 요청이 안 감'
+            expect(view.get_by_role('button', name='저장됨 ✓', exact=True)).to_be_visible(timeout=30000)
+            return comp_calls()[-1]['body']
+
+        def t_product_layer():
+            reload_keys()
+            prod = mock.add_image('upload', None, None, 'product', rights_confirmed=True, source_type='own', description='테스트 전기요')
+            PSPEC['prod'] = prod
+            goto_hash('content/images')
+            page.get_by_role('button', name='이 상품으로 장면 만들기').first.click()
+            view = page.locator('.view.product')
+            expect(view.get_by_role('heading', name='이 상품으로 장면 만들기')).to_be_visible()
+            no_overflow('상품 장면 (처음)')
+            view.get_by_role('button', name='보관함에서 고르기').click()
+            expect(sheet).to_contain_text('진짜 사진만 상품 사진으로 쓸 수 있어')
+            sheet.locator('button.pick').first.click()
+            expect(view).to_contain_text('상품에서 남길 영역 확인')
+            # 3) 배경 지우기: 이 기기(브라우저)에서 U²-Netp 를 실제로 돌림 (서버·외부 API 안 씀)
+            n_calls = len(mock.calls)
+            view.get_by_role('button', name=re.compile('자동으로 배경 지우기')).click()
+            expect(view.locator('canvas.maskcv')).to_be_visible(timeout=180000)
+            expect(view).to_contain_text('U²-Netp', timeout=10000)
+            txt = view.inner_text()
+            cov = int(re.search(r'남긴 부분 (\d+)%', txt).group(1))
+            assert 15 <= cov <= 45, f'자동 마스크는 상품 넓이(약 25%)만큼 남겨야 함: {cov}%'
+            assert not [c for c in mock.calls[n_calls:] if c['path'].startswith('images')], '배경 지우기에 서버를 부르지 않음'
+            # 칠해서 고치기: 배경(왼쪽 위)을 남기기로 칠하면 늘고, 되돌리면 그대로
+            view.get_by_role('button', name='칠해서 고치기').click()
+            view.locator('canvas.maskcv').scroll_into_view_if_needed()
+            box = view.locator('canvas.maskcv').bounding_box()
+            page.mouse.move(box['x'] + box['width'] * 0.05, box['y'] + box['height'] * 0.08)
+            page.mouse.down()
+            page.mouse.move(box['x'] + box['width'] * 0.2, box['y'] + box['height'] * 0.1, steps=6)
+            page.mouse.up()
+            page.wait_for_timeout(300)
+            cov2 = int(re.search(r'남긴 부분 (\d+)%', view.inner_text()).group(1))
+            assert cov2 > cov, (cov, cov2)
+            expect(view).to_contain_text('손으로 고침')
+            view.get_by_role('button', name='되돌리기').click()
+            page.wait_for_timeout(300)
+            assert int(re.search(r'남긴 부분 (\d+)%', view.inner_text()).group(1)) == cov
+            expect(view).not_to_contain_text('손으로 고침')
+            view.get_by_role('button', name=re.compile('칠하기 끄기')).click()
+            # 018 전 DB면 저장하지 않고 알려줌
+            mock.no018 = True
+            view.get_by_role('button', name='이 영역 저장').click()
+            expect(page.locator('#toast')).to_contain_text('DB 업데이트')
+            mock.no018 = False
+            view.get_by_role('button', name='이 영역 저장').click()
+            expect(view.get_by_role('button', name='영역 저장됨 ✓')).to_be_visible()
+            mk = mock.masks[0]
+            assert mk['image_id'] == prod['id'] and (mk['width'], mk['height']) == (800, 600) and mk['method'] == 'auto_u2netp' and mk['cost_status'] == '청구 없음', mk
+            shot('40-product-mask')
+            # 4·5) 목적·방식·장면 — 원본 보존 합성이 기본, 배경만 템플릿은 이 방식에서만
+            expect(view.get_by_role('button', name=re.compile('^상품 원본 보존 합성'))).to_have_attribute('aria-pressed', 'true')
+            view.get_by_role('button', name='상품 상세 소개').click()
+            view.get_by_role('button', name='깔끔한 제품 스튜디오').click()
+            # 6·7) 무료 모드 → 비용 0, 배경 지우기 0원
+            view.locator('select[aria-label="모드"]').select_option('free_draft')
+            cost = view.locator('.costbox')
+            expect(cost).to_contain_text('배경 지우기: 0원')
+            expect(cost).to_contain_text('무료')
+            view.get_by_role('button', name='2장 후보').click()
+            go = view.get_by_role('button', name=re.compile('무료 · 배경 2장 만들기'))
+            expect(go).to_be_enabled()
+            n0 = len(gen_bodies())
+            go.click()
+            expect(view.get_by_role('heading', name=re.compile('배경 고르기'))).to_be_visible(timeout=60000)
+            reqs = gen_bodies()[n0:]
+            assert len(reqs) == 2 and all(r['product']['mode'] == 'layer' and r['refs'] == [] and r['product_image_id'] == prod['id'] for r in reqs), reqs
+            assert reqs[0]['product']['template'] == 'studio' and reqs[0]['product']['purpose'] == 'product_detail' and 'post_id' not in reqs[0], reqs[0]
+            assert reqs[0]['batch']['total'] == 2 and reqs[0]['batch']['id'] == reqs[1]['batch']['id']
+            bgs = [i for i in mock.images if i.get('preset') == 'pscene_layer' and i['kind'] == 'ai']
+            assert len(bgs) >= 2 and all(b['origin_slot_key'] == '' and b['product_image_id'] == prod['id'] and b['composite_mode'] == '' for b in bgs[:2]), bgs[:2]
+            expect(view.locator('canvas.cthumb')).to_have_count(2)
+            no_overflow('상품 장면 (배경 후보)')
+            view.get_by_role('button', name='이 배경으로 합성하기').first.click()
+            expect(view.locator('canvas.compcv')).to_be_visible()
+            view.get_by_label(re.compile('원본 크기 그대로')).check()
+            page.wait_for_timeout(500)
+            shot('41-product-composer')
+            # 저장 실패(DB 거절): 원본은 그대로, 새 이미지 없음
+            n_img = len(mock.images)
+            mock.masks[0]['image_id'], keep = 'x', mock.masks[0]['image_id']
+            view.get_by_role('button', name='합성 저장 (새 이미지로)').click()
+            expect(page.locator('#toast')).to_contain_text('마스크', timeout=30000)
+            mock.masks[0]['image_id'] = keep
+            assert len(mock.images) == n_img and prod['storage_path'].startswith('upload/') and prod['url'].endswith('product.png'), '실패한 합성에서 원본 그대로'
+            # 저장 → 새 PNG. 원본 크기 그대로 + 회전 0 이면 상품 안쪽 칸이 원본 픽셀과 한 칸도 안 다름
+            c1 = save_composite(view)
+            expect(page.locator('#toast')).to_contain_text('합성 이미지를 새로 저장했어')
+            meta = c1['meta']
+            assert meta['product_image_id'] == prod['id'] and meta['mask_id'] == mk['id'] and meta['background_image_id'] in [b['id'] for b in bgs[:2]], meta
+            assert meta['layer']['one'] is True and meta['layer']['rot'] == 0 and meta['purpose'] == 'product_detail', meta['layer']
+            assert c1['mime'] == 'image/png', '다시 압축하지 않는 PNG'
+            size1, px1 = decode_png(c1['file_bytes'])
+            assert abs(size1[0] / size1[1] - 4 / 3) < 0.01 or abs(size1[0] / size1[1] - 1) < 0.01 or abs(size1[0] / size1[1] - 0.8) < 0.01, size1
+            off1 = product_offset(size1, px1)
+            assert off1, '합성 결과에서 상품을 못 찾음'
+            n, same = interior_match(size1, px1, off1)
+            assert n > 2000 and same == n, f'상품 안쪽 {n}칸 중 {same}칸이 원본과 같음'
+            comp1 = next(i for i in mock.images if i['kind'] == 'composite')
+            assert comp1['composite_mode'] == 'layer' and comp1['review_status'] == '검수 전' and comp1['license'].startswith('원본 보존 합성'), comp1
+            PSPEC['comp1'] = comp1
+            # 2) 배경만 바꿔도 상품 레이어는 그대로: 다른 배경으로 같은 설정 저장 → 같은 자리에 같은 픽셀
+            view.get_by_role('button', name='이 배경으로 합성하기').first.click()
+            page.wait_for_timeout(400)
+            c2 = save_composite(view)
+            assert c2['meta']['background_image_id'] != meta['background_image_id'], ('다른 배경', meta['background_image_id'], c2['meta']['background_image_id'], [b['id'] for b in bgs], view.locator('.grid2 .slot button').all_inner_texts())
+            size2, px2 = decode_png(c2['file_bytes'])
+            assert size2 == size1
+            assert product_offset(size2, px2) == off1, '같은 설정이면 같은 자리'
+            n2, same2 = interior_match(size2, px2, off1)
+            assert same2 == n2 == n
+            assert c2['meta']['parent_image_id'] == comp1['id'], '다시 저장하면 새 이미지로 (예전 합성은 그대로)'
+            # 4) 다른 비율: 16:9 로 바꾸면 결과도 16:9
+            view.get_by_role('button', name='블로그 대표 이미지').click()
+            view.get_by_role('button', name='16:9').click()
+            page.wait_for_timeout(500)
+            c3 = save_composite(view)
+            size3, _ = decode_png(c3['file_bytes'])
+            assert abs(size3[0] / size3[1] - 16 / 9) < 0.01 and c3['meta']['ratio'] == '16:9', size3
+            # 원본 상품 사진은 끝까지 그대로 (고치는 요청을 보내지 않음)
+            assert not [c for c in mock.calls if c['path'] == f"images/{prod['id']}" and c['method'] == 'POST'], '원본 이미지 기록을 고치지 않음'
+            no_overflow('상품 장면 (합성)')
+            shot('42-product-saved')
+        check('1.5.1 원본 보존 합성: 이 기기에서 배경 지우기(U²-Netp 실제 실행)·마스크 고치기·저장, 무료 배경 후보 2장, 원본 크기면 상품 칸이 원본 픽셀 그대로, 배경을 바꿔도 같은 픽셀·자리, 16:9, 실패해도 원본 그대로', t_product_layer)
+
+        def t_product_check_insert():
+            view = page.locator('.view.product')
+            # 7) 상품 디테일 검수: 원본 보존 합성은 모양·색·버튼·글자를 미리 채우고, 아홉 칸이 다 '괜찮아'여야 승인
+            view.get_by_role('button', name='원본과 비교해서 검수·승인').click()
+            expect(sheet.locator('.modebadge.m-layer')).to_contain_text('원본 보존 합성')
+            expect(sheet.locator('.cmp figure')).to_have_count(2)
+            rows = sheet.locator('.pcheck')
+            expect(rows).to_have_count(9)
+            assert sheet.locator('.pcheck button[aria-pressed="true"]').count() == 4, '모양·색·버튼·글자 4칸 미리 채움'
+            ok = sheet.get_by_role('button', name='승인 — 사용 가능으로')
+            expect(ok).to_be_disabled()
+            expect(sheet).to_contain_text("모두 '괜찮아'여야 승인할 수 있어")
+            for i in range(9):
+                rows.nth(i).get_by_role('button', name='괜찮아').click()
+            expect(ok).to_be_enabled()
+            no_overflow('상품 디테일 검수')
+            sheet_shot('43-product-check')
+            ok.click()
+            expect(page.locator('#toast')).to_contain_text('승인했어')
+            last = [c for c in mock.calls if c['path'].endswith('/product-check')][-1]
+            assert last['body']['approve'] is True and set(last['body']['items']) == set(PRODUCT_KEYS), last['body']
+            comp = next(i for i in mock.images if i['id'] == last['path'].split('/')[1])
+            assert comp['review_status'] == '사용 가능' and comp['product_check']['approved'] is True
+            # 11) 게시글 자리에 넣기 (사진 자리가 있는 원고만 고를 수 있음) — 다른 시험이 안 쓰는 '쓰레드 게시물 이미지' 자리에 넣고 끝나면 되돌림
+            expect(view.get_by_role('heading', name=re.compile('게시글 이미지 자리에 넣기'))).to_be_visible()
+            view.locator('select[aria-label="넣을 원고"]').select_option(P8)
+            n_link = len([c for c in mock.calls if c['path'].endswith('/images/link')])
+            view.locator('.pstep').last.locator('.go', has_text='쓰레드 게시물 이미지').get_by_role('button', name='여기에 넣기').click()
+            expect(page.locator('#toast')).to_contain_text('넣었어')
+            lk = [c for c in mock.calls if c['path'].endswith('/images/link')][n_link:]
+            assert lk and lk[0]['body'] == {'image_id': comp['id'], 'slot_key': 'x:threads'} and lk[0]['path'] == f'posts/{P8}/images/link', lk
+            mock.link(P8, 'x:threads', None)
+        check('1.5.1 상품 디테일 검수(원본 보존 합성): 원본과 나란히, 아홉 칸 다 괜찮아야 승인 → 사용 가능, 게시글 자리에 넣기', t_product_check_insert)
+
+        def t_product_reference():
+            view = page.locator('.view.product')
+            prod = PSPEC['prod']
+            view.get_by_role('button', name=re.compile('^AI 실사 장면 생성')).click()
+            expect(view).to_contain_text("결과는 'AI 합성 이미지'로 표시되고")
+            expect(view.get_by_role('button', name='배경만 만들고 상품은 직접 배치')).to_be_disabled()
+            # 무료 모델은 참고 사진을 줄여 받음 → 만들기 전에 작은 로고·글자 경고
+            view.locator('select[aria-label="모드"]').select_option('free_draft')
+            expect(view).to_contain_text('500px보다 작게 줄여서 받아')
+            view.locator('select[aria-label="모드"]').select_option('fast_paid')
+            view.get_by_role('button', name='1장').click()
+            go = view.get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))
+            expect(go).to_be_enabled()
+            n0 = len(gen_bodies())
+            go.click()
+            expect(view.get_by_role('heading', name=re.compile('장면 고르기'))).to_be_visible(timeout=60000)
+            req = gen_bodies()[n0]
+            assert req['product']['mode'] == 'reference' and req['product_image_id'] == prod['id'] and req['model'] == 'gpt-image-2.5-flare' and isinstance(req['confirm_usd'], (int, float)), req
+            ref = next(i for i in mock.images if i['kind'] == 'ai' and i.get('composite_mode') == 'reference' and i.get('preset') == 'pscene_ref')
+            assert ref['product_image_id'] == prod['id'] and ref['composite'] is True and ref['ref_images'][0] == {'image_id': prod['id'], 'role': 'subject', 'kind': 'upload'}, ref
+            expect(view.locator('.chip.k-ai').first).to_contain_text('AI 합성 이미지')
+            view.get_by_role('button', name='원본과 비교해서 검수·승인').click()
+            expect(sheet.locator('.modebadge.m-ref')).to_contain_text('AI 재생성')
+            expect(sheet.locator('.badbox')).to_contain_text('제품 외형·제품명·로고')
+            assert sheet.locator('.pcheck button[aria-pressed="true"]').count() == 0, 'AI 재생성은 미리 채우지 않음'
+            sheet.locator('.pcheck').nth(3).get_by_role('button', name='문제 있어').click()
+            expect(sheet.get_by_role('button', name='승인 — 사용 가능으로')).to_be_disabled()
+            sheet.get_by_role('button', name='저장만 (승인 안 함)').click()
+            expect(page.locator('#toast')).to_contain_text('저장했어 (승인 안 함)')
+            assert ref['review_status'] == '검수 전' and ref['product_check']['items'] == {'text': 'issue'}
+            no_overflow('상품 장면 (AI 실사 장면)')
+            shot('44-product-reference')
+            PSPEC['ref'] = ref
+        check('1.5.1 AI 실사 장면: 방식을 따로 고르고, 무료 모델 축소 경고, 상품 사진을 참고(서버가 첫 대상 사진으로), AI 합성 이미지 표시, 검수에서 강한 경고·미리 채우지 않음, 문제 있으면 승인 못 함', t_product_reference)
+
+        def t_product_gates():
+            close_sheet()
+            ref = PSPEC['ref']
+            # 승인 안 한 상품 장면 이미지를 원고 자리에 두면: 발행 준비 완료 잠김 (검사 오류), 미리보기의 '사용 가능'은 상품 검수로
+            key = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])[2]['key']
+            mock.link(P8, key, ref['id'])
+            reload_keys()
+            goto_hash('content/post/' + P8)
+            expect(page.locator('ul.checks')).to_contain_text('상품 디테일 검수를 승인하지 않은 상품 이미지가 1곳 있어', timeout=10000)
+            expect(page.get_by_role('button', name='발행 준비 완료로')).to_be_disabled()
+            card = page.locator('section.studio .slot').nth(2)
+            expect(card).to_contain_text('상품 디테일 검수 전이야')
+            card.get_by_role('button', name='미리보기·내려받기').click()
+            n_patch = len([c for c in mock.calls if c['path'] == f"images/{ref['id']}" and c['method'] == 'POST'])
+            sheet.locator('[aria-label="검수 상태"]').get_by_role('button', name='사용 가능').click()
+            expect(sheet).to_contain_text('상품 디테일 검수')
+            expect(sheet.locator('.modebadge')).to_be_visible()
+            assert len([c for c in mock.calls if c['path'] == f"images/{ref['id']}" and c['method'] == 'POST']) == n_patch, "승인 없이 '사용 가능'을 보내지 않음"
+            close_sheet()
+            card.get_by_role('button', name='미리보기·내려받기').click()
+            expect(sheet.get_by_role('button', name=re.compile('내려받기 \\(상품 검수 전\\)'))).to_be_visible(timeout=15000)
+            close_sheet()
+            # 발행 준비 완료 원고에는 승인 전 상품 이미지를 못 넣음 (서버가 409)
+            p2 = next(p for p in mock.posts if p['id'] == mock.ids['P2'])
+            st0 = p2['stage']
+            p2['stage'] = 'ready'
+            try:
+                r = page.evaluate(f"""async () => {{ const s = JSON.parse(localStorage.getItem('gf-session')); const r = await fetch('{API}/posts/{mock.ids['P2']}/images/link', {{ method: 'POST', headers: {{ 'content-type': 'application/json', 'x-app-session': s }}, body: JSON.stringify({{ image_id: '{ref['id']}', slot_key: 'x:cover' }}) }}); return [r.status, (await r.json()).error]; }}""")
+                assert r == [409, 'product_check_needed'], r
+            finally:
+                p2['stage'] = st0
+            mock.link(P8, key, None)
+            reload_keys()
+        check("1.5.1 승인 전 막기: 발행 준비 완료 잠김(검사 오류), 미리보기 '사용 가능'은 상품 검수로, 내려받아도 저절로 승인 안 됨, 발행 준비 원고 자리에는 못 넣음", t_product_gates)
+
+        def t_product_entries_settings():
+            close_sheet()
+            prod = PSPEC['prod']
+            # 진입 버튼: 원고 이미지 칸·빈 자리·보관함의 상품 사진·미리보기
+            open_p8()
+            studio = page.locator('section.studio')
+            expect(studio.get_by_role('button', name='이 상품으로 장면 만들기')).to_be_visible()
+            expect(studio.locator('.slot').nth(0).get_by_role('button', name='상품 사진으로 장면 만들기')).to_have_count(1)
+            studio.get_by_role('button', name='이 상품으로 장면 만들기').click()
+            expect(page.locator('.view.product')).to_contain_text('원고: 원룸 무선청소기 보관 방법')
+            goto_hash('content/images')
+            page.locator('.view').get_by_role('button', name='상품 합성').click()
+            expect(page.locator('.grid2 .pick').first).to_be_visible()
+            page.locator('.grid2 .pick').first.click()
+            expect(sheet).to_contain_text('원본 보존 합성 — 상품은 원본 사진 픽셀 그대로')
+            expect(sheet).to_contain_text('배경 지우기 $0')
+            close_sheet()
+            # 설정: 고품질 모드 기본은 Sunburst · 높음, 기본값과 저장한 값을 구분
+            goto_hash('settings/images')
+            sec = page.locator('#sec-images')
+            row = sec.locator('.stack', has=page.locator('b', has_text='고품질 유료 생성')).last
+            expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-sunburst')
+            expect(row).to_contain_text('기본값: gpt-image-2.5-sunburst · 높음 — 기본값을 쓰는 중')
+            mock.settings['image_modes'] = {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'high'}}
+            page.get_by_role('button', name='새로고침').click()
+            page.wait_for_timeout(400)
+            goto_hash('settings/images')
+            row = page.locator('#sec-images .stack', has=page.locator('b', has_text='고품질 유료 생성')).last
+            expect(row.locator('label', has_text='모델').locator('select')).to_have_value('gpt-image-2.5-flare')
+            expect(row).to_contain_text('내가 저장한 값을 쓰는 중')
+            page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
+            assert body['image_modes'] == {'hq_paid': {'model': 'gpt-image-2.5-flare', 'quality': 'high'}}, ('저장해 둔 값은 덮어쓰지 않음', body['image_modes'])
+            row.get_by_role('button', name='기본값으로').click()
+            page.locator('#sec-images').get_by_role('button', name='저장', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('저장했어')
+            body = [c for c in mock.calls if c['path'] == 'settings'][-1]['body']
+            assert body['image_modes'] == {}, ('기본값으로 → 저장 안 함', body['image_modes'])
+            mock.settings['image_modes'] = {}
+            no_overflow('설정 > 이미지 (1.5.1)')
+        check('1.5.1 진입 버튼(원고 이미지 칸·빈 자리·보관함)·보관함 상품 합성 탭·비용 따로, 설정은 고품질 기본 Sunburst · 높음이고 저장한 값은 그대로, 기본값으로 되돌리기', t_product_entries_settings)
+
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
             close_sheet()  # 앞 시험이 연 창이 남아 있으면 닫고 (창이 새로고침 버튼을 가리지 않게)
@@ -2372,7 +2886,7 @@ def main():
     RESULTS.append(('콘솔 오류 없음', not errs, '; '.join(errs)[:500]))
     print(('통과' if not errs else '실패'), '콘솔 오류 없음', '' if not errs else errs[:5])
     passed = sum(1 for r in RESULTS if r[1])
-    print(f'\n화면 테스트: {passed}/{len(RESULTS)} 통과')
+    print(f'\n화면 테스트: {passed}/{len(RESULTS)} 통과' + (' (일부만 — UI_ONLY)' if ONLY else ''))
     (OUT / 'result.json').write_text(json.dumps([{'name': n, 'ok': ok, 'error': e} for n, ok, e in RESULTS], ensure_ascii=False, indent=1), encoding='utf-8')
     sys.exit(0 if passed == len(RESULTS) else 1)
 

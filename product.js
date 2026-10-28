@@ -179,7 +179,13 @@ export function createProduct(ui, kit) {
       h('p', { class: 'hint' }, `분홍색으로 덮인 곳이 지울 곳이야. 남긴 부분 ${Math.round(cov * 100)}% · ${m.w}×${m.h} · ${IMG.MASK_METHODS[PS.maskMethod] || '직접 칠함'}${PS.maskEdited ? ' · 손으로 고침' : ''}`),
       h('div', { class: 'go' }, btn(PS.paint ? '칠하기 끄기 (화면 움직이기)' : '칠해서 고치기', PS.paint ? 'sm' : 'sm ghost', () => { PS.paint = !PS.paint; draw(); }),
         PS.paint ? tools : null, PS.paint ? field('붓 크기', size) : null,
-        btn('되돌리기', 'sm ghost', () => { const u = PS.undo.pop(); if (u) { PS.mask = { ...PS.mask, data: u }; PS.maskDirty = true; PS.maskRev = (PS.maskRev || 0) + 1; draw(); } }, { disabled: !PS.undo.length })),
+        btn('되돌리기', 'sm ghost', () => {
+          const u = PS.undo.pop();
+          if (!u) return;
+          // 되돌리면 그때의 방법·'손으로 고침'·저장 상태도 같이 (저장한 영역 그대로면 다시 저장하지 않아도 됨)
+          PS.mask = { data: u.data, w: u.w, h: u.h }; PS.maskEdited = u.edited; PS.maskMethod = u.method; PS.maskDirty = u.dirty || u.saved !== PS.maskSaved;
+          PS.maskRev = (PS.maskRev || 0) + 1; draw();
+        }, { disabled: !PS.undo.length })),
       h('div', { class: 'go' }, btn('다시 자동으로', 'sm ghost', (ev) => autoMask(ev.currentTarget, true)), btn('간단히', 'sm ghost', (ev) => autoMask(ev.currentTarget, false)),
         btn(PS.maskSaved && !PS.maskDirty ? '영역 저장됨 ✓' : '이 영역 저장', PS.maskSaved && !PS.maskDirty ? 'sm ghost' : 'sm', (ev) => saveMask(ev.currentTarget), { disabled: !!(PS.maskSaved && !PS.maskDirty) })),
       cov < 0.02 ? h('p', { class: 'badbox' }, '남긴 부분이 거의 없어. 칠해서 상품을 남기거나 다시 자동으로 해줘.') : null,
@@ -187,6 +193,8 @@ export function createProduct(ui, kit) {
       h('p', { class: 'hint' }, "가장자리에 원래 배경이 조금 남으면 합성 화면의 '가장자리 안쪽으로'로 깎을 수 있어. 저장해도 원본 사진은 그대로야."));
     return step(3, '상품에서 남길 영역 확인', ...kids);
   }
+  // 되돌리기용: 마스크와 그때의 방법·고침 여부·저장 상태 (최근 8번까지)
+  const pushUndo = (ps) => { ps.undo.push({ data: Uint8ClampedArray.from(ps.mask.data), w: ps.mask.w, h: ps.mask.h, edited: ps.maskEdited, method: ps.maskMethod, dirty: ps.maskDirty, saved: ps.maskSaved }); if (ps.undo.length > 8) ps.undo.shift(); };
   function maskCanvas() {
     const cv = h('canvas', { class: 'maskcv', 'aria-label': '상품 영역 (칠해서 고치기)' });
     let last = null, snap = false;
@@ -197,7 +205,7 @@ export function createProduct(ui, kit) {
       if (!PS.paint || !PS.mask) return;
       e.preventDefault();
       try { cv.setPointerCapture(e.pointerId); } catch { /* 무시 */ }
-      if (!snap) { PS.undo.push(Uint8ClampedArray.from(PS.mask.data)); if (PS.undo.length > 8) PS.undo.shift(); snap = true; }
+      if (!snap) { pushUndo(PS); snap = true; }
       last = at(e);
       CUT.brush(PS.mask.data, PS.mask.w, PS.mask.h, last.x, last.y, PS.brush * Math.max(PS.mask.w, PS.mask.h), PS.tool === 'add');
       redrawSoon();
@@ -240,7 +248,7 @@ export function createProduct(ui, kit) {
       const small = { data: shrinkTo(ps.src, ws.w, ws.h), w: ws.w, h: ws.h };
       const r = await CUT.autoMask(small.data, small.w, small.h, { useModel });
       if (PS !== ps) return;
-      if (ps.mask) { ps.undo.push(Uint8ClampedArray.from(ps.mask.data)); if (ps.undo.length > 8) ps.undo.shift(); }
+      if (ps.mask) pushUndo(ps);
       ps.mask = { data: r.mask, w: small.w, h: small.h };
       ps.maskMethod = r.method; ps.maskEdited = false; ps.maskDirty = true; ps.maskView = null; ps.maskRev = (ps.maskRev || 0) + 1;
       ps.segNote = r.error ? `자동 배경 지우기 도구를 쓰지 못해서 간단한 방법(테두리 색)으로 했어. 결과를 확인하고 칠해서 고쳐줘. (${r.error === 'model_hash' ? '받은 도구 파일이 달라서 안 썼어' : '이 기기·브라우저에서 안 될 수 있어'})` : '';
@@ -622,7 +630,7 @@ export function createProduct(ui, kit) {
     const approved = result && IMG.productApproved(result);
     kids.push(
       h('div', { class: 'go' }, btn('기본값으로', 'sm ghost', () => { PS.layer = IMG.defaultLayer(spec()); draw(); }),
-        btn(result && PS.savedLayer === JSON.stringify(PS.layer) && PS.savedBg === c.image.id ? '저장됨 ✓' : '합성 저장 (새 이미지로)', 'sm', (ev) => saveComposite(ev.currentTarget, c))),
+        btn(result && PS.savedKey === saveKey(PS, c) ? '저장됨 ✓' : '합성 저장 (새 이미지로)', 'sm', (ev) => saveComposite(ev.currentTarget, c))),
       result ? h('div', { class: 'stack' },
         h('div', { class: 'chips' }, kindChip(result), h('span', { class: 'chip ' + (approved ? 'v-ok' : 'v-unk') }, approved ? '상품 검수 승인' : '상품 검수 전')),
         h('div', { class: 'go' }, btn(approved ? '상품 디테일 검수 다시 보기' : '원본과 비교해서 검수·승인', 'sm', () => checkSheet(result, { onDone: (im) => { Object.assign(result, im); draw(); } })))) : null,
@@ -670,28 +678,33 @@ export function createProduct(ui, kit) {
       if (again) { again = false; requestAnimationFrame(() => recompose()); }
     }
   }
+  // 이미 저장한 것과 같은 합성인지: 위치·크기·그림자·밝기, 제작 목적·비율, 배경, 마스크가 모두 같을 때만 '저장됨'
+  const saveKey = (ps, c) => JSON.stringify([ps.layer, ps.purpose, ps.ratio || prefRatio(ps.purpose), c.image.id, ps.maskRev || 0]);
   // 원래 크기로 다시 그려서 저장 (원본 상품 사진·마스크 원래 크기 — 미리보기 사본이 아님)
   async function saveComposite(button, c) {
     const ps = PS;
     if (!ps.maskSaved || ps.maskDirty) { const m = await saveMask(null); if (!m) return; }
+    // 누른 때의 설정으로 저장 (저장하는 동안 바꾼 위치·비율·마스크는 다음 저장에 — 저장한 마스크 기록과 합성에 쓴 마스크가 어긋나지 않게 복사)
+    const key = saveKey(ps, c);
+    const snap = { layer: JSON.parse(JSON.stringify(ps.layer)), purpose: ps.purpose, ratio: IMG.ratioOf(ps.purpose, ps.ratio || prefRatio(ps.purpose)),
+      mask: { ...ps.mask, data: Uint8ClampedArray.from(ps.mask.data) }, maskId: ps.maskSaved.id, spec: spec(), parent: ps.parentId, name: ps.name, template: ps.template };
     const j = await run(button, async () => {
       button.textContent = '저장하는 중…';
       const bg = await bgOf(c);
-      const ratio = IMG.ratioOf(ps.purpose, ps.ratio || prefRatio(ps.purpose));
-      const o = CUT.outputSize(ratio, bg.w, bg.h, (IMG.PURPOSES[ps.purpose] || IMG.PURPOSES.blog_body).out);
-      const r = CUT.makeComposer(ps.src, ps.mask)(bg, { ...ps.layer, ratio }, o.W, o.H);
+      const o = CUT.outputSize(snap.ratio, bg.w, bg.h, (IMG.PURPOSES[snap.purpose] || IMG.PURPOSES.blog_body).out);
+      const r = CUT.makeComposer(ps.src, snap.mask)(bg, { ...snap.layer, ratio: snap.ratio }, o.W, o.H);
       if (r.warnings.includes('empty_mask')) throw { code: 'empty_mask' };
       const blob = await CUT.toPngBlob(r.data, o.W, o.H);
       const fd = new FormData();
-      const desc = clean(`${ps.name || '상품'} · ${IMG.PRODUCT_TEMPLATES[ps.template].label}`).slice(0, 120);
-      fd.append('meta', JSON.stringify({ product_image_id: ps.product.id, background_image_id: c.image.id, mask_id: ps.maskSaved.id, layer: { ...ps.layer, ratio }, purpose: ps.purpose, ratio,
-        description: desc, spec: spec(), parent_image_id: ps.parentId || undefined, post_id: ps.postId || undefined, slot_key: undefined }));
+      const desc = clean(`${snap.name || '상품'} · ${IMG.PRODUCT_TEMPLATES[snap.template].label}`).slice(0, 120);
+      fd.append('meta', JSON.stringify({ product_image_id: ps.product.id, background_image_id: c.image.id, mask_id: snap.maskId, layer: { ...snap.layer, ratio: snap.ratio }, purpose: snap.purpose, ratio: snap.ratio,
+        description: desc, spec: snap.spec, parent_image_id: snap.parent || undefined, post_id: ps.postId || undefined }));
       fd.append('file', blob, 'composite.png');
       return api('/images/composite', { method: 'POST', body: fd, timeout: 60000 });
     }, '합성 이미지를 새로 저장했어 (원본은 그대로)');
     if (button.isConnected) button.textContent = '합성 저장 (새 이미지로)';
     if (!j || !j.image || PS !== ps) return;
-    ps.result = j.image; ps.savedId = j.image.id; ps.parentId = j.image.id; ps.savedLayer = JSON.stringify(ps.layer); ps.savedBg = c.image.id;
+    ps.result = j.image; ps.savedId = j.image.id; ps.parentId = j.image.id; ps.savedKey = key;
     draw();
     refreshPost(ps.postId);
   }
@@ -769,7 +782,8 @@ export function createProduct(ui, kit) {
     if (!img) return null;
     const box = h('div', { class: 'stack' });
     const approved = IMG.productApproved(img);
-    const posts = (ui.S.posts || []).filter((p) => p.body && IMG.parseSlots(p.body).length);
+    // 본문 사진 자리가 없는 원고도 대표 이미지·SNS 자리에는 넣을 수 있어서, 본문이 있는 원고는 모두 보여줌
+    const posts = (ui.S.posts || []).filter((p) => p.body && !p.deleted_at);
     const postSel = h('select', { 'aria-label': '넣을 원고' }, opt('', '원고 고르기'), posts.slice(0, 80).map((p) => opt(p.id, ui.titleOf(p))));
     postSel.value = PS.postId || PS.insertPost || '';
     const drawSlots = () => {
