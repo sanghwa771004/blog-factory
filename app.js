@@ -2103,7 +2103,7 @@ function secDevices() {
 }
 function secBackup() {
   return [
-    h('p', { class: 'hint' }, '원고·주제·상품·링크·실적·설정·이미지 정보(출처·프롬프트·비용·연결)를 파일 하나(JSON)로 받아. 접속 코드와 기기 정보는 들어가지 않아. 이미지 파일 자체는 안 들어가니 필요한 이미지는 보관함에서 내려받아 둬.'),
+    h('p', { class: 'hint' }, '원고·주제·상품·링크·실적·설정·이미지 정보(출처·프롬프트·비용·연결·AI 검수·내 평가)를 파일 하나(JSON)로 받아. 접속 코드와 기기 정보는 들어가지 않아. 이미지 파일 자체는 안 들어가니 필요한 이미지는 보관함에서 내려받아 둬.'),
     btn('전체 백업 받기', 'sm', async (ev) => {
       const j = await run(ev.currentTarget, () => api('/export'));
       if (!j) return;

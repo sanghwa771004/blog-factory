@@ -443,11 +443,15 @@ const EXPORT_TABLES: [string, [string, boolean][]][] = [
   ["links", [["id", true]]], ["metrics", [["id", true]]], ["imports", [["id", true]]],
   ["post_images", [["id", true]]], ["post_image_slots", [["id", true]]], ["image_generations", [["id", true]]], ["post_card_decks", [["post_id", true]]],
   ["post_channels", [["id", true]]], ["search_terms", [["id", true]]],
+  ["image_reviews", [["id", true]]],
 ];
 // 016(1.4.0)에서 생긴 표 — 아직 016 전인 DB면 빈 목록으로
 const OPS_TABLES = ["post_channels", "search_terms"];
+// 017(1.5.0)에서 생긴 표: AI 검수 의견·비용과 내 평가 — 017 전 DB면 빈 목록으로.
+// 연결 확인 기록(image_provider_checks)은 운영 기록이라 api_calls 처럼 백업에 넣지 않음
+const STUDIO150_TABLES = ["image_reviews"];
 async function getExport(_c: Ctx) {
-  const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결)만 들어 있어." };
+  const out: J = { exported_at: nowIso(), version: VERSION, note: "접속 코드·기기 로그인 정보는 들어 있지 않아. 이미지 파일 자체는 들어 있지 않고 정보(출처·프롬프트·비용·연결·AI 검수·내 평가)만 들어 있어." };
   const counts: J = {};
   const missing: string[] = [];
   for (const [t, order] of EXPORT_TABLES) {
@@ -455,7 +459,7 @@ async function getExport(_c: Ctx) {
     try { rows = await fetchAll(t, order); } catch (e) {
       // 이미지 표가 아직 없는 DB(012 적용 전)여도 나머지 백업은 받을 수 있게 — 그 밖의 오류는 그대로 실패
       const code = String((e as { code?: string })?.code ?? "");
-      if (t.startsWith("post_image") || t === "image_generations" || t === "post_card_decks" || OPS_TABLES.includes(t)) {
+      if (t.startsWith("post_image") || t === "image_generations" || t === "post_card_decks" || OPS_TABLES.includes(t) || STUDIO150_TABLES.includes(t)) {
         if (code === "PGRST205" || code === "42P01") { missing.push(t); out[t] = []; counts[t] = null; continue; }
       }
       throw e;

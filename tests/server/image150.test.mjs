@@ -4,7 +4,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { HAS_DENO, SKIP as skip, startServer } from './harness.mjs';
+import { HAS_DENO, SKIP as skip, startServer, pg } from './harness.mjs';
 
 const fx = (n) => new Uint8Array(readFileSync(new URL(`../fixtures/img/${n}`, import.meta.url)));
 const JPG = fx('photo-4x3.jpg');      // 1280x960
@@ -88,6 +88,7 @@ function fakeDb(state) {
       const rows = idsOf(query.id).map((id) => images[id]).filter(Boolean);
       return [200, one ? rows[0] || {} : rows];
     }
+    if (t === 'image_reviews' && state.noReviewsTable) return pg.noTable('image_reviews'); // 017 전 DB (표가 없음)
     if (t === 'image_reviews' && method === 'GET') {
       return [200, [
         { image_id: AI, batch_id: BATCH, model: 'gpt-image-2.5-flare', preferred: true, scores: { fit: 3, ai_look: 2 } },
@@ -100,7 +101,7 @@ function fakeDb(state) {
     return undefined;
   };
 }
-const newState = () => ({ pre017: false, beginError: '', reviewError: '', begins: [], fails: [], saves: [], evals: [], reviews: [], checks: [], uploads: [], removed: [], settingsPatch: [], imagePatch: [] });
+const newState = () => ({ pre017: false, noReviewsTable: false, beginError: '', reviewError: '', begins: [], fails: [], saves: [], evals: [], reviews: [], checks: [], uploads: [], removed: [], settingsPatch: [], imagePatch: [] });
 const gen = (o) => ({ request_key: 'req-' + Math.random().toString(36).slice(2, 12), post_id: POST, slot_key: SLOT, purpose: 'blog_body', ratio: '4:3', text: '책상 위에 놓인 작은 흰색 제습기', ...o });
 const waitFor = async (fn, ms = 15000) => { const until = Date.now() + ms; for (;;) { const v = fn(); if (v) return v; if (Date.now() > until) return null; await new Promise((ok) => setTimeout(ok, 100)); } };
 
@@ -118,6 +119,24 @@ describe('키 없는 서버', () => {
     assert.equal(r.status, 200);
     assert.deepEqual(r.j.keys, { openai: false, gemini: false, pexels: false, cloudflare: false });
     for (const p of ['cloudflare', 'openai', 'gemini']) assert.deepEqual(r.j.provider_status[p], { key: false, check: null, last_success: null, last_failure: null }, p);
+  });
+  test('백업: 1.5.0 새 표 image_reviews(AI 검수·내 평가)도 담음 — 017 전 DB면 빈 목록과 missing_tables, 연결 확인 기록은 운영 기록이라 안 담음', { skip }, async () => {
+    const a = await srv.call('GET', 'export');
+    assert.equal(a.status, 200);
+    assert.equal(a.j.version, '1.5.0');
+    assert.equal(a.j.counts.image_reviews, 3);
+    assert.equal(a.j.image_reviews.length, 3);
+    assert.ok(a.j.image_reviews.some((r) => r.preferred === true && r.scores.fit === 3), '내 평가가 그대로');
+    assert.ok(!('image_provider_checks' in a.j) && !('image_provider_checks' in a.j.counts));
+    assert.equal(a.j.missing_tables, undefined);
+    assert.match(a.j.note, /AI 검수·내 평가/);
+    st.noReviewsTable = true;
+    try {
+      const b = await srv.call('GET', 'export');
+      assert.equal(b.status, 200, '표 하나가 없어도 나머지 백업은 받음');
+      assert.deepEqual([b.j.image_reviews, b.j.counts.image_reviews, b.j.missing_tables], [[], null, ['image_reviews']]);
+      assert.equal(b.j.counts.posts, 1);
+    } finally { st.noReviewsTable = false; }
   });
   test('모르는 모델·종료된 모델·키 없는 공급자: 생성 기록도 만들지 않고 거절 (OpenAI로 보내지 않음)', { skip }, async () => {
     const n = st.begins.length;
