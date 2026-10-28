@@ -41,7 +41,7 @@
 | 화면 보안 정책(CSP) | `script-src 'self' 'wasm-unsafe-eval'` — 배경 지우기 실행기(WebAssembly)를 돌리려고 `'wasm-unsafe-eval'`만 더함. `unsafe-eval`·`unsafe-inline`·외부 스크립트 주소는 여전히 안 됨. 모델·실행기 파일은 외부 CDN이 아니라 앱 주소(GitHub Pages)에서 받고, 모델은 SHA-256으로 확인한 뒤에만 씀 | `index.html`, `cutout.js` loadSegmenter, `vendor/onnxruntime-web/README.md`, `tests/security_static.test.js` |
 | 사진이 나가는 곳 | 배경 지우기·합성은 이 기기 안에서만 (서버·외부 API로 사진을 보내지 않음). 원본 보존 합성의 배경 만들기에도 상품 사진을 AI에 안 보냄 | `cutout.js`, `index.ts` generateImage, 서버 시험 '원본 보존 합성의 배경 만들기…' |
 | 새 경로 | `POST /images/{id}/mask`·`POST /images/composite`·`POST /images/{id}/product-check` 모두 기존 세션 검사를 지나야 함. 마스크: PNG만·6MB·4096px·상품 사진과 같은 비율·진짜 사진(쓸 권한 확인한 직접 올림·Pexels)에만. 합성: 파일 첫 바이트로 형식 확인·12MB·4096px·숨은 정보 지우기, 원본 상품·배경·마스크가 맞는지 DB 함수가 다시 확인. 파일 경로는 서버가 무작위로 만듦(`mask/…`·`composite/…`) | `index.ts` saveMask·saveComposite·productCheck, `018` |
-| DB | 새 표 `product_masks` RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수 2개는 `search_path = ''`·service_role만 실행. 승인 없이 상품 장면 이미지를 '사용 가능'으로 바꾸면 트리거가 막음 | `018`, `tests/sql_images_151.test.js` |
+| DB | 새 표 `product_masks` RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수(`image_mask_save`·`image_product_check`·`post_product_unapproved`)와 트리거 함수는 `search_path = ''`, 외부 역할 실행 권한 회수(서버 키만). 트리거: 승인 없이 상품 장면 이미지를 '사용 가능'으로 바꾸거나, 발행 준비·예약·게시 글 자리에 넣거나, 그런 이미지가 있는 글을 발행 준비·예약·게시로 바꾸면 DB가 막음. 승인을 풀면 쓰는 발행 준비·예약 글은 '검수 필요'로 | `018`, `tests/sql_images_151.test.js` |
 | 실패·지우기 | 합성 저장이 DB에서 거절되면 새로 올린 합성 파일만 지움(원본 상품 사진·배경·마스크는 안 건드림). 남은 결과가 쓰는 원본 상품 사진·배경은 못 지움. 상품 사진을 지우면 그 마스크 파일도 같이 지움 | `index.ts` saveComposite·deleteImage, `018` image_delete |
 
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)
