@@ -1,0 +1,10 @@
+models/u2netp.onnx — 상품 사진 배경 지우기 모델 (글공장 1.5.1 '원본 보존 합성'에서 이 기기 브라우저 안에서만 씀)
+
+모델: U²-Netp (U-2-Net 의 작은 판, 약 4.6MB)
+  만든 곳: Xuebin Qin, Zichen Zhang, Chenyang Huang, Masood Dehghan, Osmar R. Zaiane, Martin Jagersand
+  논문: "U²-Net: Going Deeper with Nested U-Structure for Salient Object Detection", Pattern Recognition 106 (2020)
+  원래 저장소: https://github.com/xuebinqin/U-2-Net — Apache License 2.0 (이 폴더의 LICENSE-Apache-2.0.txt)
+ONNX 파일: rembg 프로젝트가 배포한 파일 그대로 (https://github.com/danielgatis/rembg/releases/tag/v0.0.0 · u2netp.onnx)
+  rembg: MIT License (https://github.com/danielgatis/rembg/blob/main/LICENSE.txt)
+SHA-256: 309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8 (앱이 받은 뒤 이 값과 같은지 확인하고 씀 — cutout.js MODEL_SHA256)
+바꾼 것: 없음 (파일을 고치지 않고 그대로 넣음)

@@ -48,7 +48,9 @@ test('서버는 키를 환경변수(Supabase Secrets)에서만 읽고, 화면으
 test('화면 보안 정책(CSP): 스크립트는 같은 곳만, 이미지는 Supabase(서명 주소)·Pexels·blob만', () => {
   const html = read('index.html');
   const csp = /Content-Security-Policy" content="([^"]+)"/.exec(html)[1];
-  assert.match(csp, /script-src 'self';/);
+  // 1.5.1: 배경 지우기(ONNX Runtime Web)를 돌리려고 WebAssembly 컴파일만 허용 — 'unsafe-eval'(자바스크립트 eval)·'unsafe-inline' 은 여전히 없음, 스크립트는 같은 곳만
+  assert.match(csp, /script-src 'self' 'wasm-unsafe-eval';/);
+  assert.ok(!/script-src[^;]*'unsafe-eval'/.test(csp) && !/script-src[^;]*'unsafe-inline'/.test(csp) && !/script-src[^;]*https?:/.test(csp));
   assert.match(csp, /img-src 'self' data: blob: https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co https:\/\/images\.pexels\.com;/);
   assert.match(csp, /connect-src 'self' https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co;/);
   assert.ok(!/connect-src[^;]*(openai|pexels|googleapis|cloudflare)/.test(csp), '화면이 OpenAI·Pexels·Gemini·Cloudflare로 직접 연결하지 못하게');

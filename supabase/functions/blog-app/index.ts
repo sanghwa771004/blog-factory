@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.5.0)
+// 블로그 글공장 서버 API (1.5.1)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -21,7 +21,7 @@ import {
   reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub, storagePath, sha256Hex,
 } from "./image_service.js";
 
-const VERSION = "1.5.0";
+const VERSION = "1.5.1";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)

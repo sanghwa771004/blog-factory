@@ -1,8 +1,9 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.5.0';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.5.0';
+import * as IMG from './images.js?v=1.5.1';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.5.1';
+import { createProduct, PRODUCT_ERR } from './product.js?v=1.5.1';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -68,11 +69,13 @@ export const IMAGE_ERR = {
   model_retired: '공급자가 종료한 모델이야. 설정 > 이미지에서 다른 모델로 바꿔줘.',
   ref_small_missing: '무료 모델에 보낼 작은 사본이 없어. 다시 눌러주면 만들어서 보낼게.',
   refs_too_big: '참고 사진이 너무 커서 한 번에 보낼 수 없어. 장수를 줄여줘.',
+  // 1.5.1 상품 사진으로 장면 만들기
+  ...PRODUCT_ERR,
 };
 export const IMAGE_FIELD = {
   request_key: '요청', slot_key: '사진 자리', text: '사진 설명', ratio: '비율', quality: '품질', photo_id: '사진', file: '파일', b64: '파일', q: '검색어',
   image_gen_model: '생성 모델', image_edit_model: '편집 모델', image_quality: '기본 품질', image_daily_limit: '하루 한도', image_monthly_budget_usd: '한 달 예산',
-  image_modes: '모드별 모델', image_review_model: '검수 모델', image_request_cap_usd: '한 번 상한', image_ratio_prefs: '용도별 비율', model: '모델', refs: '참고 사진', batch: '여러 장 묶음', scene: '장면 설계서', provider: '공급자',
+  image_modes: '모드별 모델', product_image_id: '상품 사진', background_image_id: '배경', mask_id: '마스크', layer: '합성 설정', edit: '바꿀 내용', image_review_model: '검수 모델', image_request_cap_usd: '한 번 상한', image_ratio_prefs: '용도별 비율', model: '모델', refs: '참고 사진', batch: '여러 장 묶음', scene: '장면 설계서', provider: '공급자',
   image_fx_krw: '환율', image_fx_date: '환율 날짜', image_prices: '가격', crop: '자르기', slides: '카드 문구', template: '템플릿', bg_image_id: '배경 이미지',
   actual_usd: '청구액', actual_checked_at: '확인일', base_image_id: '고칠 이미지', post_id: '원고', image_id: '이미지', review_status: '검수 상태',
 };
@@ -347,6 +350,8 @@ export function createStudio(ui) {
     } else if (img.kind === 'stock') parts.push(img.attribution_text || `사진: ${img.author_name || '사진가'} (Pexels)`);
     else if (img.kind === 'upload') parts.push('직접 올림 · 쓸 권한 확인함');
     else if (img.kind === 'card') parts.push('카드뉴스 (앱에서 만듦)');
+    else if (img.kind === 'composite') parts.push('상품은 원본 사진 그대로 · 배경은 AI');
+    if (IMG.productSceneMode(img)) parts.push(IMG.productApproved(img) ? '상품 검수 승인' : '상품 검수 전');
     if (img.width && img.height) parts.push(`${img.width}×${img.height}`);
     if (img.used_posts > 1) parts.push(`다른 원고 ${img.used_posts - 1}곳에서도 사용 중`);
     return parts.join(' · ');
@@ -414,9 +419,10 @@ export function createStudio(ui) {
     kids.push(h('div', { class: 'go' },
       all ? btn(`모두 내려받기 (${all})`, 'sm', () => downloadAllSheet(p)) : null,
       btn('카드뉴스 만들기', 'sm ghost', () => go(`content/post/${p.id}/cards`)),
+      btn('이 상품으로 장면 만들기', 'sm ghost', () => prd().start({ postId: p.id })),
       btn('이미지 보관함', 'sm ghost', () => go('content/images'))));
     kids.push(costBlock(p, d));
-    kids.push(h('p', { class: 'hint' }, "AI 이미지는 실제 사진이 아니야. 실제 상품 모습은 직접 찍은 사진을 쓰거나, 진짜 제품 사진을 참고 사진(대상 모양 유지)으로 넣어 'AI 합성'으로 만들어줘. 앱은 블로그에 사진을 대신 올리지 않아 — 내려받아서 직접 넣어줘."));
+    kids.push(h('p', { class: 'hint' }, "AI 이미지는 실제 사진이 아니야. 실제 상품 모습은 직접 찍은 사진을 쓰거나, '이 상품으로 장면 만들기'에서 상품 사진을 원본 그대로 합성(원본 보존 합성)하거나 참고해서 그려(AI 실사 장면) 줘. 앱은 블로그에 사진을 대신 올리지 않아 — 내려받아서 직접 넣어줘."));
     put(box, ...kids);
   }
   function slotCard(p, d, s, imgs, prevSlot, nextSlot) {
@@ -434,7 +440,9 @@ export function createStudio(ui) {
     if (s.n) card.append(h('p', { class: 'slot-t' }, s.text || '(설명 없음)'));
     const risk = s.n ? IMG.slotRisk(s.text) : { real: false };
     // 진짜 제품 사진을 참고한 AI 합성은 '실제 사진을 권해' 대신 원본과 비교하라고 (1.5.0)
-    if (risk.real && img && img.kind === 'ai' && img.composite) card.append(h('p', { class: 'notice' }, "진짜 제품 사진을 참고한 'AI 합성'이야. 참고한 사진과 모양·글자·버튼이 같은지 확인하고, 실제로 써본 사진처럼 쓰지 마."));
+    // 1.5.1: 상품 장면 이미지는 상품 디테일 검수를 승인해야 '사용 가능'·발행 준비 완료
+    if (img && IMG.productSceneMode(img) && !IMG.productApproved(img)) card.append(h('p', { class: 'notice' }, "상품 디테일 검수 전이야. 원본과 비교해서 승인해야 '사용 가능'이 되고 발행 준비 완료로 바꿀 수 있어."));
+    if (risk.real && img && img.kind === 'ai' && img.composite) card.append(h('p', { class: 'notice' }, "진짜 제품 사진을 참고한 'AI 합성 이미지'야. 참고한 사진과 모양·글자·버튼이 같은지 확인하고, 실제로 써본 사진처럼 쓰지 마."));
     else if (risk.real && (!img || img.kind === 'ai')) card.append(h('p', { class: 'notice' }, risk.msg));
     if (img) {
       card.append(thumb(img, () => previewSheet(p, s)), h('span', { class: 'hint' }, imageLine(img, d)));
@@ -451,7 +459,9 @@ export function createStudio(ui) {
       // 실제 상품·화면이 보여야 하는 자리는 직접 찍은 사진 올리기를 먼저 권함
       const ai = btn('AI로 만들기', risk.real ? 'sm ghost' : 'sm', () => genSheet(p, s), { disabled: running });
       const up = btn('파일 올리기', risk.real ? 'sm' : 'sm ghost', () => uploadSheet(p, s));
-      row2.append(risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)));
+      const own = s.n && IMG.isOwnPhotoSlot(s.text);
+      row2.append(risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)),
+        own ? null : btn('상품 사진으로 장면 만들기', 'sm ghost', () => prd().start({ postId: p.id, slotKey: s.key })));
     } else {
       row2.append(btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
         img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => regen(p, s, d, img), { disabled: running }) : null,
@@ -1008,7 +1018,9 @@ export function createStudio(ui) {
         h('div', { class: 'chips' }, kindChip(img), reviewChip(img)),
         h('p', { class: 'hint' }, `${g.model} · ${img.width}×${img.height} · 품질 ${IMG.qualityLabel(g.model, g.quality)}${secs ? ` · ${secs}초` : ''} · 비용 ${usd(c.usd)} (${c.label})`),
         btn(single ? `이 이미지 쓰기 → ${slotName(s)}에 연결` : `이걸로 쓰기 → ${slotName(s)}`, single ? 'wide' : 'sm', async (ev) => { const j = await linkTo(p, s, img, ev.currentTarget, IMG.PURPOSES[g.purpose] ? { purpose: g.purpose } : null); if (j) closeSheet(); }),
+        IMG.productSceneMode(img) ? h('p', { class: 'notice' }, "실제 상품이 보여야 하는 자리에 진짜 상품 사진을 참고해서 만든 'AI 합성 이미지'야. 상품 디테일 검수에서 원본과 비교해서 승인해야 써.") : null,
         h('div', { class: 'go' },
+          IMG.productSceneMode(img) ? btn('상품 디테일 검수', 'sm', () => prd().checkSheet(img, { onDone: (im) => { Object.assign(img, im); refresh(p.id); } })) : null,
           btn('AI 검수 (참고용)', 'sm ghost', () => reviewSheet(p, img, { back: () => (single ? showResult(g, img) : showBatch()), slot: s })),
           IMG.modelCaps(g.model).edit || IMG.resolveModes(settings()).some((m) => m.caps.edit) ? btn('고치기', 'sm ghost', () => genSheet(p, s, { base: img })) : null));
     };
@@ -1016,7 +1028,7 @@ export function createStudio(ui) {
       openSheet(`${slotName(s)} — 다 만들었어`,
         resultCard(g, img, true),
         h('ul', { class: 'lic' }, h('li', null, '이미지 안에 글자·로고·가격이 생기지 않았는지'), h('li', null, img.composite ? '참고한 제품 사진과 모양·글자·버튼이 같은지 (다르면 쓰지 마)' : '실제 상품 사진처럼 보이지 않는지 (이건 AI 예시 이미지야)'), h('li', null, '사진 자리 설명과 맞는지')),
-        h('p', { class: 'hint' }, "쓰기 전에 위를 확인해줘. 미리보기에서 '사용 가능'으로 바꾸면 검수 완료야."),
+        h('p', { class: 'hint' }, IMG.productSceneMode(img) ? "쓰기 전에 위를 확인하고, '상품 디테일 검수'에서 승인해줘." : "쓰기 전에 위를 확인해줘. 미리보기에서 '사용 가능'으로 바꾸면 검수 완료야."),
         h('div', { class: 'go' }, btn('다시 만들기', 'sm ghost', () => { busy = false; form(); update(); }), btn('보관함에만 두고 닫기', 'sm ghost', closeSheet)));
       ui.setSheetOnClose(() => refresh(p.id));
     };
@@ -1571,8 +1583,11 @@ export function createStudio(ui) {
     drawRatio();
     // 검수
     const reviewSeg = h('div', { class: 'seg', role: 'group', 'aria-label': '검수 상태' });
+    // 1.5.1: 상품 장면 이미지는 '사용 가능'을 누르면 상품 디테일 검수로 (승인해야 사용 가능 — 서버·DB도 막음)
+    const pmode = IMG.productSceneMode(img);
     const drawReview = () => put(reviewSeg, ...['검수 전', '사용 가능', '사용 안 함'].map((v) =>
       h('button', { type: 'button', 'aria-pressed': String(v === img.review_status), onclick: async (ev) => {
+        if (v === '사용 가능' && pmode && !IMG.productApproved(img)) { prd().checkSheet(img, { onDone: (im) => { Object.assign(img, im); refresh(p.id); } }); return; }
         const j = await run(ev.currentTarget, () => api('/images/' + img.id, { method: 'POST', body: { review_status: v } }), `'${v}'(으)로 바꿨어`);
         if (j) { img.review_status = v; drawReview(); syncDl(); refresh(p.id); }
       } }, v)));
@@ -1587,7 +1602,7 @@ export function createStudio(ui) {
       if (img.review_status === '사용 안 함') { dlBtn.disabled = true; dlBtn.textContent = "'사용 안 함' 이미지는 내려받지 않아"; return; }
       if (!file) return;
       dlBtn.disabled = false;
-      dlBtn.textContent = img.review_status === '검수 전' ? `검수 완료하고 내려받기 · ${file.name}` : `내려받기 · ${file.name}`;
+      dlBtn.textContent = pmode && !IMG.productApproved(img) ? `내려받기 (상품 검수 전) · ${file.name}` : img.review_status === '검수 전' ? `검수 완료하고 내려받기 · ${file.name}` : `내려받기 · ${file.name}`;
     };
     const prepare = async () => {
       const my = ++seq;
@@ -1606,7 +1621,8 @@ export function createStudio(ui) {
     };
     const save = async () => {
       if (!file) return;
-      const reviewNow = img.review_status === '검수 전';
+      // 상품 장면 이미지는 내려받아도 저절로 '사용 가능'이 되지 않음 (상품 디테일 검수 승인이 필요)
+      const reviewNow = img.review_status === '검수 전' && !pmode;
       const pending = saveFiles([file], file.name); // 누른 순간에 바로 (휴대폰 공유 창은 바로 열어야 함)
       if (reviewNow) api('/images/' + img.id, { method: 'POST', body: { review_status: '사용 가능' } }).then(() => { img.review_status = '사용 가능'; drawReview(); syncDl(); }).catch(() => {});
       // 저장 안 한 자르기·용도로 내려받았으면 그것도 저장 (복사한 글의 파일 이름·크기와 맞게)
@@ -1620,7 +1636,9 @@ export function createStudio(ui) {
     info.push(h('div', { class: 'chips' }, kindChip(img), reviewChip(img)));
     if (img.kind === 'ai') {
       const c = genCost(g);
-      info.push(h('p', { class: 'hint' }, `${img.composite ? 'AI 합성 (실제 사진 참고)' : 'AI 생성'} · ${img.model}${g ? ' · ' + IMG.sizeLabel(g.size) + ' · 품질 ' + IMG.qualityLabel(g.model, g.quality) : ''}${c ? ` · 비용 ${usd(c.usd)} (${c.label})` : ''}`));
+      info.push(h('p', { class: 'hint' }, `${img.composite ? 'AI 합성 이미지 (실제 사진 참고)' : 'AI 생성'} · ${img.model}${g ? ' · ' + IMG.sizeLabel(g.size) + ' · 품질 ' + IMG.qualityLabel(g.model, g.quality) : ''}${c ? ` · 비용 ${usd(c.usd)} (${c.label})` : ''}`));
+      if (pmode) info.push(h('div', { class: 'go' }, btn(IMG.productApproved(img) ? '상품 디테일 검수 (승인함)' : '상품 디테일 검수 · 승인', 'sm', () => prd().checkSheet(img, { onDone: (im) => { Object.assign(img, im); refresh(p.id); } })),
+        btn('상품 장면 화면에서 이어 하기', 'sm ghost', () => { closeSheet(); prd().start({ resume: img.id, postId: p.id, slotKey: s.key }); })));
       info.push(h('ul', { class: 'lic' }, h('li', null, '글자·로고·가격이 생기지 않았는지'),
         h('li', null, img.composite ? '참고한 제품 사진과 모양·글자·버튼이 같은지 (다르면 쓰지 마)' : '실제 상품 사진처럼 보이지 않는지 (AI 예시 이미지야)'), h('li', null, '사진 자리 설명과 맞는지')));
       info.push(h('div', { class: 'go' }, btn('AI 검수 (참고용)', 'sm ghost', () => reviewSheet(p, img, { back: () => previewSheet(p, s), slot: s })),
@@ -1639,11 +1657,16 @@ export function createStudio(ui) {
         ' on ', img.source_url ? h('a', { href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels') : 'Pexels'));
       info.push(h('p', { class: 'hint' }, `라이선스: ${img.license}`), h('div', { class: 'go' }, h('span', { class: 'sns' }, img.attribution_text), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(img.attribution_text, ev.currentTarget) }, '출처 문구 복사')));
     } else if (img.kind === 'upload') info.push(h('p', { class: 'hint' }, '직접 올린 사진 · 쓸 권한이 있다고 확인함'), sourcePicker(img, () => { refresh(p.id); }));
-    else info.push(h('p', { class: 'hint' }, `카드뉴스에서 만든 이미지${img.license && img.license.includes('배경') ? ' · ' + img.license.replace(/^카드뉴스 \(앱에서 직접 만듦\)\s*·\s*/, '') : ''}`));
-    // 실제 사진은 AI로 고치지 않음 — 대신 참고 사진으로 넣어 새로 만들면 'AI 합성'으로 따로 표시됨
+    else if (img.kind === 'composite') {
+      info.push(h('p', { class: 'hint' }, `원본 보존 합성 · 상품은 원본 사진 픽셀 그대로, 배경은 AI가 만듦 (앱이 이 기기에서 합성)${img.attribution_text ? ' · ' + img.attribution_text : ''}`),
+        h('div', { class: 'go' }, btn(IMG.productApproved(img) ? '상품 디테일 검수 (승인함)' : '상품 디테일 검수 · 승인', 'sm', () => prd().checkSheet(img, { onDone: (im) => { Object.assign(img, im); refresh(p.id); } })),
+          btn('위치·크기 다시 맞추기', 'sm ghost', () => { closeSheet(); prd().start({ resume: img.id, postId: p.id, slotKey: s.key }); })),
+        h('p', { class: 'hint' }, `블로그에 올릴 때 '${IMG.captionHint(img)}'를 사진 아래에 같이 넣어줘 (복사할 때 자동으로 들어가).`));
+    } else info.push(h('p', { class: 'hint' }, `카드뉴스에서 만든 이미지${img.license && img.license.includes('배경') ? ' · ' + img.license.replace(/^카드뉴스 \(앱에서 직접 만듦\)\s*·\s*/, '') : ''}`));
+    // 실제 사진은 AI로 고치지 않음 — 상품 사진이면 '이 상품으로 장면 만들기'에서 원본 보존 합성이나 AI 실사 장면으로 (두 방식을 고름)
     if (img.kind === 'upload' || img.kind === 'stock') {
-      info.push(h('div', { class: 'go' }, btn('이 사진을 참고해서 AI로 새로 만들기', 'sm ghost', () => genSheet(p, s, { refs: [{ image: img, role: 'subject' }] }))),
-        h('p', { class: 'hint' }, "원본 사진은 그대로 두고, 이 사진의 대상 모양을 참고한 새 이미지를 만들어 ('AI 합성' 표시). '직접 찍기' 자리에는 못 써."));
+      info.push(h('div', { class: 'go' }, btn('이 상품으로 장면 만들기', 'sm ghost', () => { closeSheet(); prd().start({ productId: img.id, postId: p.id, slotKey: s.key }); })),
+        h('p', { class: 'hint' }, "원본 사진은 그대로 두고, 이 사진으로 새 장면을 만들어 — 상품을 원본 그대로 얹는 '원본 보존 합성'과, AI가 참고해서 다시 그리는 'AI 실사 장면' 중에 골라. '직접 찍기' 자리에는 못 써."));
     }
     info.push(h('p', { class: 'hint' }, `원본 ${img.width}×${img.height} · ${fmtBytes(img.bytes)} · ${L.fmtTime(img.created_at)}${img.used_posts > 1 ? ` · 다른 원고 ${img.used_posts - 1}곳에서도 사용 중` : ''}`));
     const altSaved = () => alt.value.trim() === String(img.alt_text || '').trim();
@@ -1914,7 +1937,7 @@ export function createStudio(ui) {
     const grid = h('div', { class: 'grid2' });
     const more = h('div');
     let items = [], next = null, lseq = 0;
-    const drawSeg = () => put(seg, ...[['', '전체'], ['ai', 'AI 생성'], ['stock', '실제 사진'], ['upload', '직접 올림'], ['card', '카드뉴스']].map(([k, l]) =>
+    const drawSeg = () => put(seg, ...[['', '전체'], ['ai', 'AI 생성'], ['composite', '상품 합성'], ['stock', '실제 사진'], ['upload', '직접 올림'], ['card', '카드뉴스']].map(([k, l]) =>
       h('button', { type: 'button', 'aria-pressed': String(k === libKind), onclick: () => { libKind = k; drawSeg(); loadLib(false); } }, l)));
     const card = (i) => h('button', { type: 'button', class: 'pick', onclick: () => imageSheet(i.id, () => loadLib(false)) },
       i.url ? h('img', { src: i.url, alt: i.alt_text || i.description || '이미지', loading: 'lazy', decoding: 'async' }) : h('span', { class: 'ph' }, '이미지'),
@@ -1937,7 +1960,9 @@ export function createStudio(ui) {
       } catch (e) { if (my === lseq && e && e.code !== 'auth') put(grid, h('p', { class: 'hint' }, ui.errText(e))); }
     };
     drawSeg();
-    pnl.append(h('h2', null, '이미지 보관함'), usageP, seg, grid, more,
+    pnl.append(h('h2', null, '이미지 보관함'), usageP,
+      h('div', { class: 'go' }, btn('이 상품으로 장면 만들기', 'sm', () => prd().start({})), h('span', { class: 'hint' }, '상품 사진 하나로 블로그·SNS·광고용 장면 (원본 보존 합성 · AI 실사 장면)')),
+      seg, grid, more,
       h('p', { class: 'hint' }, '이미지는 비공개 저장소에 있고, 로그인한 이 앱에서만 1시간짜리 주소로 보여. 원고를 지워도 이미지는 남아. 어디서도 안 쓰는 이미지만 지울 수 있어.'));
     loadLib(false);
     return box;
@@ -1986,6 +2011,13 @@ export function createStudio(ui) {
         hist.addEventListener('toggle', () => { if (hist.open && !loaded) { loaded = true; hist.append(lineageBox(img)); } });
         return h('div', { class: 'stack' }, box, hist);
       })() : null,
+      img.kind === 'upload' || img.kind === 'stock' ? h('div', { class: 'go' }, btn('이 상품으로 장면 만들기', 'sm', () => { closeSheet(); prd().start({ productId: img.id }); }),
+        j.scenes ? h('span', { class: 'hint' }, `이 사진으로 만든 장면 ${j.scenes}개`) : null) : null,
+      IMG.productSceneMode(img) ? h('div', { class: 'stack' },
+        h('p', { class: img.kind === 'composite' ? 'hint' : 'notice' }, img.kind === 'composite' ? '원본 보존 합성 — 상품은 원본 사진 픽셀 그대로, 배경은 AI.' : 'AI 실사 장면 — AI가 상품까지 다시 그렸어 (작은 글자·로고가 바뀌었을 수 있어).'),
+        j.product && j.product.costs ? h('p', { class: 'hint' }, [j.product.costs.model ? `모델 비용 ${usd(genCost(j.product.costs.model) ? genCost(j.product.costs.model).usd : 0)} (${j.product.costs.model.cost_status})` : '', j.product.costs.cutout ? `배경 지우기 ${usd(j.product.costs.cutout.cost_usd)} (${j.product.costs.cutout.cost_status})` : ''].filter(Boolean).join(' · ')) : null,
+        h('div', { class: 'go' }, btn(IMG.productApproved(img) ? '상품 디테일 검수 (승인함)' : '상품 디테일 검수 · 승인', 'sm', () => prd().checkSheet(img, { onDone: () => { if (onChange) onChange(); } })),
+          btn('상품 장면 화면에서 이어 하기', 'sm ghost', () => { closeSheet(); prd().start({ resume: img.id }); }))) : null,
       h('div', { class: 'go' }, dl,
         btn('지우기', 'sm danger', async (ev) => {
           if (inUse) { toast(IMAGE_ERR.image_in_use, 4000); return; }
@@ -2064,11 +2096,14 @@ export function createStudio(ui) {
     };
     f.review.value = st.image_review_model || '';
     // 모드 4가지: 모드마다 모델·품질 (화면은 고른 모드의 실제 모델을 늘 보여줌)
+    // 1.5.1: 기본값과 내가 저장한 값을 나눠서 보여줌. 저장은 기본값과 다른 모드(와 예전에 저장해 둔 모드)만 — 앱이 저장한 값을 덮어쓰지 않음
     const modes = IMG.resolveModes(st);
     const modeRows = modes.map((m) => {
       const ms = modelSel(m.model);
       const qs = h('select', { onchange: ui.markDirty });
       const info = h('small', { class: 'hint' });
+      const tag = h('small', { class: 'hint' });
+      const row = { m, ms, qs, keep: m.saved };
       const draw = () => {
         const c = IMG.modelCaps(ms.value);
         const cur = qs.value || m.quality;
@@ -2077,11 +2112,15 @@ export function createStudio(ui) {
         const size = IMG.sizeFor('blog_body', '4:3', ms.value, qs.value);
         const est = IMG.estimateUsd({ quality: qs.value, size, promptTokens: 900, prices: pr, model: ms.value });
         info.textContent = `${IMG.PROVIDERS[c.provider] ? IMG.PROVIDERS[c.provider].label : '?'} · ${c.free ? '무료' : est == null ? '가격 계산 못 함' : `블로그 본문 4:3 한 장 예상 약 ${usd(est)}`} · 참고 사진 ${c.refsMax ? c.refsMax + '장까지' : '못 받음'} · 고치기 ${c.edit ? '됨' : '안 됨'}`;
+        const isDefault = ms.value === m.default_model && qs.value === IMG.normQuality(m.default_model, m.default_quality);
+        tag.textContent = `기본값: ${m.default_model} · ${IMG.qualityLabel(m.default_model, m.default_quality)} — ${row.keep ? (isDefault ? '저장해 둔 값 (기본값과 같음)' : '내가 저장한 값을 쓰는 중') : isDefault ? '기본값을 쓰는 중 (앱이 기본값을 바꾸면 따라감)' : '바꾼 값 (저장하면 이걸로)'}`;
       };
       ms.addEventListener('change', () => { qs.value = ''; draw(); });
       qs.addEventListener('change', draw);
       draw();
-      return { m, ms, qs, el: h('div', { class: 'stack' }, h('b', null, m.label), h('div', { class: 'row' }, field('모델', ms), field('품질', qs)), info) };
+      const reset = btn('기본값으로', 'sm ghost', () => { row.keep = false; ms.value = m.default_model; qs.value = ''; draw(); ui.markDirty(); toast(`'${m.label}'을 기본값으로 바꿨어. 저장을 눌러줘.`); });
+      row.el = h('div', { class: 'stack' }, h('b', null, m.label), h('div', { class: 'row' }, field('모델', ms), field('품질', qs)), info, h('div', { class: 'go' }, tag, reset));
+      return row;
     });
     // 용도별 기본 비율
     const ratioSel = Object.entries(IMG.PURPOSES).filter(([, v]) => v.ratios.length > 1).map(([k, v]) => {
@@ -2140,7 +2179,7 @@ export function createStudio(ui) {
       h('div', { class: 'go' }, btn(`무료 모델로 (${IMG.FREE_MODEL})`, 'sm', () => { f.gen.value = IMG.FREE_MODEL; ui.markDirty(); toast('생성 모델을 무료 모델로 바꿨어. 저장을 눌러줘.'); })),
       field('기본 품질', f.quality, '모델이 못 받는 품질이면 가까운 것으로 바꿔서 보내. Gemini는 품질 칸이 해상도야 (보통 1K · 높음 2K). 4K는 결과 파일이 저장 한도를 넘을 수 있어서 안 써.'),
       h('h3', null, '모드 (AI로 만들기에서 고름)'),
-      h('p', { class: 'hint' }, '만들 때마다 모드를 고르고, 고른 모드의 실제 모델 이름·예상 비용을 보여준 뒤에만 만들어. 무료 모드에서 유료 모델로 저절로 바뀌지 않아.'),
+      h('p', { class: 'hint' }, "만들 때마다 모드를 고르고, 고른 모드의 실제 모델 이름·예상 비용을 보여준 뒤에만 만들어. 무료 모드에서 유료 모델로 저절로 바뀌지 않아. 1.5.1부터 '고품질 유료 생성'의 기본값은 GPT Image 2.5 Sunburst · 높음이야 (예전에 저장해 둔 값이 있으면 그걸 그대로 써)."),
       ...modeRows.map((r) => r.el),
       h('h3', null, 'AI 검수'), field('기본 검수 모델', f.review, '만든 이미지를 AI가 보고 의견을 줘 (품질 보증 아님). 유료 모델은 검수 비용도 이미지 예산에 같이 셈.'),
       h('h3', null, '비용 한도'),
@@ -2185,7 +2224,7 @@ export function createStudio(ui) {
           image_gen_model: changedModel(f.gen, st.image_gen_model), image_edit_model: changedModel(f.edit, st.image_edit_model),
           image_quality: f.quality.value, image_daily_limit: Math.round(daily), image_monthly_budget_usd: budget,
           image_request_cap_usd: cap, image_review_model: f.review.value,
-          image_modes: Object.fromEntries(modeRows.map((r) => [r.m.id, { model: r.ms.value, quality: r.qs.value }])),
+          image_modes: IMG.modeOverrides(modeRows.map((r) => ({ id: r.m.id, model: r.ms.value, quality: r.qs.value })), modeRows.filter((r) => r.keep).map((r) => r.m.id)),
           image_ratio_prefs: Object.fromEntries(ratioSel.map(([k, , el]) => [k, el.value])),
           image_fx_krw: fx, image_fx_date: f.fxDate.value || null, image_fx_source: f.fxSrc.value.trim(),
           image_prices: prices,
@@ -2259,5 +2298,13 @@ export function createStudio(ui) {
   // 기록을 버림 (진행 중인 요청은 기억해 둬서 다음 요청이 그 뒤에 가게)
   const invalidate = (id) => { for (const k of id ? [id] : Object.keys(C)) C[k] = { seq: ++seqN, req: (C[k] && C[k].req) || null }; };
 
-  return { postPanel, viewCards, viewLibrary, settingsSection, moneyBlock, postCost, previewImages, exportImages, slotCount, invalidate, genCost };
+  // ═════════ 1.5.1 상품 사진으로 장면 만들기 (product.js) ═════════
+  let PRD = null;
+  const prd = () => (PRD ||= createProduct(ui, {
+    put, thumb, pickThumb, kindChip, reviewChip, sendGenerate, ensureSmall, modeChoices, keyOk, noKeyText, usageLine, genCost, prepareUpload, sourceSelect,
+    newKey, newUuid, usd, TEST_MODEL, fmtBytes, refreshPost: (id) => { if (id) refresh(id); },
+  }));
+  const viewProduct = (postId) => prd().view(postId);
+
+  return { postPanel, viewCards, viewLibrary, viewProduct, settingsSection, moneyBlock, postCost, previewImages, exportImages, slotCount, invalidate, genCost };
 }

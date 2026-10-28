@@ -1241,7 +1241,7 @@ export function productCheckState(items) {
 export const productSceneMode = (img) => (!img ? '' : img.kind === 'composite' ? 'layer' : img.kind === 'ai' && img.composite_mode === 'reference' ? 'reference' : '');
 export const productApproved = (img) => !!(img && img.product_check && img.product_check.approved === true);
 // ── 원본 보존 합성의 레이어 설정 (화면이 만들고 서버가 정리해서 저장) ──
-// x: 상품 가운데의 가로 위치(0~1), y: 상품 아래쪽 끝의 세로 위치(0~1), h: 상품 높이 ÷ 결과 높이, rot: 회전(도)
+// x: 상품 가운데의 가로 위치(0~1), y: 상품 아래쪽 끝의 세로 위치(0~1), h: 상품 높이 ÷ 결과 높이, rot: 회전(도), one: 원본 크기 그대로(h 무시)
 // shadow: { o 진하기 0~1, s 퍼짐 0~1, dx 빛 방향 -1~1 }, tone: 상품 밝기·색온도(-0.3~0.3, 기본 0 = 원본 그대로), bg: 배경 밝기·색온도
 const num = (v, lo, hi, d) => { const n = Number(v); return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d; };
 const r3 = (n) => Math.round(n * 1000) / 1000;
@@ -1260,6 +1260,7 @@ export function cleanLayer(o) {
     bg: { b: r3(num(b.b, -0.3, 0.3, 0)), w: r3(num(b.w, -0.3, 0.3, 0)) },
     mask: { feather: Math.round(num(m.feather, 0, 8, D.mask.feather)), shrink: Math.round(num(m.shrink, 0, 6, 0)) },
     ratio: Object.prototype.hasOwnProperty.call(RATIOS, x.ratio) ? x.ratio : '',
+    one: x.one === true, // 원본 크기 그대로 (늘리거나 줄이지 않음 — 회전도 0이면 상품 칸이 원본 픽셀 그대로)
   };
 }
 // 제작 목적·놓을 자리에 맞춘 첫 레이어 설정

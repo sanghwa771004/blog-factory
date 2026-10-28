@@ -108,7 +108,7 @@ describe('지시서 1·7번: 두 방식은 섞지 않고 프롬프트도 따로'
 describe('지시서 4번: 레이어 설정 (위치·크기·회전·그림자·밝기) — 원본 픽셀은 화면이 그대로 얹음', () => {
   test('범위 밖 값은 범위 안으로, 모르는 비율은 빈 값', () => {
     const L = cleanLayer({ x: 3, y: -1, h: 9, rot: 90, shadow: { o: 2, s: -1, dx: 5 }, tone: { b: 1, w: -1 }, bg: { b: 0.1 }, mask: { feather: 99, shrink: -3 }, ratio: '21:9' });
-    assert.deepEqual(L, { x: 1, y: 0.05, h: 1.2, rot: 45, shadow: { o: 1, s: 0, dx: 1 }, tone: { b: 0.3, w: -0.3 }, bg: { b: 0.1, w: 0 }, mask: { feather: 8, shrink: 0 }, ratio: '' });
+    assert.deepEqual(L, { x: 1, y: 0.05, h: 1.2, rot: 45, shadow: { o: 1, s: 0, dx: 1 }, tone: { b: 0.3, w: -0.3 }, bg: { b: 0.1, w: 0 }, mask: { feather: 8, shrink: 0 }, ratio: '', one: false });
   });
   test('첫 설정은 목적·자리·각도에 맞춤', () => {
     assert.deepEqual([defaultLayer({ place: 'left', purpose: 'product_detail' }).x, defaultLayer({ place: 'left', purpose: 'product_detail' }).h], [0.34, 0.62]);

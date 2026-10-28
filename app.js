@@ -1,12 +1,12 @@
-// 글공장 앱 1.5.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.5.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.5.0';
-import * as L from './lib.js?v=1.5.0';
-import * as IMG from './images.js?v=1.5.0';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.5.0';
+} from './checks.js?v=1.5.1';
+import * as L from './lib.js?v=1.5.1';
+import * as IMG from './images.js?v=1.5.1';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.5.1';
 
-const APP_VER = '1.5.0';
+const APP_VER = '1.5.1';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -243,8 +243,12 @@ function checksFor(p, withOthers) {
   });
   // 이미지 검사(검수 전·실제 사진이 필요한 자리의 AI 이미지 등)는 '확인할 것'으로만 더함 — 발행을 막지 않음
   const chKind = (M.ch[p.channel_id] || {}).kind;
-  const ic = IMG.imageChecks(p, (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images })), { search: chKind === 'blog' || chKind === 'site', naver: p.channel_id === 'naver_blog' });
-  r.warnings.push(...ic.warnings);
+  const rows = (M.slotsBy[p.id] || []).map((x) => ({ slot_key: x.slot_key, image: x.post_images }));
+  const ic = IMG.imageChecks(p, rows, { search: chKind === 'blog' || chKind === 'site', naver: p.channel_id === 'naver_blog' });
+  // 1.5.1: 상품 디테일 검수를 승인하지 않은 상품 장면 이미지는 발행 준비 완료·예약·게시 완료를 막음 (서버와 같은 판단 — images.js productGateErrors)
+  const pErr = IMG.productGateErrors(p, rows);
+  r.errors.push(...pErr);
+  r.warnings.push(...ic.warnings.filter((w) => !(pErr.length && w.code === 'product_check_needed')));
   if (ic.tips.length) r.tips = r.tips.filter((t) => t.code !== 'image_placeholders').concat(ic.tips);
   return r;
 }
@@ -846,6 +850,8 @@ const byDate = (a, b) => String(a.publish_date || '9999').localeCompare(String(b
 function viewContent() {
   const [a, b] = route.parts;
   if (a === 'post' && b && route.parts[2] === 'cards') return M.post[b] ? ST.viewCards(M.post[b]) : viewPost(b);
+  if (a === 'post' && b && route.parts[2] === 'product') return M.post[b] ? ST.viewProduct(b) : viewPost(b);
+  if (a === 'product') return ST.viewProduct();
   if (a === 'post' && b) return viewPost(b);
   if (a === 'images') return ST.viewLibrary();
   if (a === 'new') return viewNew(route.parts[1] === 'topic' ? route.parts[2] : null);
