@@ -100,7 +100,7 @@
 | Claude 안 글공장 (`tests/artifact/run_check.py`) | Playwright, 모의 Claude·Supabase | **44/44 통과** |
 | 서버 형 검사 (`deno check index.ts`) | | 오류 없음 |
 | `images.js` 두 사본 | 글자 하나까지 같은지 (테스트가 확인) | 같음 |
-| 비밀값 검사 (ZIP 안 파일 전부) | 접속 코드·그 해시·메일·OpenAI·Google·Supabase 키·JWT 모양 찾기 | {{SECRETS}} |
+| 비밀값 검사 (ZIP 안 파일 전부) | 접속 코드·그 해시·메일·OpenAI·Google·Supabase 키·JWT 모양 찾기 | **없음** (ZIP 안 파일 128개 전부. 걸린 건 오류 문구에서 키를 가리는지 보는 시험(`tests/image_service.test.js`)에 일부러 넣은 가짜 키 1개뿐 — 진짜 키 아님) |
 
 지시서 9번 11가지를 어디서 확인했는지:
 
