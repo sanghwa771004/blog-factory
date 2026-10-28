@@ -226,7 +226,7 @@ describe('012 이미지 스튜디오 마이그레이션', () => {
       await assert.rejects(val(db, `select public.image_delete($1)`, [free.id]), /image in use/, '카드뉴스 배경으로 쓰는 중');
       await db.query(`update public.post_card_decks set bg_image_id = null where post_id = $1`, [postA]);
       // 1.5.0(017)부터 작은 사본(FLUX.2 klein 참고용) 경로도 같이 돌려줘서 서버가 그 파일도 지움 — 사본이 없으면 빈 값
-      assert.deepEqual(await val(db, `select public.image_delete($1)`, [free.id]), { storage_path: 'up/free.jpg', ref_small_path: '' });
+      assert.deepEqual(await val(db, `select public.image_delete($1)`, [free.id]), { storage_path: 'up/free.jpg', ref_small_path: '', mask_paths: [] }); // 1.5.1(018)부터 마스크 파일 경로도
       assert.ok(await val(db, `select deleted_at from public.post_images where id = $1`, [free.id]));
       await assert.rejects(val(db, `select public.image_delete($1)`, [free.id]), /image not found/);
     });

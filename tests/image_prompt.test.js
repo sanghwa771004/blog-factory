@@ -200,7 +200,8 @@ describe("지시서 1: 실제 제품·사용 인증 사진을 AI로 지어내지
   test("실제 사진을 참고한 AI 이미지는 'AI 합성'으로 따로 표시하고 캡션에 실제 사용 사진이 아니라고", () => {
     const img = { kind: 'ai', composite: true };
     assert.equal(originOf(img), 'ai');
-    assert.equal(originLabel(img), 'AI 합성 (실제 사진 참고)');
+    assert.equal(originLabel(img), 'AI 합성 이미지 (실제 사진 참고)', "1.5.1: 'AI 합성 이미지'라는 출처를 그대로 남김");
+    assert.match(captionHint(img), /^※ AI 합성 이미지/);
     assert.match(captionHint(img), /실제 사진을 참고해 AI로 만든 연출 이미지 \(실제 사용 사진 아님\)/);
     assert.equal(originLabel({ kind: 'ai' }), 'AI 생성');
     assert.equal(captionHint({ kind: 'ai' }), '※ AI로 만든 예시 이미지');

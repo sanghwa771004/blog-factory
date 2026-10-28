@@ -225,10 +225,10 @@ describe('017 — 저장·수정 이력·AI 검수·사용자 평가·비용 통
     const r = (await save(db, { description: '작은 사본 있는 사진', kind: 'upload', provider: '', storage_path: 'up/big.jpg', ref_small_path: 'small/무시됨.jpg' })).image;
     assert.equal(r.ref_small_path, '', 'image_save 는 작은 사본 경로를 받지 않음');
     await db.query(`update public.post_images set ref_small_path = 'small/2026/10/s.jpg' where id = $1`, [r.id]);
-    assert.deepEqual(await val(db, `select public.image_delete($1)`, [r.id]), { storage_path: 'up/big.jpg', ref_small_path: 'small/2026/10/s.jpg' });
+    assert.deepEqual(await val(db, `select public.image_delete($1)`, [r.id]), { storage_path: 'up/big.jpg', ref_small_path: 'small/2026/10/s.jpg', mask_paths: [] });
     await assert.rejects(db.query(`update public.post_images set ref_small_path = $1 where id = $2`, ['x'.repeat(201), root.id]), /check/, '경로 길이 제한');
     // 원본(child)을 지우는 것은 소프트 삭제라 grand 의 원본 id 는 그대로 (수정 이력이 끊기지 않음)
-    assert.deepEqual(await val(db, `select public.image_delete($1)`, [child.id]), { storage_path: 'ai/x.jpg', ref_small_path: '' });
+    assert.deepEqual(await val(db, `select public.image_delete($1)`, [child.id]), { storage_path: 'ai/x.jpg', ref_small_path: '', mask_paths: [] });
     assert.equal(await val(db, `select parent_image_id from public.post_images where id = $1`, [grand.id]), child.id);
     await db.query(`update public.post_images set deleted_at = null where id = $1`, [child.id]);
   });

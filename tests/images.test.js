@@ -686,7 +686,7 @@ describe("'직접 찍기' 자리와 검색 노출 (1.3.0)", () => {
     assert.match(w.msg, /출처를 고르지 않은 사진이 1곳 있어 \(사진 1\)/);
   });
   test('이미지 출처 5가지: 직접 촬영·AI 생성·외부 제공(Pexels 등)·공식 제공·출처 확인 필요 (+ 카드뉴스)', () => {
-    assert.deepEqual(Object.keys(ORIGIN_LABEL).sort(), ['ai', 'card', 'external', 'official', 'own', 'unknown']);
+    assert.deepEqual(Object.keys(ORIGIN_LABEL).sort(), ['ai', 'card', 'composite', 'external', 'official', 'own', 'unknown'], '1.5.1: 원본 보존 합성(상품 사진 + AI 배경)');
     assert.deepEqual(Object.keys(SOURCE_TYPES), ['own', 'official', 'external'], '직접 올린 사진에서 고를 수 있는 출처');
     const cases = [
       [{ kind: 'ai' }, 'ai', 'AI 생성'],
@@ -697,6 +697,7 @@ describe("'직접 찍기' 자리와 검색 노출 (1.3.0)", () => {
       [{ kind: 'upload' }, 'unknown', '출처 확인 필요 · 직접 올림'],
       [{ kind: 'card' }, 'card', '카드뉴스'],
       [{ kind: 'ai', source_type: 'own' }, 'ai', 'AI 생성'],   // AI는 고른 값과 상관없이 AI
+      [{ kind: 'composite', source_type: 'own' }, 'composite', '원본 보존 합성 (상품 사진 + AI 배경)'],   // 1.5.1: 배경이 AI라 직접 촬영이 아님
       [null, 'unknown', '출처 확인 필요'],
     ];
     for (const [img, o, label] of cases) { assert.equal(originOf(img), o, JSON.stringify(img)); assert.equal(originLabel(img), label, JSON.stringify(img)); }
