@@ -12,6 +12,7 @@
 --     카드뉴스 배경, 그걸 배경으로 그린 카드뉴스 PNG) 발행 준비 완료·예약·게시 완료로 못 바꾸고, 그런 글의 자리·카드뉴스 배경에는 못 넣음.
 --     승인을 풀면 그 이미지를 쓰는 발행 준비·예약 글(휴지통 포함)은 '검수 필요'로, 휴지통에서 되살린 발행 준비·예약 글이 걸리면 '검수 필요'로.
 --     card_deck_save·image_slot_upsert·image_slot_swap 은 012와 같고 잠그는 순서(글 줄 → 이미지 줄)·맞바꾸기만 더함
+--  5. 종류·공급자 검사에 composite 더하기 — 맨 끝에 따로 (Supabase가 확인을 묻는 부분. 따로 실행해도 됨)
 
 -- 1 ───────── 상품 마스크 (원본 사진은 그대로 두고 마스크만 따로)
 create table if not exists public.product_masks (
@@ -52,18 +53,6 @@ alter table public.post_images
 create index if not exists post_images_product_idx on public.post_images (product_image_id) where product_image_id is not null;
 create index if not exists post_images_background_idx on public.post_images (background_image_id) where background_image_id is not null;
 do $$ begin
-  -- 원본 보존 합성 결과(composite)를 종류·공급자에 더함 — 같은 이름으로 다시 걺 (넓히기만, 데이터는 그대로)
-  if exists (select 1 from pg_constraint where conname = 'post_images_kind_check'
-             and pg_get_constraintdef(oid) not like '%composite%') then
-    alter table public.post_images drop constraint post_images_kind_check;
-    alter table public.post_images add constraint post_images_kind_check check (kind in ('ai', 'stock', 'upload', 'card', 'composite'));
-  end if;
-  if exists (select 1 from pg_constraint where conname = 'post_images_provider_check'
-             and pg_get_constraintdef(oid) not like '%composite%') then
-    alter table public.post_images drop constraint post_images_provider_check;
-    alter table public.post_images add constraint post_images_provider_check
-      check (provider in ('', 'openai', 'cloudflare', 'gemini', 'pexels', 'upload', 'cardnews', 'composite'));
-  end if;
   -- 두 방식은 섞이지 않음: 원본 보존 합성(layer)은 늘 종류 composite, AI 실사 장면(reference)은 늘 종류 ai
   if not exists (select 1 from pg_constraint where conname = 'post_images_v151_checks') then
     alter table public.post_images add constraint post_images_v151_checks check (
@@ -88,8 +77,7 @@ begin
   end if;
   return new;
 end $$;
-drop trigger if exists post_images_product_gate on public.post_images;
-create trigger post_images_product_gate before insert or update on public.post_images for each row execute function public.post_images_product_gate();
+create or replace trigger post_images_product_gate before insert or update on public.post_images for each row execute function public.post_images_product_gate();
 
 -- 이 글이 쓰는 상품 장면 이미지 중 상품 디테일 검수를 승인하지 않은 것의 수 (같은 이미지는 한 번):
 -- 자리(본문·본문 밖·본문에서 사라진 자리 모두)에 연결된 이미지 · 이 글의 카드뉴스 배경 · 자리에 연결된 카드뉴스 PNG를 그릴 때 쓴 배경 (1.5.1 재검토)
@@ -136,8 +124,7 @@ begin
   end if;
   return new;
 end $$;
-drop trigger if exists post_image_slots_product_gate on public.post_image_slots;
-create trigger post_image_slots_product_gate before insert or update of image_id on public.post_image_slots
+create or replace trigger post_image_slots_product_gate before insert or update of image_id on public.post_image_slots
   for each row execute function public.post_image_slots_product_gate();
 
 -- 카드뉴스 배경도 같은 규칙: 발행 준비 완료·예약·게시 글의 카드뉴스 배경으로 승인 안 한 상품 장면 이미지를 새로 고르지 못함 (배경을 그대로 두고 문구만 고치는 건 그대로)
@@ -158,8 +145,7 @@ begin
   end if;
   return new;
 end $$;
-drop trigger if exists post_card_decks_product_gate on public.post_card_decks;
-create trigger post_card_decks_product_gate before insert or update of bg_image_id on public.post_card_decks
+create or replace trigger post_card_decks_product_gate before insert or update of bg_image_id on public.post_card_decks
   for each row execute function public.post_card_decks_product_gate();
 
 -- 카드뉴스 저장 (012와 같음 + 1.5.1): 글 줄을 먼저 잠그고(for share) 배경 이미지 줄을 잠금 — 위 트리거·승인 풀기와 잠그는 순서를 같게
@@ -251,8 +237,7 @@ begin
   end if;
   return new;
 end $$;
-drop trigger if exists posts_product_gate on public.posts;
-create trigger posts_product_gate before update of stage, deleted_at on public.posts for each row execute function public.posts_product_gate();
+create or replace trigger posts_product_gate before update of stage, deleted_at on public.posts for each row execute function public.posts_product_gate();
 
 -- 이 이미지를 쓰는 글: 자리에 연결 · 카드뉴스 배경 · 이 이미지를 배경으로 그린 카드뉴스 PNG를 자리에 연결 (1.5.1 재검토)
 create or replace function public.posts_using_image(p_image uuid) returns setof uuid
@@ -275,8 +260,7 @@ begin
   end if;
   return null;
 end $$;
-drop trigger if exists post_images_product_demote on public.post_images;
-create trigger post_images_product_demote after update of product_check on public.post_images
+create or replace trigger post_images_product_demote after update of product_check on public.post_images
   for each row execute function public.post_images_product_demote();
 
 -- 3 ───────── 함수
@@ -488,3 +472,20 @@ grant execute on function
   public.image_product_unapproved(uuid), public.posts_using_image(uuid),
   public.card_deck_save(uuid, jsonb), public.image_slot_swap(uuid, jsonb, jsonb), public.image_slot_upsert(uuid, jsonb)
   to service_role;
+
+-- 5 ───────── 종류·공급자 검사에 composite 더하기 (넓히기만 — 기존 값은 그대로, 데이터는 안 바뀜)
+-- 같은 이름의 검사를 지우고 넓혀서 다시 거는 거라 Supabase가 확인을 물어보는 부분이야. 확인 창을 못 띄우는 화면에서는
+-- 이 부분만 Supabase 대시보드 SQL Editor에서 따로 실행해도 돼 (위 1~4와 순서 상관없음, 다시 돌려도 같은 결과)
+do $$ begin
+  if exists (select 1 from pg_constraint where conname = 'post_images_kind_check'
+             and pg_get_constraintdef(oid) not like '%composite%') then
+    alter table public.post_images drop constraint post_images_kind_check;
+    alter table public.post_images add constraint post_images_kind_check check (kind in ('ai', 'stock', 'upload', 'card', 'composite'));
+  end if;
+  if exists (select 1 from pg_constraint where conname = 'post_images_provider_check'
+             and pg_get_constraintdef(oid) not like '%composite%') then
+    alter table public.post_images drop constraint post_images_provider_check;
+    alter table public.post_images add constraint post_images_provider_check
+      check (provider in ('', 'openai', 'cloudflare', 'gemini', 'pexels', 'upload', 'cardnews', 'composite'));
+  end if;
+end $$;
