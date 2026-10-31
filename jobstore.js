@@ -36,7 +36,7 @@ export function cleanJob(o, now = Date.now()) {
     name: str(x.name, 60), flow: FLOWS.includes(x.flow) ? x.flow : '',
     spec: cleanProductSpec(x.spec), ratio: Object.prototype.hasOwnProperty.call(RATIOS, x.ratio) ? x.ratio : '',
     mode_id: str(x.mode_id, 30), quality: str(x.quality, 12), count: int(x.count, 1, 3, 1),
-    mask: m ? { saved_id: isId(m.saved_id) ? m.saved_id : '', dirty: m.dirty === true && !!blob, method: str(m.method, 20), edited: m.edited === true, w: int(m.w, 0, 4096, 0), h: int(m.h, 0, 4096, 0) } : null,
+    mask: m ? { saved_id: isId(m.saved_id) ? m.saved_id : '', dirty: m.dirty === true && !!blob, method: str(m.method, 20), model: str(m.model, 20), edited: m.edited === true, w: int(m.w, 0, 4096, 0), h: int(m.h, 0, 4096, 0) } : null,
     mask_png: m && m.dirty === true ? blob : null,
     cands, pick_id: isId(x.pick_id) && cands.some((c) => c.image_id === x.pick_id) ? x.pick_id : '',
     layer: x.layer && typeof x.layer === 'object' ? cleanLayer(x.layer) : null,

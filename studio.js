@@ -456,7 +456,8 @@ export function createStudio(ui) {
       card.append(h('div', { class: 'slotinfo' },
         h('small', null, `왜: ${info.why} · 보여줄 것: ${info.explains}`),
         h('small', null, info.ai === 'no' ? '직접 찍은 사진만 (AI·합성 안 됨)' : info.ai === 'real' ? '실제 상품이 보여야 해 — 직접 찍은 사진·공식 사진·원본 보존 합성 권장 (AI 실사 장면은 원본과 비교해서)' : `AI 장면으로 대신해도 돼 · 추천 종류: ${info.preset_label} (${info.preset_why})`),
-        h('small', null, `상태: ${running ? '만드는 중' : img ? '이미지 있음' : '이미지 없음'}${img ? ` · 검수 ${scene && !IMG.productApproved(img) ? '상품 검수 전' : img.review_status}` : ''} · 게시 준비 ${ready ? '됨 ✓' : '아직'}`)));
+        // 이미지가 있는지는 위 칩에 이미 있어서 여기서는 게시 준비와 그 이유만
+        h('small', null, `게시 준비: ${ready ? '됨 ✓' : img ? `아직 (${[`검수 ${scene && !IMG.productApproved(img) ? '상품 검수 전' : img.review_status}`, dupKeys ? '다른 자리와 같은 이미지' : '', info.ai === 'no' && img.kind !== 'upload' ? '직접 찍은 사진이 필요' : ''].filter(Boolean).join(' · ')})` : running ? '아직 (만드는 중)' : '아직 (넣을 이미지를 골라줘)'}`)));
       if (dupKeys) {
         const others = dupKeys.filter((k) => k !== s.key).map((k) => (d.slots || []).find((x) => x.key === k)).filter(Boolean).map((x) => slotName(x));
         card.append(h('p', { class: 'notice' }, `이 이미지가 ${others.join('·')}에도 들어 있어. 자리마다 다른 이미지를 넣어줘.`));

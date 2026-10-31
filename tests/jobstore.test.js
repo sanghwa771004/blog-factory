@@ -22,7 +22,7 @@ describe('저장 모양 (cleanJob): 이미지 번호와 설정만 남기고 나�
     assert.deepEqual(j.cands, [{ image_id: U(7), mode: 'layer', gen_id: U(8) }]);
     assert.deepEqual([j.pick_id, j.result_id, j.count, j.ratio, j.slot_key], [U(7), '', 3, '4:3', 'k:침대 위 전기요#1']);
     assert.deepEqual(j.pending_keys, ['ok_key_123456']);
-    assert.deepEqual(j.mask, { saved_id: U(9), dirty: false, method: 'auto_u2netp', edited: true, w: 800, h: 600 });
+    assert.deepEqual(j.mask, { saved_id: U(9), dirty: false, method: 'auto_u2netp', model: '', edited: true, w: 800, h: 600 });
     assert.equal(j.spec.light, 'left', '빛 방향 설정도 같이');
   });
   test('작업 번호·상품 사진 번호가 없으면 저장하지 않음', () => {

@@ -44,6 +44,18 @@
 | DB | 새 표 `product_masks` RLS 켜짐·정책 없음·anon/authenticated 권한 회수, 새 함수(`image_mask_save`·`image_product_check`·`post_product_unapproved`·`image_product_unapproved`·`posts_using_image`)와 트리거 함수, 다시 만든 `image_slot_upsert`·`card_deck_save`·`image_slot_swap`은 `search_path = ''`, 외부 역할 실행 권한 회수(서버 키만). 트리거: 승인 없이 상품 장면 이미지를 '사용 가능'으로 바꾸거나, 발행 준비·예약·게시 글 자리·카드뉴스 배경에 넣거나(그걸 배경으로 그린 카드 PNG 포함), 그런 이미지를 쓰는 글을 발행 준비·예약·게시로 바꾸면 DB가 막음. 승인을 풀면 쓰는 발행 준비·예약 글은 '검수 필요'로. 같은 때 겹치는 요청은 글 줄 → 이미지 줄 순서로 잠가서 둘 중 하나가 바뀐 값을 봄 | `018`, `tests/sql_images_151.test.js` |
 | 실패·지우기 | 합성 저장이 DB에서 거절되면 새로 올린 합성 파일만 지움(원본 상품 사진·배경·마스크는 안 건드림). 남은 결과가 쓰는 원본 상품 사진·배경은 못 지움. 상품 사진을 지우면 그 마스크 파일도 같이 지움 | `index.ts` saveComposite·deleteImage, `018` image_delete |
 
+## 1.5.2 상품 장면 고도화에서 더한 것 (2026-10-31)
+| 항목 | 지금 상태 | 근거·위치 |
+|---|---|---|
+| 작업 이어 하기 저장 | 이 기기 브라우저 IndexedDB(`gf-jobs`)에만 — 서버로 안 보냄. 이미지 **ID**와 설정만 남기고 서명 주소·세션·접속 코드·키·모르는 칸은 저장 직전에 버림(`cleanJob`). 서버에 아직 안 저장한 마스크만 PNG. 14일(끝낸 작업 3일)·8개까지, **로그아웃하면 DB 통째로 지움**. localStorage 에는 처리 모드 표시(`gf-tier`·`gf-tier-failed`·`gf-heavy`)만 | `jobstore.js`, `app.js` authLost, `tests/jobstore.test.js`, 화면 시험(저장 내용에 서명 주소·세션·코드가 없는지) |
+| 배경 지우기 일꾼 | `seg-worker.js` (같은 주소 — CSP `script-src 'self'` 그대로, 일꾼은 meta CSP 대상이 아니지만 같은 주소의 파일만 읽음). 모델·실행기는 화면 쪽에서 SHA-256 확인 뒤 넘김. 사진은 이 기기 밖으로 안 나감 | `cutout.js` workerReady·cachedBytes |
+| 합성 저장 요청 번호 | 화면이 만든 무작위 요청 번호(8~80자 `[A-Za-z0-9_-]`)로 `composite/연/월/번호.png`. 같은 번호면 이미 저장된 그 합성을 돌려줌(두 장 안 생김)·기록 없이 남은 파일은 덮어씀. LIKE 의 `_`·`%` 는 글자 그대로 찾음 | `index.ts` saveComposite·likeEsc |
+| 실패한 합성 파일 정리 | 새 길 `POST /images/composite/cleanup` (세션 검사 지남). 번호 10개까지, `composite/` 아래 그 번호 이름 파일 중 **어떤 이미지 기록도 가리키지 않는 것만** 지움 — 원본 상품·배경·마스크·저장된 합성은 경로가 달라서 못 지움 | `index.ts` cleanupComposites, `tests/server/image152.test.mjs` |
+| 저장 한도 알려주기 | `GET /images/config` 의 `limits` (코드 한도·버킷 한도 — 값만, 키 없음) | `index.ts` bucketLimit·uploadLimits |
+| 장면 정보 기록 | 화면이 보낸 추정값은 서버가 정해진 칸·값만 남기고(`cleanFit`) 나머지 버림 | `images.js` cleanFit |
+| 같은 이미지 반복 | 본문 다른 자리에 이미 있는 이미지 연결은 409 `image_in_other_slot`, `move: true` 일 때만 그 자리에서 옮김 (연결 뒤 옛 자리 줄 지움 — 이미지는 그대로) | `index.ts` linkSlot |
+| 유료 요청 | 공급자 비교도 유료 줄은 줄마다 승인 체크 + 예상 비용·하루 횟수·예산·한 번 상한 확인 뒤에만, 서버는 전처럼 `confirm_usd` 로 다시 확인 | `product.js` compareSheet |
+
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)
 - 로그인 없이 `/state` → 401, 가짜 세션 → 401, 틀린 코드 로그인 → 401
 - 로그아웃한 세션으로 읽기·고치기·지우기·백업 → 모두 401 (원고는 안 바뀜)

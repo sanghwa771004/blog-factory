@@ -2,7 +2,7 @@
 // 모델(U²-Netp) 자체는 여기서 돌리지 않아 (2단계는 가짜 모델 함수로 흐름만 확인 — 실제 모델은 화면 시험에서 브라우저로 돌림)
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { maskQuality, MASK_QUALITY_MSG, MASK_LEVEL, refineEdges, growMask, twoPassMap, capabilities, deviceTier, SIZES, TIER_MSG, SEG_SIZE, maskCoverage } from '../cutout.js';
+import { maskQuality, MASK_QUALITY_MSG, MASK_LEVEL, refineEdges, growMask, twoPassMap, REFINE, simpleMask, capabilities, deviceTier, SIZES, TIER_MSG, SEG_SIZE, maskCoverage } from '../cutout.js';
 
 const W = 120, H = 90;
 const rect = (x0, y0, x1, y1, w = W, h = H) => { const m = new Uint8ClampedArray(w * h); for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) m[y * w + x] = 255; return m; };
@@ -68,7 +68,7 @@ describe('편집 도구', () => {
   });
 });
 
-describe('2단계 (정밀하게): 1단계 상자만 잘라서 한 번 더 — 가짜 모델로 흐름 확인', () => {
+describe('2단계 (정밀하게): 1단계 상자만 잘라서 한 번 더 — 가짜 모델로 흐름 확인 (실제 모델 점수는 docs/REPORT-1.5.2.md 5번)', () => {
   // 가짜 모델: 입력 그림을 320×320 으로 줄여 어두운 곳을 1로 (실제 모델 대신)
   const fakeModel = (calls) => async (rgba, w, h) => {
     calls.push([w, h]);
@@ -91,7 +91,50 @@ describe('2단계 (정밀하게): 1단계 상자만 잘라서 한 번 더 — �
     const w = 200, h = 150, m = rect(4, 4, 196, 146, w, h);
     const calls = [];
     const r = await twoPassMap(photoOf(m, w, h), w, h, fakeModel(calls));
-    assert.deepEqual([r.refined, calls.length], [false, 1]);
+    assert.deepEqual([r.refined, r.skip, calls.length], [false, 'fills', 1]);
+  });
+  test('두 번째 결과가 처음과 많이 다르면(다른 물건을 잡음) 1단계 그대로 — maskbench 에서 고른 안전장치', async () => {
+    const w = 400, h = 300, m = rect(180, 120, 230, 200, w, h);
+    const calls = [];
+    const first = fakeModel(calls);
+    // 두 번째는 잘린 칸의 왼쪽 위 구석만 '상품'이라고 함 (엉뚱한 물건)
+    const model = async (rgba, ww, hh) => { if (!calls.length) return first(rgba, ww, hh); calls.push([ww, hh]); const o = new Float32Array(SEG_SIZE * SEG_SIZE); for (let y = 0; y < 60; y++) for (let x = 0; x < 60; x++) o[y * SEG_SIZE + x] = 1; return o; };
+    const r = await twoPassMap(photoOf(m, w, h), w, h, model);
+    assert.deepEqual([r.refined, r.skip, calls.length], [false, 'disagree', 2]);
+    assert.ok(r.agree < 0.9, String(r.agree));
+    assert.ok(r.map[160 * w + 200] > 0.9, '1단계 결과 그대로');
+  });
+  test('작은 얼룩(가장 큰 덩어리의 4% 미만)은 상자를 넓히지 않음', async () => {
+    const w = 400, h = 300, m = rect(180, 120, 230, 200, w, h);
+    for (let y = 5; y < 9; y++) for (let x = 5; x < 9; x++) m[y * w + x] = 255; // 구석 얼룩
+    const calls = [];
+    const r = await twoPassMap(photoOf(m, w, h), w, h, fakeModel(calls));
+    assert.equal(r.refined, true);
+    assert.ok(r.crop.x > 100 && r.crop.y > 60, JSON.stringify(r.crop));
+  });
+  test('기본값은 maskbench 에서 고른 값', () => {
+    assert.deepEqual({ ...REFINE }, { thr: 0.5, minFrac: 0.04, margin: 0.12, minSide: 64, skipAbove: 0.8, feather: 16, minAgree: 0.9 });
+  });
+});
+
+describe("'간단히'(모델 없이): 부드러운 윤곽으로 번지지 않음 · 서서히 바뀌는 배경은 따라감", () => {
+  // 밝은 배경(위 235 → 아래 195로 서서히) 위 어두운 상품, 윤곽은 6칸에 걸쳐 조금씩 바뀜 (예전 방식은 이 틈으로 상품 안까지 번졌어)
+  const w = 200, h = 150, x0 = 60, y0 = 40, x1 = 140, y1 = 115;
+  const d = new Uint8ClampedArray(w * h * 4), gt = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const bgv = 235 - (40 * y) / h;
+    const dx = Math.max(x0 - x, x - (x1 - 1), 0), dy = Math.max(y0 - y, y - (y1 - 1), 0), dist = Math.max(dx, dy);
+    const t = dist === 0 ? 1 : Math.max(0, 1 - dist / 6);
+    const v = 70 * t + bgv * (1 - t);
+    const i = (y * w + x) * 4; d[i] = v + 6; d[i + 1] = v; d[i + 2] = v - 6; d[i + 3] = 255;
+    gt[y * w + x] = t >= 0.5 ? 1 : 0; // 윤곽 가운데(반쯤 바뀐 곳)까지가 상품
+  }
+  test('IoU 0.85 넘게 (예전 방식은 상품 안까지 번져서 거의 0)', () => {
+    const m = simpleMask(d, w, h);
+    let inter = 0, uni = 0;
+    for (let i = 0; i < m.length; i++) { const a = m[i] >= 128, b = gt[i] === 1; if (a && b) inter++; if (a || b) uni++; }
+    assert.ok(inter / uni > 0.85, `IoU ${inter / uni}`);
+    assert.equal(m[5 * w + 5], 0, '배경(위)'); assert.equal(m[(h - 5) * w + 5], 0, '배경(아래 — 더 어두운 쪽도)');
   });
 });
 

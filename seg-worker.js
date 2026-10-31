@@ -28,7 +28,7 @@ self.onmessage = async (ev) => {
       const r = m.refine ? await twoPassMap(rgba, w, h, runModel) : { map: probToMap(await runModel(rgba, w, h), SEG_SIZE, w, h), refined: false };
       const mask = mapToMask(r.map, rgba, w, h);
       const quality = maskQuality(mask, w, h, rgba);
-      self.postMessage({ type: 'mask', id: m.id, mask, quality, refined: r.refined, ms: Math.round(performance.now() - t0) }, [mask.buffer]);
+      self.postMessage({ type: 'mask', id: m.id, mask, quality, refined: r.refined, skip: r.skip || '', agree: r.agree == null ? null : r.agree, ms: Math.round(performance.now() - t0) }, [mask.buffer]);
       return;
     }
     throw new Error('unknown');

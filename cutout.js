@@ -199,25 +199,106 @@ export function mapToMask(map, rgba, w, h, { guide = true, lo = 0.3, hi = 0.7 } 
   return keepMain(m, w, h);
 }
 // 2단계 '정밀하게' (1.5.2): 1단계 결과의 상품 상자(+여백)만 잘라서 모델을 한 번 더 돌림. 모델 입력은 늘 320×320이라
-// 상품이 사진에서 작을수록 가장자리·가는 부분(끈·털)이 뭉개지는데, 잘라서 다시 보면 상품이 입력을 더 크게 채움. 상자 밖은 1단계 그대로.
-// runModel(rgba, w, h) → 모델의 320×320 출력 (화면 쪽이든 일꾼이든 같은 함수로). 시간은 대략 두 배
-export async function twoPassMap(rgba, w, h, runModel, { margin = 0.12, thr = 0.5, maxFill = 0.7 } = {}) {
-  const p1 = probToMap(await runModel(rgba, w, h), SEG_SIZE, w, h);
-  let x0 = w, y0 = h, x1 = -1, y1 = -1;
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (p1[y * w + x] >= thr) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
-  if (x1 < 0) return { map: p1, refined: false };
-  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
-  const mx = Math.round(bw * margin) + 2, my = Math.round(bh * margin) + 2;
-  const cx0 = Math.max(0, x0 - mx), cy0 = Math.max(0, y0 - my), cx1 = Math.min(w, x1 + 1 + mx), cy1 = Math.min(h, y1 + 1 + my);
-  const cw = cx1 - cx0, ch = cy1 - cy0;
-  // 상품이 이미 사진을 거의 채우면 다시 봐도 나아지지 않음
-  if (cw * ch > maxFill * w * h || cw < 16 || ch < 16) return { map: p1, refined: false };
-  const crop = new Uint8ClampedArray(cw * ch * 4);
-  for (let y = 0; y < ch; y++) crop.set(rgba.subarray(((cy0 + y) * w + cx0) * 4, ((cy0 + y) * w + cx1) * 4), y * cw * 4);
-  const p2 = probToMap(await runModel(crop, cw, ch), SEG_SIZE, cw, ch);
-  const out = Float32Array.from(p1);
-  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) out[(cy0 + y) * w + cx0 + x] = p2[y * cw + x];
-  return { map: out, refined: true, crop: { x: cx0, y: cy0, w: cw, h: ch } };
+// 상품이 사진에서 작을수록 가장자리·가는 부분(끈·병뚜껑)이 뭉개지는데, 잘라서 다시 보면 상품이 입력을 더 크게 채움. 상자 밖은 1단계 그대로.
+// 값은 maskbench(합성 24장 + 실제 사진 9장, 앱과 같은 ONNX Runtime·U²-Netp)에서 고른 것: 여백 = 상자 긴 변 × 0.12,
+// 작은 덩어리(가장 큰 것의 4% 미만)는 상자에 안 넣음, 잘린 곳이 사진 안쪽이면 16px 에 걸쳐 1단계와 섞음,
+// 두 결과가 상자 안에서 90% 넘게 겹칠 때만 2단계를 씀 (덜 겹치면 모델이 다른 물건을 잡은 것 — 그때는 1단계 그대로).
+// 합성 시험 평균: 겹침(IoU) +0.007, 경계 점수 +0.033 · 시간은 2단계를 돌리면 약 두 배. 실제 사진 정확도는 사진마다 달라.
+// runModel(rgba, w, h) → 모델의 320×320 출력 (화면 쪽이든 일꾼이든 같은 함수로)
+export const REFINE = Object.freeze({ thr: 0.5, minFrac: 0.04, margin: 0.12, minSide: 64, skipAbove: 0.8, feather: 16, minAgree: 0.9 });
+function normProb(prob, n) {
+  let mn = Infinity, mx = -Infinity;
+  for (let i = 0; i < n; i++) { const v = prob[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  const span = mx - mn || 1;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = (prob[i] - mn) / span;
+  return out;
+}
+// 320×320 확률에서 상품 상자 (thr 이상인 4-이웃 덩어리, 가장 큰 덩어리의 minFrac 보다 작은 건 빼고) → {x0,y0,x1,y1} (끝 포함) | null
+export function probBox(p, S, thr = REFINE.thr, minFrac = REFINE.minFrac) {
+  const N = S * S, lab = new Int32Array(N).fill(-1), stack = new Int32Array(N);
+  const blobs = [];
+  for (let s = 0; s < N; s++) {
+    if (lab[s] !== -1 || p[s] < thr) continue;
+    const b = { n: 0, x0: S, y0: S, x1: -1, y1: -1 };
+    const id = blobs.length; blobs.push(b);
+    let sp = 0; stack[sp++] = s; lab[s] = id;
+    while (sp) {
+      const q = stack[--sp], x = q % S, y = (q - x) / S;
+      b.n++;
+      if (x < b.x0) b.x0 = x; if (x > b.x1) b.x1 = x; if (y < b.y0) b.y0 = y; if (y > b.y1) b.y1 = y;
+      if (x > 0 && lab[q - 1] === -1 && p[q - 1] >= thr) { lab[q - 1] = id; stack[sp++] = q - 1; }
+      if (x < S - 1 && lab[q + 1] === -1 && p[q + 1] >= thr) { lab[q + 1] = id; stack[sp++] = q + 1; }
+      if (y > 0 && lab[q - S] === -1 && p[q - S] >= thr) { lab[q - S] = id; stack[sp++] = q - S; }
+      if (y < S - 1 && lab[q + S] === -1 && p[q + S] >= thr) { lab[q + S] = id; stack[sp++] = q + S; }
+    }
+  }
+  if (!blobs.length) return null;
+  let big = 0;
+  for (const b of blobs) if (b.n > big) big = b.n;
+  const r = { x0: S, y0: S, x1: -1, y1: -1 };
+  for (const b of blobs) {
+    if (b.n < big * minFrac) continue;
+    r.x0 = Math.min(r.x0, b.x0); r.y0 = Math.min(r.y0, b.y0); r.x1 = Math.max(r.x1, b.x1); r.y1 = Math.max(r.y1, b.y1);
+  }
+  return r;
+}
+// [lo, hi) 를 길이 want 로 (가운데 기준, 0..limit 안에서)
+function fitSpan(lo, hi, want, limit) {
+  want = Math.min(limit, Math.max(want, hi - lo));
+  let a = Math.round((lo + hi) / 2 - want / 2);
+  a = Math.max(0, Math.min(limit - want, a));
+  return [a, a + want];
+}
+// 2단계로 다시 볼 사진 칸 {x, y, w, h} — 상품이 없거나 사진을 거의 채우면 null 과 이유
+export function refineRect(p1, S, w, h, o = REFINE) {
+  const b = probBox(p1, S, o.thr, o.minFrac);
+  if (!b) return { rect: null, skip: 'empty' };
+  const X0 = (b.x0 * w) / S, X1 = ((b.x1 + 1) * w) / S, Y0 = (b.y0 * h) / S, Y1 = ((b.y1 + 1) * h) / S;
+  const pad = o.margin * Math.max(X1 - X0, Y1 - Y0);
+  let x0 = Math.max(0, Math.floor(X0 - pad)), x1 = Math.min(w, Math.ceil(X1 + pad));
+  let y0 = Math.max(0, Math.floor(Y0 - pad)), y1 = Math.min(h, Math.ceil(Y1 + pad));
+  [x0, x1] = fitSpan(x0, x1, o.minSide, w);
+  [y0, y1] = fitSpan(y0, y1, o.minSide, h);
+  const r = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  if (r.w < 2 || r.h < 2 || r.w * r.h >= o.skipAbove * w * h) return { rect: null, skip: 'fills' };
+  return { rect: r, skip: '' };
+}
+export async function twoPassMap(rgba, w, h, runModel, opts = {}) {
+  const o = { ...REFINE, ...opts };
+  const S = SEG_SIZE;
+  const p1 = normProb(await runModel(rgba, w, h), S * S);
+  const map1 = resample(p1, S, S, w, h, 1);
+  const { rect: r, skip } = refineRect(p1, S, w, h, o);
+  if (!r) return { map: map1, refined: false, skip, passes: 1 };
+  const crop = new Uint8ClampedArray(r.w * r.h * 4);
+  for (let y = 0; y < r.h; y++) crop.set(rgba.subarray(((r.y + y) * w + r.x) * 4, ((r.y + y) * w + r.x + r.w) * 4), y * r.w * 4);
+  const map2 = resample(normProb(await runModel(crop, r.w, r.h), S * S), S, S, r.w, r.h, 1);
+  // 두 결과가 상자 안에서 얼마나 겹치는지 (0.5 이상끼리 IoU)
+  let inter = 0, uni = 0;
+  for (let y = 0; y < r.h; y++) for (let x = 0; x < r.w; x++) {
+    const a = map1[(r.y + y) * w + r.x + x] >= 0.5, b = map2[y * r.w + x] >= 0.5;
+    if (a && b) inter++;
+    if (a || b) uni++;
+  }
+  const agree = uni ? inter / uni : 1;
+  if (o.minAgree > 0 && agree < o.minAgree) return { map: map1, refined: false, skip: 'disagree', agree, crop: r, passes: 2 };
+  // 잘린 칸을 붙임 — 잘린 가장자리가 사진 안쪽이면 feather px 에 걸쳐 1단계에서 2단계로 서서히
+  const out = Float32Array.from(map1);
+  const inL = r.x > 0, inT = r.y > 0, inR = r.x + r.w < w, inB = r.y + r.h < h;
+  for (let y = 0; y < r.h; y++) for (let x = 0; x < r.w; x++) {
+    const i = (r.y + y) * w + r.x + x, a = map1[i];
+    let v = map2[y * r.w + x];
+    if (o.feather > 0) {
+      let d = Infinity;
+      if (inL) d = Math.min(d, x + 0.5); if (inR) d = Math.min(d, r.w - x - 0.5);
+      if (inT) d = Math.min(d, y + 0.5); if (inB) d = Math.min(d, r.h - y - 0.5);
+      const t = d >= o.feather ? 1 : d / o.feather;
+      v = a + (v - a) * t;
+    }
+    out[i] = v;
+  }
+  return { map: out, refined: true, skip: '', agree, crop: r, passes: 2 };
 }
 // 연결된 조각 (문턱 thr 이상 = 남김): 가장 큰 조각의 minFrac 보다 작은 조각은 지우고, 남긴 조각 안의 작은 구멍은 메움
 export function keepMain(mask, w, h, { thr = 128, minFrac = 0.04, holeFrac = 0.002 } = {}) {
@@ -253,24 +334,30 @@ export function keepMain(mask, w, h, { thr = 128, minFrac = 0.04, holeFrac = 0.0
   for (let i = 0; i < N; i++) { const l = lab[i]; if (l >= nFg && sizes[l] > 0 && sizes[l] < N * holeFrac) out[i] = 255; }
   return out;
 }
-// 모델 없이 간단히: 테두리와 비슷한 색을 배경으로 (흰 배경·단색 배경 사진에 맞음)
-export function simpleMask(rgba, w, h, { tol = 30 } = {}) {
+// 모델 없이 간단히: 테두리에서부터 비슷한 색을 배경으로 채움 (흰 배경·단색 배경 사진에 맞음)
+// 1.5.2: 예전에는 바로 옆 칸끼리만 비교해서, 상품 윤곽이 부드러우면(몇 칸에 걸쳐 조금씩 바뀜) 그 틈으로 상품 안까지 번졌어.
+// 이제는 테두리에서 온 '배경 색'을 기억하고 천천히(rate)만 따라가서 — 조명 때문에 서서히 바뀌는 배경은 따라가고, 윤곽에서는 멈춤.
+// maskbench 합성 24장(정답 있음) 중 단색 스튜디오 배경 8장 평균 겹침(IoU) 0.13 → 0.64, 전체 0.08 → 0.41 (실제 사진 정확도는 아님)
+export function simpleMask(rgba, w, h, { tol = 12, rate = 0.02 } = {}) {
   const N = w * h;
-  const bg = new Uint8Array(N);
-  const stack = new Int32Array(N);
-  let sp = 0;
-  const seed = (p) => { if (!bg[p]) { bg[p] = 1; stack[sp++] = p; } };
+  const bg = new Uint8Array(N), queue = new Int32Array(N), ref = new Float32Array(N * 3);
+  let qh = 0, qt = 0;
+  const seed = (p) => { if (bg[p]) return; bg[p] = 1; queue[qt++] = p; ref[p * 3] = rgba[p * 4]; ref[p * 3 + 1] = rgba[p * 4 + 1]; ref[p * 3 + 2] = rgba[p * 4 + 2]; };
   for (let x = 0; x < w; x++) { seed(x); seed((h - 1) * w + x); }
   for (let y = 0; y < h; y++) { seed(y * w); seed(y * w + w - 1); }
   const t2 = tol * tol * 3;
-  while (sp) {
-    const p = stack[--sp];
-    const x = p % w, y = (p - x) / w, i = p * 4;
-    for (const q of [x > 0 ? p - 1 : -1, x < w - 1 ? p + 1 : -1, y > 0 ? p - w : -1, y < h - 1 ? p + w : -1]) {
+  while (qh < qt) {
+    const p = queue[qh++];
+    const x = p % w, y = (p - x) / w;
+    const r0 = ref[p * 3], g0 = ref[p * 3 + 1], b0 = ref[p * 3 + 2];
+    for (let k = 0; k < 4; k++) {
+      const q = k === 0 ? (x > 0 ? p - 1 : -1) : k === 1 ? (x < w - 1 ? p + 1 : -1) : k === 2 ? (y > 0 ? p - w : -1) : y < h - 1 ? p + w : -1;
       if (q < 0 || bg[q]) continue;
       const j = q * 4;
-      const d = (rgba[i] - rgba[j]) ** 2 + (rgba[i + 1] - rgba[j + 1]) ** 2 + (rgba[i + 2] - rgba[j + 2]) ** 2;
-      if (d <= t2) { bg[q] = 1; stack[sp++] = q; }
+      const dr = rgba[j] - r0, dg = rgba[j + 1] - g0, db = rgba[j + 2] - b0;
+      if (dr * dr + dg * dg + db * db > t2) continue;
+      bg[q] = 1; queue[qt++] = q;
+      ref[q * 3] = r0 + dr * rate; ref[q * 3 + 1] = g0 + dg * rate; ref[q * 3 + 2] = b0 + db * rate;
     }
   }
   const m = new Uint8ClampedArray(N);
@@ -773,7 +860,7 @@ async function maskOnMain(rgba, w, h, { refine = false, onStage = null, signal =
   const r = refine ? await twoPassMap(rgba, w, h, run) : { map: probToMap(await run(rgba, w, h), SEG_SIZE, w, h), refined: false };
   if (signal && signal.aborted) throw cancelled();
   const mask = mapToMask(r.map, rgba, w, h);
-  return { mask, quality: maskQuality(mask, w, h, rgba), refined: r.refined, where: 'main', ms: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) };
+  return { mask, quality: maskQuality(mask, w, h, rgba), refined: r.refined, skip: r.skip || '', agree: r.agree == null ? null : r.agree, where: 'main', ms: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) };
 }
 
 // ── 일꾼에서 (1.5.2 기본) ──
@@ -831,7 +918,7 @@ async function maskInWorker(rgba, w, h, { refine = false, onStage = null, signal
     const copy = Uint8ClampedArray.from(rgba); // 넘기면 원래 배열이 비게 돼서 사본을 넘김 (화면이 쓰는 상품 사진은 그대로)
     const r = await ask(sw, { type: 'mask', rgba: copy, w, h, refine }, [copy.buffer], refine ? 150000 : 90000);
     if (SW === sw) { clearTimeout(sw.idle); sw.idle = setTimeout(() => { if (SW === sw && !sw.pend.size) killWorker('idle'); }, IDLE_MS); }
-    return { mask: r.mask, quality: r.quality, refined: r.refined, where: 'worker', ms: r.ms };
+    return { mask: r.mask, quality: r.quality, refined: r.refined, skip: r.skip || '', agree: r.agree == null ? null : r.agree, where: 'worker', ms: r.ms };
   } finally { if (signal) signal.removeEventListener('abort', onAbort); }
 }
 // 배경 지우기 도구를 메모리에서 내림 (상품 화면을 나갈 때·합성을 저장하기 전 — 아이폰처럼 메모리가 빠듯한 기기를 위해)
@@ -904,7 +991,7 @@ export async function autoMask(rgba, w, h, { useModel = true, refine = false, on
         }
       }
       if (!r) r = await maskOnMain(rgba, w, h, { refine, onStage, signal });
-      return done(r.mask, 'auto_u2netp', { quality: r.quality, refined: !!r.refined, where: r.where, ms: r.ms });
+      return done(r.mask, 'auto_u2netp', { quality: r.quality, refined: !!r.refined, skip: r.skip || '', agree: r.agree, where: r.where, ms: r.ms });
     } catch (e) {
       if (e && ['cancelled', 'timeout'].includes(e.code)) throw e;
       return done(simpleMask(rgba, w, h), 'auto_simple', { error: String((e && (e.code || e.message)) || e) });

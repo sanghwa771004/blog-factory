@@ -292,7 +292,7 @@ ol.steps{margin:6px 0;padding-left:20px;font-size:14px}
 .chip.k-composite{background:var(--accent-soft);color:var(--accent)}
 .product .pstep h3{display:flex;align-items:center;gap:8px;margin:0 0 4px}
 .stepn{display:inline-flex;align-items:center;justify-content:center;min-width:24px;height:24px;border-radius:12px;background:var(--accent);color:var(--accent-ink);font-size:13px;font-weight:700}
-.seg.wrap button{flex:1 1 auto}
+.seg.grow button{flex:1 1 auto} /* 1.5.2: 예전 'seg wrap' 은 화면 전체 틀 .wrap 과 이름이 겹쳐서 버튼이 한 줄에 하나씩 가운데로 쌓였음 */
 .modecards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
 .modecard{display:flex;flex-direction:column;gap:4px;text-align:left;font:inherit;color:var(--ink);background:var(--bg);border:2px solid var(--line);border-radius:12px;padding:10px 12px;cursor:pointer;min-width:0}
 .modecard small{color:var(--muted);font-size:12.5px;line-height:1.45}
