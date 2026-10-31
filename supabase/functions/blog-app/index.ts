@@ -2138,28 +2138,59 @@ async function saveComposite(c: Ctx) {
     preset: PRODUCT_PRESETS.layer,
   };
   const r = await sb.rpc("image_save", { img, link, gen: null, fin: null });
-  if (r.error) { await sb.storage.from(BUCKET).remove([path]); rpcError(r.error); }
+  if (r.error) {
+    // 같은 요청 번호가 거의 동시에 두 번 와서(응답을 못 받고 '다시 저장') 다른 쪽이 먼저 기록했으면 — 019 의 고유 색인이 두 번째 기록을 막음 —
+    // 그 기록을 돌려줌. 이 파일은 그 기록의 파일이라 지우지 않음 (1.5.2 검토)
+    if (reqKey && String((r.error as { code?: string }).code ?? "") === "23505") {
+      const { data: won } = await sb.from("post_images").select("*").eq("storage_path", path).is("deleted_at", null).limit(1);
+      if ((won ?? []).length) return json({ image: (await withUrls([(won as J[])[0]]))[0], slot: null, reused: true }, 200);
+    }
+    // 기록이 실패하면 올린 파일을 지움 — 단 같은 경로를 가리키는 기록이 생겼으면(같은 요청이 동시에 성공) 그대로 둠
+    if (!reqKey || !(await pathInUse(path))) await sb.storage.from(BUCKET).remove([path]);
+    rpcError(r.error);
+  }
   return json({ image: (await withUrls([(r.data as J).image as J]))[0], slot: (r.data as J).slot ?? null }, 201);
+}
+async function pathInUse(path: string) {
+  const { data, error } = await sb.from("post_images").select("id").eq("storage_path", path).is("deleted_at", null).limit(1);
+  return !!error || (data ?? []).length > 0; // 확인을 못 하면 지우지 않는 쪽으로
 }
 // LIKE 의 '_'·'%' 를 글자 그대로 (요청 번호에 '_' 가 들어갈 수 있어서)
 const likeEsc = (t: string) => t.replace(/[\\%_]/g, (m) => "\\" + m);
 // 1.5.2: 끝내 저장하지 못한 합성 파일 정리 — 화면이 그 합성에 쓴 요청 번호만 보냄. 'composite/' 아래, 그 번호 이름의 파일 중
-// 어떤 이미지 기록도 가리키지 않는 것만 지움 (원본 상품 사진·배경·마스크·저장된 합성은 경로가 달라서 건드릴 수 없음)
+// 어떤 이미지 기록도 가리키지 않고 **올린 지 15분이 넘은 것만** 지움 (원본 상품 사진·배경·마스크·저장된 합성은 경로가 달라서 건드릴 수 없음).
+// 15분: 서버 함수가 가장 오래 도는 시간(400초)보다 넉넉히 — 아직 저장 중인 요청(파일은 올렸고 기록 직전)의 파일을 지우지 않게 (1.5.2 검토).
+// 그보다 새 파일은 recent 로 돌려줌 → 화면이 번호를 기억했다가 다음에 다시 정리
+const ORPHAN_MIN_AGE_MS = 15 * 60_000;
 async function cleanupComposites(c: Ctx) {
   const b = await readJson(c.req, 5_000);
   const keys = (Array.isArray(b.request_keys) ? b.request_keys : []).map((k) => String(k)).filter((k) => /^[A-Za-z0-9_-]{8,80}$/.test(k)).slice(0, 10);
-  if (!keys.length) return json({ removed: 0 });
+  if (!keys.length) return json({ removed: 0, recent: [] });
   const now = new Date(), prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+  const folders = [...new Set([now, prev].map((d) => storagePath("composite", "x", d, "x").replace(/\/x\.x$/, "")))];
   let removed = 0;
+  const recent = new Set<string>();
   for (const k of keys) {
     const { data: used, error } = await sb.from("post_images").select("id").like("storage_path", `composite/%/${likeEsc(k)}.%`).limit(1);
     if (error) throw error;
     if ((used ?? []).length) continue; // 저장된 합성 — 지우지 않음
-    const paths = [now, prev].flatMap((d) => ["png", "webp", "jpg"].map((ext) => storagePath("composite", ext, d, k)));
-    const r = await sb.storage.from(BUCKET).remove([...new Set(paths)]);
+    const del: string[] = [];
+    for (const f of folders) {
+      const { data: objs, error: le } = await sb.storage.from(BUCKET).list(f, { search: k, limit: 10 });
+      if (le) continue;
+      for (const o of (objs ?? []) as unknown as J[]) {
+        const name = String(o.name ?? "");
+        if (name !== `${k}.png` && name !== `${k}.webp` && name !== `${k}.jpg`) continue;
+        const at = Date.parse(String(o.updated_at ?? o.created_at ?? ""));
+        if (!Number.isFinite(at) || now.getTime() - at < ORPHAN_MIN_AGE_MS) { recent.add(k); continue; }
+        del.push(`${f}/${name}`);
+      }
+    }
+    if (!del.length) continue;
+    const r = await sb.storage.from(BUCKET).remove(del);
     if (!r.error) removed += ((r.data ?? []) as unknown[]).length;
   }
-  return json({ removed });
+  return json({ removed, recent: [...recent] });
 }
 // 상품 디테일 검수 저장·승인 (사용자가 원본과 결과를 나란히 보고 아홉 칸을 고름). AI 검수 의견은 참고로 따로 — 여기 섞지 않음
 // 승인을 풀면 이 이미지를 쓰는 발행 준비·예약 글은 '검수 필요'로 되돌림 (게시 완료 글은 그대로 두고 발행 전 검사에 보임)
@@ -2508,13 +2539,14 @@ async function linkSlot(c: Ctx) {
   const { post, slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
   // 1.5.2: 같은 이미지를 본문 여러 자리에 반복하지 않게 — 지금 본문에 있는 다른 자리에 이미 들어 있으면 거절 (move: true 면 그 자리에서 옮겨 옴).
   // 본문 밖 대표·SNS 자리는 본문 사진을 그대로 써도 돼서 따지지 않고, 본문에서 사라진 자리는 옮기는 중일 수 있어서 따지지 않음
+  // 1.5.2 화면만 이 확인을 부탁함(dup_check) — 서버를 먼저 올려도 1.5.0·1.5.1 화면의 연결은 예전 그대로. 거절할 때는 그 이미지가 있는 본문 자리를 모두 알려줌
   let moveFrom: string[] = [];
-  if (!isExtraKey(slot!.key)) {
+  if (!isExtraKey(slot!.key) && (b.dup_check === true || b.move === true)) {
     const bodyKeys = new Set(parseSlots(String(post!.body ?? "")).map((x: J) => String(x.key)));
     const { data: dup, error: dErr } = await sb.from("post_image_slots").select("slot_key").eq("post_id", postId).eq("image_id", b.image_id);
     if (dErr) throw dErr;
     const others = ((dup ?? []) as J[]).map((r) => String(r.slot_key)).filter((k) => k !== slot!.key && bodyKeys.has(k));
-    if (others.length && b.move !== true) fail(409, "image_in_other_slot", { slot_key: others[0] });
+    if (others.length && b.move !== true) fail(409, "image_in_other_slot", { slot_key: others[0], slot_keys: others });
     moveFrom = others;
   }
   const { data: ex, error: exErr } = await sb.from("post_image_slots").select("purpose, image_id").eq("post_id", postId).eq("slot_key", slot!.key).maybeSingle();

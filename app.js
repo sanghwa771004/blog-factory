@@ -45,6 +45,8 @@ function h(tag, props, ...kids) {
   if (value !== undefined) e.value = value;
   return e;
 }
+// 이미 있는 요소에 더하기 — h() 처럼 null·false·'' 는 건너뜀 (DOM append 는 null 을 'null' 글자로 넣어서, 1.5.2)
+const add = (el, ...kids) => { for (const k of kids.flat(Infinity)) if (k != null && k !== false && k !== '') el.append(k instanceof Node ? k : String(k)); return el; };
 const btn = (text, cls, onclick, props) => h('button', { type: 'button', class: 'btn ' + (cls || ''), onclick, ...props }, text);
 const field = (label, input, hint) => h('label', { class: 'f' }, label, input, hint ? h('span', { class: 'hint' }, hint) : null);
 const panel = (title, ...kids) => h('section', { class: 'panel' }, title ? h('h2', null, title) : null, ...kids);
@@ -970,14 +972,14 @@ function viewNew(topicId) {
     render(true);
   } }, opt('', '고르지 않음'), adopted.map((x) => opt(x.id, `${x.status === '채택' ? '★ ' : ''}${x.title}`)));
   const catIn = h('input', { type: 'text', value: draft.category, list: 'catlist', placeholder: cats[0] || '카테고리', oninput: (e) => { draft.category = e.target.value; markDirty(); } });
-  wrap.append(h('p', { class: 'legend' }, '1. 무엇을 쓸까'),
+  add(wrap, h('p', { class: 'legend' }, '1. 무엇을 쓸까'),
     adopted.length ? field('주제 목록에서 고르기 (선택)', topicSel) : null,
     field('키워드', kw, '검색하는 사람이 칠 말 그대로 (3~5단어)'),
     field('카테고리', catIn), h('datalist', { id: 'catlist' }, cats.map((c) => opt(c, c))));
 
   // 2. 어디에
   const chSeg = h('div', { class: 'seg' }, S.channels.filter((c) => c.active).map((c) => h('button', { type: 'button', 'aria-pressed': String(draft.channel_id === c.id), onclick: () => { draft.channel_id = c.id; draft.program_ids = draft.program_ids.filter((pid) => compatOf(pid, c.id, S.compat).verdict !== '불가'); render(true); } }, c.name)));
-  wrap.append(h('p', { class: 'legend' }, '2. 어디에 올릴까'), chSeg, M.ch[draft.channel_id] && M.ch[draft.channel_id].notes ? h('p', { class: 'hint' }, M.ch[draft.channel_id].notes) : null);
+  add(wrap, h('p', { class: 'legend' }, '2. 어디에 올릴까'), chSeg, M.ch[draft.channel_id] && M.ch[draft.channel_id].notes ? h('p', { class: 'hint' }, M.ch[draft.channel_id].notes) : null);
 
   // 3. 수익 모델
   wrap.append(h('p', { class: 'legend' }, '3. 어떻게 벌까 (여러 개 가능)'), programPicker(draft.channel_id, draft.program_ids, (ids) => { draft.program_ids = ids; render(true); }));
@@ -1014,7 +1016,7 @@ function viewNew(topicId) {
     await load();
     go('content/post/' + j.post_id);
   }, { disabled: blocked || needExp });
-  wrap.append(h('p', { class: 'legend' }, '6. 요청'),
+  add(wrap, h('p', { class: 'legend' }, '6. 요청'),
     blocked ? h('p', { class: 'badbox' }, '이 채널에서 쓸 수 없는 수익 모델이 골라져 있어.') : null,
     needExp ? h('p', { class: 'notice' }, '실제 경험 후기는 경험을 적어야 요청할 수 있어.') : null,
     submit, h('p', { class: 'hint' }, `자동 작가가 다음 실행(${nextRunText()})에 써서 '검수 필요'로 넣어줘. 바로 필요하면 Claude 안 글공장에서 써도 돼.`));
@@ -1845,7 +1847,7 @@ function drawUpload() {
   const postSel = h('select', { value: up.postId, onchange: (e) => { up.postId = e.target.value; drawUpload(); } }, opt('', '각 줄의 게시 주소·제목으로 찾기'), S.posts.filter((p) => LIVE.includes(p.stage) || p.blog_url).map((p) => opt(p.id, '모두 이 글에: ' + titleOf(p))));
   const noDate = up.mapping.date == null && up.mapping.period_start == null;
   const dd = h('input', { type: 'date', value: up.defaultDate, onchange: (e) => { up.defaultDate = e.target.value; drawUpload(); } });
-  box.append(h('p', { class: 'hint' }, `${up.name} · ${up.kind === 'xlsx' ? '엑셀' : 'CSV'} · ${up.rows.length}줄`),
+  add(box, h('p', { class: 'hint' }, `${up.name} · ${up.kind === 'xlsx' ? '엑셀' : 'CSV'} · ${up.rows.length}줄`),
     field('머리줄 (열 이름이 있는 줄)', hdrSel),
     (() => { const d = det('up:map', '열 맞추기 (자동으로 맞춰봤어)', true, ''); d.append(map); return d; })(),
     h('div', { class: 'row' }, field('출처 이름', label), field('수익 모델', prog), field('채널', ch)), field('글 연결', postSel),

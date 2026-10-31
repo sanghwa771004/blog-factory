@@ -47,13 +47,13 @@
 ## 1.5.2 상품 장면 고도화에서 더한 것 (2026-10-31)
 | 항목 | 지금 상태 | 근거·위치 |
 |---|---|---|
-| 작업 이어 하기 저장 | 이 기기 브라우저 IndexedDB(`gf-jobs`)에만 — 서버로 안 보냄. 이미지 **ID**와 설정만 남기고 서명 주소·세션·접속 코드·키·모르는 칸은 저장 직전에 버림(`cleanJob`). 서버에 아직 안 저장한 마스크만 PNG. 14일(끝낸 작업 3일)·8개까지, **로그아웃하면 DB 통째로 지움**. localStorage 에는 처리 모드 표시(`gf-tier`·`gf-tier-failed`·`gf-heavy`)만 | `jobstore.js`, `app.js` authLost, `tests/jobstore.test.js`, 화면 시험(저장 내용에 서명 주소·세션·코드가 없는지) |
+| 작업 이어 하기 저장 | 이 기기 브라우저 IndexedDB(`gf-jobs`)에만 — 서버로 안 보냄. 이미지 **ID**와 설정만 남기고 서명 주소·세션·접속 코드·키·모르는 칸은 저장 직전에 버림(`cleanJob`). 서버에 아직 안 저장한 마스크만 PNG. 14일(끝낸 작업 3일)·8개까지, **로그아웃하면 DB 통째로 지움** (그 뒤에는 남은 저장 타이머·페이지 닫기 저장도 세션이 없으면 다시 만들지 않음). 열 때마다 기간이 지난 기록을 먼저 지움. 1.5.2가 localStorage 에 더한 건 처리 모드 표시(`gf-tier`·`gf-tier-failed`·`gf-heavy` — 짧은 글자)뿐 | `jobstore.js`, `app.js` authLost, `tests/jobstore.test.js`, 화면 시험(저장 내용에 서명 주소·세션·코드가 없는지) |
 | 배경 지우기 일꾼 | `seg-worker.js` (같은 주소 — CSP `script-src 'self'` 그대로, 일꾼은 meta CSP 대상이 아니지만 같은 주소의 파일만 읽음). 모델·실행기는 화면 쪽에서 SHA-256 확인 뒤 넘김. 사진은 이 기기 밖으로 안 나감 | `cutout.js` workerReady·cachedBytes |
-| 합성 저장 요청 번호 | 화면이 만든 무작위 요청 번호(8~80자 `[A-Za-z0-9_-]`)로 `composite/연/월/번호.png`. 같은 번호면 이미 저장된 그 합성을 돌려줌(두 장 안 생김)·기록 없이 남은 파일은 덮어씀. LIKE 의 `_`·`%` 는 글자 그대로 찾음 | `index.ts` saveComposite·likeEsc |
-| 실패한 합성 파일 정리 | 새 길 `POST /images/composite/cleanup` (세션 검사 지남). 번호 10개까지, `composite/` 아래 그 번호 이름 파일 중 **어떤 이미지 기록도 가리키지 않는 것만** 지움 — 원본 상품·배경·마스크·저장된 합성은 경로가 달라서 못 지움 | `index.ts` cleanupComposites, `tests/server/image152.test.mjs` |
+| 합성 저장 요청 번호 | 화면이 만든 무작위 요청 번호(8~80자 `[A-Za-z0-9_-]`)로 `composite/연/월/번호.png`. 같은 번호면 이미 저장된 그 합성을 돌려줌·기록 없이 남은 파일은 덮어씀. 같은 번호가 거의 동시에 두 번 와도 **019 고유 색인**(같은 경로의 살아 있는 합성은 한 줄)이 두 번째 기록을 막고 서버는 먼저 저장된 줄을 돌려줌 — 그 파일은 지우지 않음. 기록이 실패해도 같은 경로를 가리키는 기록이 있으면 파일을 지우지 않음. LIKE 의 `_`·`%` 는 글자 그대로 찾음 | `index.ts` saveComposite·pathInUse·likeEsc, `019`, `tests/sql_images_152.test.js` |
+| 실패한 합성 파일 정리 | 새 길 `POST /images/composite/cleanup` (세션 검사 지남). 번호 10개까지, `composite/` 아래 그 번호 이름 파일 중 **어떤 이미지 기록도 가리키지 않고 올린 지 15분이 넘은 것만** 지움 (아직 저장 중인 요청의 파일을 지우지 않게 — 서버 함수 최대 400초보다 넉넉히). 새 파일은 `recent` 로 돌려줘서 화면이 다음에 다시 부탁. 원본 상품·배경·마스크·저장된 합성은 경로가 달라서 못 지움 | `index.ts` cleanupComposites, `tests/server/image152.test.mjs` |
 | 저장 한도 알려주기 | `GET /images/config` 의 `limits` (코드 한도·버킷 한도 — 값만, 키 없음) | `index.ts` bucketLimit·uploadLimits |
 | 장면 정보 기록 | 화면이 보낸 추정값은 서버가 정해진 칸·값만 남기고(`cleanFit`) 나머지 버림 | `images.js` cleanFit |
-| 같은 이미지 반복 | 본문 다른 자리에 이미 있는 이미지 연결은 409 `image_in_other_slot`, `move: true` 일 때만 그 자리에서 옮김 (연결 뒤 옛 자리 줄 지움 — 이미지는 그대로) | `index.ts` linkSlot |
+| 같은 이미지 반복 | 1.5.2 화면이 `dup_check` 로 부탁하면: 본문 다른 자리에 이미 있는 이미지 연결은 409 `image_in_other_slot`(그 자리 모두 `slot_keys`), `move: true` 일 때만 그 자리들에서 옮김 (연결 줄만 지움 — 이미지는 그대로). 옛 화면(1.5.0·1.5.1)은 예전처럼 (서버를 먼저 올려도 안 깨지게). 같은 파일을 다시 올리거나 같은 Pexels 사진을 다시 골라 같은 이미지가 된 경우는 막지 않고 화면 알림·발행 전 검사가 잡아냄 | `index.ts` linkSlot |
 | 유료 요청 | 공급자 비교도 유료 줄은 줄마다 승인 체크 + 예상 비용·하루 횟수·예산·한 번 상한 확인 뒤에만, 서버는 전처럼 `confirm_usd` 로 다시 확인 | `product.js` compareSheet |
 
 ## 실서버 점검 결과 (2026-10-21, 임시 점검 세션으로 실행 후 로그아웃·정리)

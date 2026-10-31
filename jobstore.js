@@ -35,6 +35,8 @@ export function cleanJob(o, now = Date.now()) {
     product_id: x.product_id, extra_ids: (Array.isArray(x.extra_ids) ? x.extra_ids : []).filter(isId).slice(0, 3),
     name: str(x.name, 60), flow: FLOWS.includes(x.flow) ? x.flow : '',
     spec: cleanProductSpec(x.spec), ratio: Object.prototype.hasOwnProperty.call(RATIOS, x.ratio) ? x.ratio : '',
+    // 사용자가 직접 고른 장면 칸 (추정으로 다시 덮지 않게 — '지정 안 함'도 고른 것)
+    user_set: [...new Set((Array.isArray(x.user_set) ? x.user_set : []).filter((k) => ['light', 'warmth', 'bright', 'shape'].includes(k)))],
     mode_id: str(x.mode_id, 30), quality: str(x.quality, 12), count: int(x.count, 1, 3, 1),
     mask: m ? { saved_id: isId(m.saved_id) ? m.saved_id : '', dirty: m.dirty === true && !!blob, method: str(m.method, 20), model: str(m.model, 20), edited: m.edited === true, w: int(m.w, 0, 4096, 0), h: int(m.h, 0, 4096, 0) } : null,
     mask_png: m && m.dirty === true ? blob : null,
@@ -98,14 +100,15 @@ export function idbBackend(idb = typeof indexedDB !== 'undefined' ? indexedDB : 
 export function createJobStore({ backend = idbBackend(), now = () => Date.now() } = {}) {
   const b = backend;
   const guard = async (fn) => { if (!b) return { ok: false, code: 'unavailable' }; try { return { ok: true, value: await fn() }; } catch (e) { return { ok: false, code: errCode(e) }; } };
-  const sweep = () => guard(async () => {
+  const sweepRaw = async () => {
     const all = (await b.all()).filter(Boolean);
     const t = now();
     const keep = all.filter((j) => !expiredJob(j, t)).sort((x, y) => y.updated_at - x.updated_at);
     const drop = [...all.filter((j) => expiredJob(j, t)), ...keep.slice(MAX_JOBS)];
     for (const j of drop) await b.delete(j.id);
     return drop.length;
-  });
+  };
+  const sweep = () => guard(sweepRaw);
   return {
     available: () => !!b,
     async save(job) {
@@ -116,7 +119,8 @@ export function createJobStore({ backend = idbBackend(), now = () => Date.now() 
       return r;
     },
     get: (id) => guard(async () => { const j = await b.get(id); return j && !expiredJob(j, now()) ? cleanJob(j, now()) : null; }),
-    latest: (o) => guard(async () => { const j = pickResumable(await b.all(), o, now()); return j ? cleanJob(j, now()) : null; }),
+    // 열 때마다 기간이 지난 기록을 먼저 지움 (저장할 때만 지우면 안 쓰는 기기에 오래 남아서 — 1.5.2 검토)
+    latest: (o) => guard(async () => { try { await sweepRaw(); } catch { /* 그래도 고르기는 함 */ } const j = pickResumable(await b.all(), o, now()); return j ? cleanJob(j, now()) : null; }),
     remove: (id) => guard(() => b.delete(id)),
     clear: () => guard(() => b.clear()),
     sweep,

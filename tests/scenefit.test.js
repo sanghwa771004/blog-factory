@@ -58,6 +58,9 @@ describe('상품 사진 분석 (추정)', () => {
     const hnt = sceneHints(analyzeProduct(src, mask));
     assert.deepEqual([hnt.light, hnt.warmth, hnt.shape], ['left', 'warm', 'tall']);
     assert.deepEqual(sceneHints(null), { light: '', warmth: '', bright: '', view: '', shape: '' });
+    // 확신이 낮은 빛·색 추정은 미리 채우지 않음 (빈 배경 프롬프트에 단정해서 넣지 않게) — 모양은 마스크에서 바로 재서 채움
+    const low = sceneHints({ light: { dir: 'left', confidence: 'low' }, temp: { value: 'warm', confidence: 'low' }, aspect: 2, bright: { product: 0.5 } });
+    assert.deepEqual([low.light, low.warmth, low.shape], ['', '', 'tall']);
     assert.deepEqual([shapeOf(2), shapeOf(1), shapeOf(0.5), shapeOf(NaN)], ['tall', 'square', 'wide', '']);
   });
 });

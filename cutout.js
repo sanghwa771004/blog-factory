@@ -774,6 +774,7 @@ async function sha256Hex(bytes) {
   return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 const cancelled = () => ({ code: 'cancelled' });
+const fetchFailed = (e) => ({ code: 'fetch', message: String((e && e.message) || e || 'fetch') });
 async function cachedBytes(url, sha, { onProgress = null, signal = null, expect = 0 } = {}) {
   const key = `${url}?sha=${sha.slice(0, 16)}`;
   let cache = null;
@@ -790,8 +791,9 @@ async function cachedBytes(url, sha, { onProgress = null, signal = null, expect 
   }
   if (signal && signal.aborted) throw cancelled();
   let res;
-  try { res = await fetch(url, { cache: 'no-cache', signal: signal || undefined }); } catch (e) { if (signal && signal.aborted) throw cancelled(); throw e; }
-  if (!res.ok) throw new Error('fetch ' + res.status);
+  // 받기 실패는 브라우저마다 글이 달라서(Safari 'Load failed' 등) code 로 알림 — 일꾼이 고장 난 걸로 착각하지 않게 (1.5.2 검토)
+  try { res = await fetch(url, { cache: 'no-cache', signal: signal || undefined }); } catch (e) { if (signal && signal.aborted) throw cancelled(); throw fetchFailed(e); }
+  if (!res.ok) throw fetchFailed(new Error('fetch ' + res.status));
   let buf;
   if (onProgress && res.body && res.body.getReader) {
     const rd = res.body.getReader();
@@ -799,7 +801,7 @@ async function cachedBytes(url, sha, { onProgress = null, signal = null, expect 
     let got = 0;
     for (;;) {
       let r;
-      try { r = await rd.read(); } catch (e) { if (signal && signal.aborted) throw cancelled(); throw e; }
+      try { r = await rd.read(); } catch (e) { if (signal && signal.aborted) throw cancelled(); throw fetchFailed(e); }
       if (r.done) break;
       parts.push(r.value); got += r.value.length;
       onProgress(got, expect || Number(res.headers.get('content-length')) || 0, false);
@@ -851,7 +853,12 @@ export function loadSegmenter(o = {}) {
   segP.catch(() => { segP = null; });
   return segP;
 }
-async function maskOnMain(rgba, w, h, { refine = false, onStage = null, signal = null } = {}) {
+let mainBusy = 0;
+async function maskOnMain(rgba, w, h, o = {}) {
+  mainBusy++;
+  try { return await maskOnMainRun(rgba, w, h, o); } finally { mainBusy--; }
+}
+async function maskOnMainRun(rgba, w, h, { refine = false, onStage = null, signal = null } = {}) {
   const seg = await loadSegmenter({ onStage, signal });
   if (signal && signal.aborted) throw cancelled();
   if (onStage) onStage({ stage: 'run', where: 'main' });
@@ -871,6 +878,7 @@ function killWorker(reason = 'cancelled') {
   const sw = SW;
   SW = null;
   if (!sw) return;
+  sw.reason = reason;
   clearTimeout(sw.idle);
   try { sw.w.terminate(); } catch { /* 무시 */ }
   for (const p of sw.pend.values()) p.no({ code: reason });
@@ -901,7 +909,7 @@ async function workerReady({ onStage = null, signal = null } = {}) {
   w.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); workerBroken = true; if (SW === sw) killWorker('worker_failed'); };
   sw.ready = (async () => {
     const { wasm, model } = await toolBytes({ onStage, signal });
-    if (SW !== sw) throw cancelled();
+    if (SW !== sw) throw { code: sw.reason || 'cancelled' };
     if (onStage) onStage({ stage: 'prepare' });
     await ask(sw, { type: 'init', wasm: ownBuffer(wasm), model: ownBuffer(model) }, [], 90000);
     return sw;
@@ -923,8 +931,10 @@ async function maskInWorker(rgba, w, h, { refine = false, onStage = null, signal
 }
 // 배경 지우기 도구를 메모리에서 내림 (상품 화면을 나갈 때·합성을 저장하기 전 — 아이폰처럼 메모리가 빠듯한 기기를 위해)
 export function releaseSegmenter() {
+  // 배경 지우기가 도는 중이면 내리지 않음 — 그 작업을 '고장'으로 만들지 않게 (끝나고 45초 뒤 일꾼은 저절로 내려감, 1.5.2 검토)
+  if (SW && SW.pend.size) return;
   killWorker('idle');
-  if (segP) { const p = segP; segP = null; p.then((s) => s && s.release && s.release()).catch(() => {}); }
+  if (segP && !mainBusy) { const p = segP; segP = null; p.then((s) => s && s.release && s.release()).catch(() => {}); }
 }
 export const segmenterState = () => ({ worker: !!SW, workerBroken, main: !!segP });
 
@@ -986,8 +996,9 @@ export async function autoMask(rgba, w, h, { useModel = true, refine = false, on
       if (tier.worker && !workerBroken) {
         try { r = await maskInWorker(rgba, w, h, { refine, onStage, signal }); } catch (e) {
           if (e && ['cancelled', 'timeout'].includes(e.code)) throw e;
-          if (e && /model_hash|wasm_hash|fetch/.test(String(e.message || ''))) throw e;
-          workerBroken = true; // 일꾼만 안 되는 브라우저 → 화면 쪽으로 다시
+          if (e && (e.code === 'fetch' || /model_hash|wasm_hash/.test(String(e.message || '')))) throw e; // 받기 실패·파일이 다름 — 일꾼 탓이 아님
+          killWorker('worker_failed'); // 실패한 일꾼을 끝내고 (모델을 두 벌 들고 있지 않게) 화면 쪽으로 다시
+          workerBroken = true;
         }
       }
       if (!r) r = await maskOnMain(rgba, w, h, { refine, onStage, signal });

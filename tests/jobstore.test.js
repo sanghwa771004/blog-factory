@@ -24,6 +24,7 @@ describe('저장 모양 (cleanJob): 이미지 번호와 설정만 남기고 나�
     assert.deepEqual(j.pending_keys, ['ok_key_123456']);
     assert.deepEqual(j.mask, { saved_id: U(9), dirty: false, method: 'auto_u2netp', model: '', edited: true, w: 800, h: 600 });
     assert.equal(j.spec.light, 'left', '빛 방향 설정도 같이');
+    assert.deepEqual(cleanJob(job({ user_set: ['light', 'light', 'warmth', 'url', 3] })).user_set, ['light', 'warmth'], '직접 고른 장면 칸만 (추정으로 다시 덮지 않게)');
   });
   test('작업 번호·상품 사진 번호가 없으면 저장하지 않음', () => {
     assert.equal(cleanJob({ id: 'x', product_id: U(2) }), null);
@@ -85,6 +86,15 @@ describe('저장소 (메모리 저장소로 규칙 확인)', () => {
     assert.ok(!all.some((j) => j.id === U(100)), '가장 오래된 것부터');
     t += (KEEP_DAYS + 1) * DAY;
     await S.sweep();
+    assert.equal((await be.all()).length, 0);
+  });
+  test('열 때(이어 하기 고르기) 기간이 지난 기록을 먼저 지움 — 저장을 안 해도 오래 남지 않게', async () => {
+    let t = 1000 * DAY;
+    const be = memoryBackend();
+    const S = createJobStore({ backend: be, now: () => t });
+    await S.save(job({ id: U(201) }));
+    t += (KEEP_DAYS + 1) * DAY;
+    assert.equal((await S.latest({ postId: '' })).value, null);
     assert.equal((await be.all()).length, 0);
   });
   test('저장 공간이 모자라면 code: quota, 저장소가 없으면 code: unavailable (작업은 멈추지 않음)', async () => {

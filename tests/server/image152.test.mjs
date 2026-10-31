@@ -37,6 +37,12 @@ function fakeDb(st) {
     if (t === '/storage/v1/bucket/post-images' && method === 'GET') return st.noBucket ? [404, { statusCode: '404', error: 'not_found', message: 'Bucket not found' }] : [200, { id: 'post-images', name: 'post-images', public: false, file_size_limit: 26214400, allowed_mime_types: ['image/jpeg', 'image/png', 'image/webp'] }];
     if (t.startsWith('/storage/v1/object/sign/')) return [200, (body?.paths || []).map((p) => ({ path: p, signedURL: `/object/sign/post-images/${p}?token=t`, error: null }))];
     if (t.startsWith('/storage/v1/object/post-images/') && (method === 'POST' || method === 'PUT')) { const p = t.replace('/storage/v1/object/post-images/', ''); st.uploads.push(p); st.files.add(p); return [200, { Key: 'post-images/' + p }]; }
+    // Storage 목록 (supabase-js list → POST /object/list/{bucket} { prefix, search }) — 올린 시각은 st.fileTimes 에서 (없으면 지금)
+    if (t === '/storage/v1/object/list/post-images' && method === 'POST') {
+      const pre = String(body?.prefix || '').replace(/\/$/, '') + '/';
+      const found = [...st.files].filter((f) => f.startsWith(pre) && !f.slice(pre.length).includes('/') && f.slice(pre.length).includes(String(body?.search || '')));
+      return [200, found.map((f) => { const at = st.fileTimes.get(f) || new Date().toISOString(); return { name: f.slice(pre.length), id: f, updated_at: at, created_at: at, last_accessed_at: at, metadata: {} }; })];
+    }
     if (t.startsWith('/storage/v1/object/post-images') && method === 'DELETE') {
       const asked = body?.prefixes || [];
       st.removeCalls.push(asked);
@@ -48,6 +54,8 @@ function fakeDb(st) {
     if (rpc === 'image_save') {
       st.saves.push(body);
       if (st.saveError) return [400, { code: 'P0001', details: null, hint: null, message: st.saveError }];
+      // 019 고유 색인 흉내: 같은 경로의 살아 있는 합성이 이미 있으면 두 번째 줄은 막힘
+      if (st.composites.some((r) => r.storage_path === body.img.storage_path && !r.deleted_at)) return [409, { code: '23505', details: null, hint: null, message: 'duplicate key value violates unique constraint "post_images_composite_path_uniq"' }];
       const row = { id: 'c0c0c0c0-c0c0-4c0c-8c0c-' + String(st.saves.length).padStart(12, '0'), ...body.img };
       st.composites.push(row);
       return [200, { image: row, slot: null }];
@@ -62,7 +70,9 @@ function fakeDb(st) {
       return [200, one ? rows[0] || null : rows];
     }
     if (t === 'post_images') {
-      if (query.storage_path && String(query.storage_path).startsWith('like.')) { const re = likeRe(query.storage_path); return [200, st.composites.filter((r) => re.test(r.storage_path) && (!query.kind || r.kind === String(query.kind).replace(/^eq\./, '')))]; }
+      // raceHide: 다른 요청이 아직 기록 전이던 순간의 확인 흉내 (요청 번호 확인에는 안 보이고, 기록할 때는 이미 있음)
+      if (query.storage_path && String(query.storage_path).startsWith('like.')) { if (st.raceHide) return [200, []]; const re = likeRe(query.storage_path); return [200, st.composites.filter((r) => re.test(r.storage_path) && (!query.kind || r.kind === String(query.kind).replace(/^eq\./, '')))]; }
+      if (query.storage_path && String(query.storage_path).startsWith('eq.')) { const want = String(query.storage_path).slice(3); return [200, st.composites.filter((r) => r.storage_path === want && !r.deleted_at)]; }
       const rows = idsOf(query.id).map((id) => st.images[id]).filter(Boolean).filter((r) => query.deleted_at !== 'is.null' || !r.deleted_at);
       return [200, one ? rows[0] || null : rows];
     }
@@ -71,7 +81,7 @@ function fakeDb(st) {
 }
 const newState = () => ({
   images: { [PROD]: img(PROD), [BG]: img(BG, { kind: 'ai', provider: 'cloudflare', storage_path: 'ai/bg.jpg', preset: 'pscene_layer', product_image_id: PROD }), [IMG_A]: img(IMG_A) },
-  uploads: [], files: new Set(), removeCalls: [], saves: [], composites: [], evals: [], upserts: [], slots: [], slotDeletes: [], saveError: '', noBucket: false,
+  uploads: [], files: new Set(), fileTimes: new Map(), removeCalls: [], saves: [], composites: [], evals: [], upserts: [], slots: [], slotDeletes: [], saveError: '', noBucket: false,
 });
 const form = (bytes, meta) => { const fd = new FormData(); fd.append('file', new Blob([bytes], { type: 'image/png' }), 'composite.png'); fd.append('meta', JSON.stringify(meta)); return fd; };
 const META = (o) => ({ product_image_id: PROD, background_image_id: BG, mask_id: MASK, layer: LAYER, purpose: 'blog_body', ratio: '4:3', spec: { mode: 'layer', template: 'table', light: 'left', warmth: 'warm' }, ...o });
@@ -124,22 +134,44 @@ describe('1.5.2 상품 장면 저장 안정성·장면 정보·자리 반복 —
     assert.equal(st.uploads.filter((u) => u.endsWith(`/${key}.png`)).length, 2, '같은 경로에 다시');
   });
 
-  test('실패한 합성 파일 정리: 기록이 없는 그 번호의 composite/ 파일만 지우고, 저장된 합성·잘못된 번호는 건드리지 않음', { skip }, async () => {
-    const orphan = 'orphan_key_0000001';
+  test('실패한 합성 파일 정리: 기록이 없고 올린 지 15분 넘은 그 번호의 composite/ 파일만 지우고, 저장된 합성·막 올린 파일(아직 저장 중일 수 있음)·잘못된 번호는 건드리지 않음', { skip }, async () => {
+    const orphan = 'orphan_key_0000001', fresh = 'fresh_key_00000001';
     const now = new Date();
-    const path = `composite/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${orphan}.png`;
-    st.files.add(path);
+    const dir = `composite/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const path = `${dir}/${orphan}.png`, freshPath = `${dir}/${fresh}.png`;
+    st.files.add(path); st.fileTimes.set(path, new Date(Date.now() - 20 * 60_000).toISOString());
+    st.files.add(freshPath); st.fileTimes.set(freshPath, new Date(Date.now() - 60_000).toISOString());
     const kept = st.composites[0].storage_path; // 앞에서 저장된 합성
     const keptKey = kept.split('/').pop().replace(/\.png$/, '');
     const n = st.removeCalls.length;
-    const r = await srv.call('POST', 'images/composite/cleanup', { request_keys: [orphan, keptKey, '../upload/3333', 'x'] });
+    const r = await srv.call('POST', 'images/composite/cleanup', { request_keys: [orphan, fresh, keptKey, '../upload/3333', 'x'] });
     assert.equal(r.status, 200, JSON.stringify(r.j));
     assert.equal(r.j.removed, 1);
-    assert.ok(!st.files.has(path) && st.files.has(kept), '고아 파일만 지움');
+    assert.deepEqual(r.j.recent, [fresh], '막 올린 파일은 다음에 다시');
+    assert.ok(!st.files.has(path) && st.files.has(kept) && st.files.has(freshPath), '오래된 고아 파일만 지움');
     const asked = st.removeCalls.slice(n).flat();
-    assert.ok(asked.length && asked.every((x) => x.startsWith('composite/') && x.includes(orphan)), asked.join(','));
+    assert.deepEqual(asked, [path]);
     const none = await srv.call('POST', 'images/composite/cleanup', { request_keys: [] });
     assert.deepEqual([none.status, none.j.removed], [200, 0]);
+  });
+
+  test('같은 요청이 거의 동시에 두 번(다른 쪽이 먼저 기록): DB가 두 번째 줄을 막으면(23505) 먼저 저장된 줄을 돌려주고, 그 파일은 지우지 않음', { skip }, async () => {
+    const key = 'race_key_000000001';
+    const now = new Date();
+    const path = `composite/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${key}.png`;
+    // 첫 요청: 같은 번호의 기록이 아직 없는 순간에 시작 → 두 번째 요청이 확인을 지난 뒤에 기록됨 (흉내: 확인은 비어 있고 기록할 때 이미 있음)
+    const first = { id: 'c0c0c0c0-c0c0-4c0c-8c0c-0000000000aa', kind: 'composite', storage_path: path, deleted_at: null };
+    st.composites.push(first);
+    st.raceHide = true;
+    const n = st.removeCalls.length, nSaves = st.saves.length;
+    try {
+      const r = await srv.form('images/composite', form(COMP_PNG, META({ request_key: key })));
+      assert.equal(r.status, 200, JSON.stringify(r.j));
+      assert.deepEqual([r.j.reused, r.j.image.id], [true, first.id]);
+      assert.equal(st.saves.length, nSaves + 1, '기록을 시도했다가 DB가 막음 (23505)');
+      assert.ok(!st.removeCalls.slice(n).flat().includes(path), '먼저 저장된 줄의 파일은 지우지 않음');
+      assert.equal(st.composites.filter((x) => x.storage_path === path).length, 1, '줄은 하나');
+    } finally { st.raceHide = false; }
   });
 
   test('평가 저장: 상품 장면 비교 칸(외형 보존·조명·그림자·색감)도 받고, 모르는 칸·범위 밖 값은 버림', { skip }, async () => {
@@ -151,10 +183,15 @@ describe('1.5.2 상품 장면 저장 안정성·장면 정보·자리 반복 —
 
   test('같은 이미지를 본문 여러 자리에: 거절(image_in_other_slot), move: true 면 옮겨 옴. 대표 이미지 자리는 본문 사진을 그대로 써도 됨', { skip }, async () => {
     st.slots = [{ post_id: POST, slot_key: S1, image_id: IMG_A, purpose: 'blog_body' }];
-    const dup = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: S2, image_id: IMG_A });
-    assert.deepEqual([dup.status, dup.j.error, dup.j.slot_key], [409, 'image_in_other_slot', S1]);
+    const dup = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: S2, image_id: IMG_A, dup_check: true });
+    assert.deepEqual([dup.status, dup.j.error, dup.j.slot_key, dup.j.slot_keys], [409, 'image_in_other_slot', S1, [S1]]);
     assert.equal(st.upserts.length, 0, '거절하면 연결을 바꾸지 않음');
-    const cover = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: 'x:cover', image_id: IMG_A });
+    // 1.5.0·1.5.1 화면(dup_check 를 안 보냄)은 예전 그대로 연결 — 서버를 먼저 올려도 옛 화면이 새 오류를 받지 않게
+    const old = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: S2, image_id: IMG_A });
+    assert.equal(old.status, 200, JSON.stringify(old.j));
+    assert.deepEqual(old.j.moved_from, []);
+    st.upserts = [];
+    const cover = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: 'x:cover', image_id: IMG_A, dup_check: true });
     assert.equal(cover.status, 200, JSON.stringify(cover.j));
     const mv = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: S2, image_id: IMG_A, move: true });
     assert.equal(mv.status, 200, JSON.stringify(mv.j));
@@ -164,7 +201,7 @@ describe('1.5.2 상품 장면 저장 안정성·장면 정보·자리 반복 —
     assert.ok(String(del.slot_key).includes(encodeURIComponent(S1).slice(0, 4)) || String(del.slot_key).includes('침대'), JSON.stringify(del));
     // 본문에서 사라진 자리(옛 연결)에 있는 같은 이미지는 따지지 않음 (다른 자리로 옮기는 중일 수 있어서)
     st.slots = [{ post_id: POST, slot_key: 'k:예전 자리#1', image_id: IMG_A, purpose: 'blog_body' }];
-    const orphan = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: S1, image_id: IMG_A });
+    const orphan = await srv.call('POST', `posts/${POST}/images/link`, { slot_key: S1, image_id: IMG_A, dup_check: true });
     assert.equal(orphan.status, 200, JSON.stringify(orphan.j));
   });
 });

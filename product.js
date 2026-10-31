@@ -37,6 +37,8 @@ export const PRODUCT_FLOWS = {
   reference: { label: IMG.PRODUCT_MODES.reference.label, got: 'AI가 상품 사진을 보고 장면 전체를 새로 그려 (더 자연스러움)', limit: "작은 글자·로고·버튼이 원본과 달라질 수 있어 — 원본과 꼭 비교해야 하고 'AI 합성 이미지'로 표시돼." },
   bg_only: { label: '배경만 만들기', got: '상품이 놓일 빈 배경만 만들어 보관함에 저장', limit: '상품은 나중에 직접 얹거나 다른 곳에서 써. 상품 사진은 빛·각도를 맞추는 데만 써 (AI에 안 보내).' },
 };
+// 이미 있는 요소에 더하기 — null·false 는 건너뜀 (DOM append 는 null 을 'null' 글자로 넣음)
+const add = (el, ...kids) => { for (const k of kids.flat(Infinity)) if (k != null && k !== false && k !== '') el.append(k instanceof Node ? k : String(k)); return el; };
 const SAVE_REASON = {
   offline: '인터넷이 끊겼어. 연결되면 다시 저장을 눌러줘.',
   network: '서버에 닿지 못했어 (인터넷이 불안정할 수 있어). 다시 저장을 눌러줘.',
@@ -102,7 +104,7 @@ export function createProduct(ui, kit) {
     const c = ps.pick >= 0 ? ps.cands[ps.pick] : null;
     return {
       id: ps.jobId, created_at: ps.created, post_id: ps.postId, slot_key: ps.slotKey, product_id: ps.product.id, extra_ids: ps.extras.map((x) => x.id),
-      name: ps.name, flow: ps.flow, spec: specOf(ps), ratio: ps.ratio, mode_id: ps.modeId, quality: ps.quality, count: ps.count,
+      name: ps.name, flow: ps.flow, spec: specOf(ps), user_set: Object.keys(ps.userSet || {}).filter((k) => ps.userSet[k]), ratio: ps.ratio, mode_id: ps.modeId, quality: ps.quality, count: ps.count,
       mask: ps.mask ? { saved_id: ps.maskSaved ? ps.maskSaved.id : '', dirty: !!(ps.maskDirty || !ps.maskSaved), method: ps.maskMethod, model: ps.maskModel || '', edited: ps.maskEdited, w: ps.mask.w, h: ps.mask.h } : null,
       cands: ps.cands.filter((x) => x && x.image && x.image.id).map((x) => ({ image_id: x.image.id, mode: x.mode || ps.mode, gen_id: x.gen && x.gen.id ? x.gen.id : '' })),
       pick_id: c && c.image ? c.image.id : '', layer: ps.layer, result_id: ps.result && ps.result.id ? ps.result.id : '',
@@ -116,7 +118,10 @@ export function createProduct(ui, kit) {
     clearTimeout(saveT);
     saveT = setTimeout(() => { persist(ps); }, 700);
   }
+  // 로그아웃(세션이 없음)한 뒤에는 이 기기에 다시 만들지 않음 — 로그아웃 때 지운 기록이 남은 타이머·페이지 닫기 저장으로 되살아나지 않게 (1.5.2 검토)
+  const signedIn = () => !!lsGet('gf-session');
   async function persist(ps) {
+    if (!signedIn()) return;
     const j = jobOf(ps);
     if (!j) return;
     const sig = JSON.stringify(j) + '|' + (ps.maskRev || 0);
@@ -127,6 +132,7 @@ export function createProduct(ui, kit) {
       if (ps.maskPngRev !== (ps.maskRev || 0)) { try { ps.maskPng = await CUT.toPngBlob(CUT.maskRGBA(ps.mask.data, ps.mask.w, ps.mask.h), ps.mask.w, ps.mask.h); ps.maskPngRev = ps.maskRev || 0; } catch { ps.maskPng = null; } }
       j.mask_png = ps.maskPng;
     }
+    if (!signedIn()) return;
     const r = await JS.save(j);
     let note = r.ok ? '' : r.code === 'quota' ? '이 기기 저장 공간이 모자라서 진행 상황을 저장하지 못했어. 만든 이미지는 보관함(서버)에 그대로 있어 — 공간을 비우면 다시 저장돼.'
       : r.code === 'unavailable' ? '이 브라우저는 진행 상황을 저장할 수 없어 (사생활 보호 모드일 수 있어). 새로고침하면 처음부터지만 만든 이미지는 보관함에 남아.' : '진행 상황을 이 기기에 저장하지 못했어 (만든 이미지는 보관함에 그대로).';
@@ -144,7 +150,8 @@ export function createProduct(ui, kit) {
       Object.assign(ps, { jobId: job.id, created: job.created_at, flow: job.flow || (sp.mode === 'reference' ? 'reference' : 'layer'), mode: sp.mode === 'reference' ? 'reference' : 'layer',
         template: sp.template || 'table', purpose: sp.purpose || 'blog_body', angle: sp.angle || 'front', place: sp.place || 'center', custom: sp.custom || '',
         light: sp.light || '', warmth: sp.warmth || '', bright: sp.bright || '', shape: sp.shape || '', name: job.name || ps.name,
-        ratio: job.ratio || '', modeId: job.mode_id || '', quality: job.quality || '', count: job.count || 1, layer: job.layer ? IMG.cleanLayer(job.layer) : null, failedKeys: (job.pending_keys || []).slice() });
+        ratio: job.ratio || '', modeId: job.mode_id || '', quality: job.quality || '', count: job.count || 1, layer: job.layer ? IMG.cleanLayer(job.layer) : null, failedKeys: (job.pending_keys || []).slice(),
+        userSet: Object.fromEntries((job.user_set || []).map((k) => [k, true])) });
       for (const id of job.extra_ids || []) { try { const x = await api('/images/' + id); if (x && x.image) ps.extras.push(x.image); else miss.push('추가 사진'); } catch { miss.push('추가 사진'); } }
       if (job.mask) {
         const sm = job.mask.saved_id ? (j.masks || []).find((m) => m.id === job.mask.saved_id) : null;
@@ -177,8 +184,16 @@ export function createProduct(ui, kit) {
   async function cleanupFailed(ps) {
     const keys = ps.failedKeys.slice(0, 10);
     if (!keys.length) return;
-    try { await api('/images/composite/cleanup', { method: 'POST', body: { request_keys: keys } }); ps.failedKeys = ps.failedKeys.filter((k) => !keys.includes(k)); schedulePersist(); } catch { /* 다음에 다시 */ }
+    try {
+      const j = await api('/images/composite/cleanup', { method: 'POST', body: { request_keys: keys } });
+      // 막 올린 파일(아직 저장 중일 수 있음)은 서버가 15분이 지나야 지움 — 그 번호는 기억해 두고 다음에 다시 (1.5.2 검토)
+      const later = new Set(Array.isArray(j && j.recent) ? j.recent.map(String) : []);
+      ps.failedKeys = ps.failedKeys.filter((k) => !keys.includes(k) || later.has(k));
+      schedulePersist();
+    } catch { /* 다음에 다시 */ }
   }
+  // 기록을 지우기 전에 남은 실패 번호를 한 번 정리 요청 (기다리지 않음 — 막 올린 파일은 서버가 남겨 둠)
+  const cleanupKeys = (keys) => { const k = (keys || []).filter((x) => typeof x === 'string').slice(0, 10); if (k.length) api('/images/composite/cleanup', { method: 'POST', body: { request_keys: k } }).catch(() => {}); };
   async function loadResume(ps, id) {
     try {
       const j = await api('/images/' + id);
@@ -208,7 +223,10 @@ export function createProduct(ui, kit) {
     } catch (e) { if (e && e.code !== 'auth') toast(ui.errText(e)); }
     if (PS === ps) { ps.loading = false; draw(); }
   }
+  // 배경 지우기·영역 저장·합성 저장·만들기가 도는 동안에는 상품 사진을 바꾸지 않음 — 끝난 결과가 새 사진에 붙지 않게 (1.5.2 검토)
+  const busyNow = (ps) => !!(ps && (ps.maskBusy || ps.saving || ps.maskSaving || ps.busy));
   function setProduct(img, masks) {
+    PS.prodRev = (PS.prodRev || 0) + 1;
     PS.product = img;
     PS.offer = null;
     PS.name = PS.name || clean(img.description || '').slice(0, 60);
@@ -220,6 +238,18 @@ export function createProduct(ui, kit) {
     for (const k of ['light', 'warmth', 'bright', 'shape']) if (PS.est[k]) { PS[k] = ''; PS.est[k] = false; }
     PS.srcP = img && img.url ? CUT.decodeImage(img.url, tier().sizes.decode).then((s) => { if (PS && PS.product === img) { PS.src = s; draw(); } return s; }) : null;
     if (PS.srcP) PS.srcP.catch(() => { if (PS) { PS.segNote = '상품 사진을 불러오지 못했어. 새로고침한 뒤 다시 해줘 (주소는 1시간 동안만 열려).'; draw(); } });
+  }
+  // 처리 크기(보통·간단)만 바꿈 — 만든 영역·배경 후보·합성은 지우지 않음 (1.5.2 검토). 아직 아무것도 안 만들었으면 사진을 새 크기로 다시 읽음
+  function retier() {
+    const ps = PS;
+    if (ps.product && !busyNow(ps) && !ps.mask && !ps.cands.length && !ps.result) setProduct(ps.product, ps.savedMasks);
+    else if (ps.product) toast('처리 크기를 바꿨어 — 다음에 배경을 지울 때부터 적용돼 (지금 영역·후보는 그대로).', 4000);
+    draw();
+  }
+  function switchProduct(img) {
+    if (busyNow(PS)) { toast('지금 하는 일(배경 지우기·저장·만들기)이 끝난 뒤에 사진을 바꿔줘.', 4000); return; }
+    setProduct(img, []);
+    draw();
   }
   const specOf = (ps) => IMG.cleanProductSpec({ mode: ps.mode, template: ps.template, purpose: ps.purpose, angle: ps.angle, place: ps.place, custom: ps.custom, name: ps.name,
     light: ps.light, warmth: ps.warmth, bright: ps.bright, shape: ps.shape });
@@ -276,7 +306,7 @@ export function createProduct(ui, kit) {
       h('p', null, `${o.name || '상품'} · ${(PRODUCT_FLOWS[o.flow] || PRODUCT_FLOWS[o.spec.mode] || PRODUCT_FLOWS.layer).label} · ${stepLabel(o.step)} · ${L.fmtTime(when)}`),
       h('div', { class: 'go' },
         btn('이어서 작업하기', 'sm', () => { const root = PS.root; const job = PS.offer; init({ postId: job.post_id, slotKey: job.slot_key, job }); PS.root = root; draw(true); }),
-        btn('새로 시작하기', 'sm ghost', async () => { const job = PS.offer; PS.offer = null; draw(); await JS.remove(job.id); toast('하던 작업 기록을 지웠어 (만든 이미지는 보관함에 그대로 있어)'); })),
+        btn('새로 시작하기', 'sm ghost', async () => { const job = PS.offer; PS.offer = null; draw(); cleanupKeys(job.pending_keys); await JS.remove(job.id); toast('하던 작업 기록을 지웠어 (만든 이미지는 보관함에 그대로 있어)'); })),
       h('p', { class: 'hint' }, '진행 상황은 이 기기 브라우저에만 저장돼 (이미지 번호와 설정만 — 사진 파일·로그인 정보는 안 둠). 마지막으로 고친 뒤 14일, 다 끝낸 작업은 3일 뒤에 지워지고, 로그아웃하면 바로 지워져.'));
   }
   // ── 무엇을 만들까 (세 방식) ──
@@ -330,14 +360,14 @@ export function createProduct(ui, kit) {
       h('div', { class: 'refrow' }, thumb(P, null), h('div', { class: 'stack' }, h('div', { class: 'chips' }, kindChip(P)), h('small', { class: 'hint' }, `${P.width}×${P.height}${P.kind === 'stock' ? ' · ' + (P.attribution_text || 'Pexels') : ''}`),
         P.kind === 'upload' && P.source_type !== 'own' ? h('small', { class: 'hint' }, '직접 찍은 사진이 아니면 그 사진의 이용 조건을 꼭 확인해줘.') : null)),
       field('상품 이름 (선택)', PS.el.name, '보관함 설명·대체 텍스트에만 써. AI에는 보내지 않아 (이름을 보면 AI가 글자를 지어낼 수 있어서).'),
-      h('div', { class: 'go' }, btn('다른 사진으로', 'sm ghost', () => pickSheet((img) => { setProduct(img, []); draw(); })), btn('새 사진 올리기', 'sm ghost', () => uploadSheet((img) => { setProduct(img, []); draw(); }))),
+      h('div', { class: 'go' }, btn('다른 사진으로', 'sm ghost', () => pickSheet((img) => switchProduct(img)), { disabled: busyNow(PS) }), btn('새 사진 올리기', 'sm ghost', () => uploadSheet((img) => switchProduct(img)), { disabled: busyNow(PS) })),
       h('p', { class: 'hint' }, '원본 사진은 보관함에 그대로 남고 고치지 않아. 합성 결과는 새 이미지로 따로 저장돼.'));
   }
   // ── 2. 추가 사진 (앞·뒤·옆) ──
   function secExtras() {
     if (!PS.product) return null;
     const d = det('pscene-extras', `추가 사진 (선택) ${PS.extras.length}/3`, PS.extras.length > 0, 'panel pstep');
-    d.append(h('p', { class: 'hint' }, "같은 상품의 다른 면(뒷면·옆면·버튼 가까이) 사진. 'AI 실사 장면'에서 참고 사진으로 같이 보내고, 검수할 때 비교에 써. '원본 보존 합성'은 첫 사진만 써."),
+    add(d, h('p', { class: 'hint' }, "같은 상품의 다른 면(뒷면·옆면·버튼 가까이) 사진. 'AI 실사 장면'에서 참고 사진으로 같이 보내고, 검수할 때 비교에 써. '원본 보존 합성'은 첫 사진만 써."),
       ...PS.extras.map((x, i) => h('div', { class: 'refrow' }, thumb(x, null), h('small', null, IMG.originLabel(x)), btn('빼기', 'sm ghost', () => { PS.extras.splice(i, 1); draw(); }))),
       PS.extras.length < 3 ? h('div', { class: 'go' }, btn('올리기', 'sm ghost', () => uploadSheet((img) => { if (img.id !== PS.product.id && !PS.extras.some((x) => x.id === img.id)) PS.extras.push(img); draw(); })),
         btn('보관함에서', 'sm ghost', () => pickSheet((img) => { if (img.id !== PS.product.id && !PS.extras.some((x) => x.id === img.id)) PS.extras.push(img); draw(); }))) : null);
@@ -352,9 +382,9 @@ export function createProduct(ui, kit) {
     const kids = [h('p', { class: 'hint' }, need ? '원본 보존 합성은 여기서 남긴 부분(상품)만 원본 픽셀 그대로 배경 위에 얹어. 이 기기 안에서 처리해서 무료이고 사진이 밖으로 나가지 않아.'
       : "AI 실사 장면은 마스크 없이 만들 수 있어 (건너뛰어도 돼). 영역을 정하면 빛·색 추정에 쓰고, 원본 보존 합성도 바로 할 수 있어.")];
     if (T.reasons.length) kids.push(h('p', { class: 'notice' }, T.reasons.map((r) => CUT.TIER_MSG[r]).filter(Boolean).join(' '),
-      T.lite && T.model ? h('span', null, ' ', btn('보통 크기로 처리하기', 'sm ghost', () => { lsSet('gf-tier', 'normal'); lsSet('gf-tier-failed', ''); if (PS.product) setProduct(PS.product, PS.savedMasks); draw(); })) : null));
+      T.lite && T.model ? h('span', null, ' ', btn('보통 크기로 처리하기', 'sm ghost', () => { lsSet('gf-tier', 'normal'); lsSet('gf-tier-failed', ''); retier(); })) : null));
     else kids.push(h('p', { class: 'hint' }, `처리 크기: ${T.lite ? '간단 모드' : '보통'} (사진 긴 변 ${T.sizes.decode}px까지 · 영역 ${T.sizes.mask}px) `,
-      btn(T.lite ? '보통 크기로' : '간단 모드로 (느린 기기·메모리가 모자랄 때)', 'sm ghost', () => { lsSet('gf-tier', T.lite ? 'normal' : 'lite'); if (T.lite) lsSet('gf-tier-failed', ''); if (PS.product) setProduct(PS.product, PS.savedMasks); draw(); })));
+      btn(T.lite ? '보통 크기로' : '간단 모드로 (느린 기기·메모리가 모자랄 때)', 'sm ghost', () => { lsSet('gf-tier', T.lite ? 'normal' : 'lite'); if (T.lite) lsSet('gf-tier-failed', ''); retier(); })));
     if (PS.segNote) kids.push(h('p', { class: 'notice' }, PS.segNote));
     if (!PS.src) { kids.push(h('p', { class: 'hint' }, '상품 사진을 불러오는 중…')); return step(3, '상품에서 남길 영역 확인', ...kids); }
     if (PS.maskBusy) kids.push(maskProgressBox());
@@ -494,24 +524,28 @@ export function createProduct(ui, kit) {
   }
   async function autoMask(useModel, refine) {
     if (!PS.src || PS.maskBusy) return;
-    const ps = PS;
+    const ps = PS, prodRev = ps.prodRev || 0;
     const ctl = new AbortController();
     ps.maskBusy = { ctl, stage: null, t0: Date.now(), refine };
     ps.segNote = '';
     draw();
     const tick = setInterval(() => { if (PS === ps && ps.maskBusy) fillMaskProg(); }, 1000);
     try {
-      heavy('mask');
       const ws = CUT.workSize(ps.src.w, ps.src.h, tier().sizes.mask);
       const small = { data: shrinkTo(ps.src, ws.w, ws.h), w: ws.w, h: ws.h };
-      const r = await CUT.autoMask(small.data, small.w, small.h, { useModel, refine, signal: ctl.signal, onStage: (st) => { if (PS === ps && ps.maskBusy) { ps.maskBusy.stage = st; fillMaskProg(); } } });
-      if (PS !== ps) return;
+      // '처리 중 꺼짐' 흔적은 도구를 준비·실행할 때만 (19MB 받는 동안 화면을 내렸다가 꺼진 건 메모리 문제가 아니라서 — 1.5.2 검토)
+      const r = await CUT.autoMask(small.data, small.w, small.h, { useModel, refine, signal: ctl.signal, onStage: (st) => {
+        if (st && (st.stage === 'prepare' || st.stage === 'run')) heavy('mask');
+        if (PS === ps && ps.maskBusy) { ps.maskBusy.stage = st; fillMaskProg(); }
+      } });
+      if (PS !== ps || (ps.prodRev || 0) !== prodRev) return;
       if (ps.mask) pushUndo(ps);
       ps.mask = { data: r.mask, w: small.w, h: small.h };
       ps.maskMethod = r.method; ps.maskModel = r.method === 'auto_u2netp' ? (r.refined ? 'u2netp_2pass' : 'u2netp') : ''; ps.maskEdited = false; ps.maskDirty = true; ps.maskView = null; ps.maskRev = (ps.maskRev || 0) + 1;
       ps.maskQ = r.quality || null;
       ps.fitProd = null;
-      const why = r.error === 'model_hash' || r.error === 'wasm_hash' ? '받은 도구 파일이 달라서 안 썼어 — 다음에 다시 받아' : r.error === 'no_simd' ? '이 브라우저는 도구(WebAssembly SIMD)를 못 돌려' : '이 기기·브라우저에서 안 될 수 있어';
+      const why = r.error === 'model_hash' || r.error === 'wasm_hash' ? '받은 도구 파일이 달라서 안 썼어 — 다음에 다시 받아' : r.error === 'no_simd' ? '이 브라우저는 도구(WebAssembly SIMD)를 못 돌려'
+        : r.error === 'fetch' ? '도구 파일을 받지 못했어 — 인터넷 연결을 확인하고 다시 눌러줘' : '이 기기·브라우저에서 안 될 수 있어';
       const pct = r.agree == null ? '' : ` (두 결과 겹침 ${Math.round(r.agree * 100)}%)`;
       const refNote = !refine || r.error ? '' : r.refined ? `상품 부분만 잘라서 한 번 더 보고 가장자리를 다듬었어${pct}.`
         : r.skip === 'disagree' ? `두 번째로 본 결과가 처음과 많이 달라서${pct} 다른 물건을 잡았을 수 있어 — 처음 결과를 그대로 뒀어.`
@@ -545,7 +579,7 @@ export function createProduct(ui, kit) {
     if (!ps.mask || !ps.product) return null;
     if (ps.maskSaving) return ps.maskSaving;
     const job = (async () => {
-      const m = ps.mask, rev = ps.maskRev || 0;
+      const m = ps.mask, rev = ps.maskRev || 0, prodId = ps.product.id, prodRev = ps.prodRev || 0;
       const data = Uint8ClampedArray.from(m.data);
       const blob = await CUT.toPngBlob(CUT.maskRGBA(data, m.w, m.h), m.w, m.h);
       const fd = new FormData();
@@ -553,8 +587,8 @@ export function createProduct(ui, kit) {
       fd.append('meta', JSON.stringify({ method: ps.maskEdited && ps.maskMethod !== 'manual' ? ps.maskMethod : ps.maskMethod || 'manual', edited: ps.maskEdited,
         params: { model: ps.maskMethod === 'auto_u2netp' ? ps.maskModel || 'u2netp' : '' }, bbox: bb, coverage: CUT.maskCoverage(data) }));
       fd.append('file', blob, 'mask.png');
-      const j = await run(button, () => api(`/images/${ps.product.id}/mask`, { method: 'POST', body: fd }), '영역을 저장했어 (원본 사진은 그대로)');
-      if (j && j.mask && PS === ps) {
+      const j = await run(button, () => api(`/images/${prodId}/mask`, { method: 'POST', body: fd }), '영역을 저장했어 (원본 사진은 그대로)');
+      if (j && j.mask && PS === ps && (ps.prodRev || 0) === prodRev) {
         ps.maskSaved = j.mask; ps.maskSavedMask = { data, w: m.w, h: m.h };
         ps.maskDirty = (ps.maskRev || 0) !== rev;
         ps.savedMasks = [j.mask, ...ps.savedMasks]; draw();
@@ -574,7 +608,9 @@ export function createProduct(ui, kit) {
       try { a = FIT.analyzeProduct(ps.src, ps.mask); } catch { a = null; }
       ps.fitProd = { rev: ps.maskRev || 0, a };
       const hints = FIT.sceneHints(a);
-      for (const k of ['light', 'warmth', 'bright', 'shape']) if (!ps[k] || ps.est[k]) { ps[k] = hints[k] || ''; ps.est[k] = !!hints[k]; }
+      // 사용자가 직접 고른 칸('지정 안 함' 포함)은 건드리지 않음 — 추정으로 채운 칸만 다시 추정 (1.5.2 검토)
+      ps.userSet = ps.userSet || {};
+      for (const k of ['light', 'warmth', 'bright', 'shape']) if (!ps.userSet[k] && (!ps[k] || ps.est[k])) { ps[k] = hints[k] || ''; ps.est[k] = !!hints[k]; }
     }
     return ps.fitProd.a;
   }
@@ -616,9 +652,13 @@ export function createProduct(ui, kit) {
     const maxRefs = IMG.refsLimit(capsModel(), 'generate');
     const note = IMG.refDownscaleNote(capsModel(), PS.mode);
     const chips = (label, key, map) => h('div', { class: 'seg grow', role: 'group', 'aria-label': label }, ...Object.entries(map).map(([k, v]) =>
-      h('button', { type: 'button', 'aria-pressed': String(PS[key] === k), onclick: () => { PS[key] = k; PS.est[key] = false; PS.serverEst = null; draw(); } }, `${v.label}${PS[key] === k && PS.est[key] ? ' (추정)' : ''}`)));
-    const estLine = a ? h('p', { class: 'hint' }, `상품 사진 분석 (이 기기에서 추정 · 0원): 빛 ${DIR_KO[a.light.dir || '']}${a.light.confidence === 'medium' ? '' : '(확신 낮음)'} · 색 ${TEMP_KO[a.temp.value || '']} · 밝기 ${BRIGHT_KO[FIT.sceneHints(a).bright || '']}`
-      + `${a.view.value && a.view.value !== PS.angle ? ` · 찍은 각도는 '${IMG.PRODUCT_ANGLES[a.view.value].label}' 같아 (확신 낮음)` : ''}. 배경을 이 빛에 맞춰 만들어 — 다르면 고급 설정에서 바꿔줘.`)
+      h('button', { type: 'button', 'aria-pressed': String(PS[key] === k), onclick: () => { PS[key] = k; PS.est[key] = false; PS.userSet = { ...(PS.userSet || {}), [key]: true }; PS.serverEst = null; draw(); } }, `${v.label}${PS[key] === k && PS.est[key] ? ' (추정)' : ''}`)));
+    // 확신이 낮은 추정은 글로만 보여주고 장면 칸에는 안 넣음 (1.5.2 검토)
+    const lowL = a && a.light.confidence === 'low', lowT = a && (!a.temp || a.temp.confidence === 'low');
+    const filled = a ? ['light', 'warmth', 'bright', 'shape'].some((k) => PS.est[k]) : false;
+    const estLine = a ? h('p', { class: 'hint' }, `상품 사진 분석 (이 기기에서 추정 · 0원): 빛 ${DIR_KO[a.light.dir || '']}${a.light.dir && lowL ? ' (확신 낮음)' : ''} · 색 ${TEMP_KO[(a.temp && a.temp.value) || '']}${a.temp && a.temp.value && lowT ? ' (확신 낮음)' : ''} · 밝기 ${BRIGHT_KO[FIT.sceneHints(a).bright || '']}`
+      + `${a.view.value && a.view.value !== PS.angle ? ` · 찍은 각도는 '${IMG.PRODUCT_ANGLES[a.view.value].label}' 같아 (확신 낮음)` : ''}. `
+      + (filled ? "추정으로 채운 칸은 고급 설정에 '(추정)'으로 보여 — 다르면 바꿔줘." : '') + (lowL || lowT ? ' 확신이 낮은 건 배경 요청에 넣지 않았어 — 필요하면 고급 설정에서 직접 골라줘.' : ''))
       : PS.mode === 'layer' && PS.flow !== 'bg_only' ? h('p', { class: 'hint' }, '3번에서 영역을 정하면 상품 사진의 빛·색을 추정해서 배경을 거기에 맞춰.') : null;
     const adv = det('pscene-adv', '고급 설정 (각도·빛·색·밝기·비율·품질·직접 적기)', false, 'plain');
     adv.append(
@@ -907,7 +947,8 @@ export function createProduct(ui, kit) {
       h('div', { class: 'go' }, btn('부분 수정 (예상 비용 확인 후)', 'sm ghost', () => editSheet(img)), btn('다시 만들기 (5번)', 'sm ghost', () => { PS.pick = -1; PS.result = null; draw(); })));
   }
   // ── 빛·원근·그림자 자동 추천 (1.5.2 — 추정값. '추천값 적용'을 눌러야 바뀌고 그 뒤에도 슬라이더로 고칠 수 있음) ──
-  async function fitFor(c) {
+  // store: false — 공급자 비교 미리보기처럼 지금 합성 화면의 추천을 바꾸면 안 될 때 (1.5.2 검토)
+  async function fitFor(c, { store = true } = {}) {
     ensureFitProd();
     const bg = await bgOf(c);
     const ratio = IMG.ratioOf(PS.purpose, PS.ratio || prefRatio(PS.purpose));
@@ -922,9 +963,22 @@ export function createProduct(ui, kit) {
     const a = PS.fitProd && PS.fitProd.a;
     const bb = PS.mask ? CUT.maskBBox(PS.mask.data, PS.mask.w, PS.mask.h, 128) : null;
     const k = PS.src && PS.mask ? PS.src.w / PS.mask.w : 1;
-    PS.rec = FIT.recommendLayer({ prod: a, bg: c.fitBg, spec: spec(), layer: PS.layer, W: o.W, H: o.H, prodPx: bb ? { w: bb.w * k, h: bb.h * k } : null, productTone: PS.productTone });
-    return PS.rec;
+    const rec = FIT.recommendLayer({ prod: a, bg: c.fitBg, spec: spec(), layer: PS.layer, W: o.W, H: o.H, prodPx: bb ? { w: bb.w * k, h: bb.h * k } : null, productTone: PS.productTone });
+    if (store) { PS.rec = rec; c.fitRec = rec; }
+    return rec;
   }
+  // 위치·크기·슬라이더를 바꾸면 추천 목록도 지금 값 기준으로 다시 (보여준 목록과 적용하는 값이 어긋나지 않게)
+  let fitT = null;
+  function refreshFitSoon() {
+    clearTimeout(fitT);
+    fitT = setTimeout(() => {
+      const old = PS && PS.el.fit, c = PS && PS.cands[PS.pick];
+      if (!old || !old.isConnected || !c || PS.saving) return;
+      old.replaceWith(fitBox(c));
+    }, 450);
+  }
+  const getAt = (o, path) => path.split('.').reduce((x, k) => (x == null ? undefined : x[k]), o);
+  const setAt = (o, path, v) => { const ks = path.split('.'); let x = o; for (const k of ks.slice(0, -1)) { if (!x[k] || typeof x[k] !== 'object') x[k] = {}; x = x[k]; } x[ks[ks.length - 1]] = v; };
   const fmtV = (key, v) => (/^(h|x|y|shadow\.o|shadow\.s)$/.test(key) ? `${Math.round(Number(v) * 100)}%` : `${Number(v) > 0 ? '+' : ''}${Math.round(Number(v) * 100)}`);
   function fitBox(c) {
     const box = h('div', { class: 'fitbox' }, h('p', { class: 'hint' }, '자동 추천을 계산하는 중… (이 기기에서 · 0원)'));
@@ -942,20 +996,28 @@ export function createProduct(ui, kit) {
         r.changes.length ? h('ul', { class: 'lic' }, ...r.changes.map((x) => h('li', null, `${x.label}: ${fmtV(x.key, x.from)} → ${fmtV(x.key, x.to)} `, h('small', null, `— ${x.why}`))))
           : h('p', { class: 'hint' }, '지금 값이 추천값과 같아.'),
         h('label', { class: 'chk' }, tone, ' 밝기·색은 상품 쪽을 바꿔서 맞추기 (기본은 배경 쪽 — 상품 픽셀을 그대로 두려고. 상품 쪽을 바꾸면 검수에서 색 칸을 직접 확인해야 해)'),
-        h('div', { class: 'go' }, btn('추천값 적용', 'sm', () => applyRec(), { disabled: !r.changes.length }),
+        h('div', { class: 'go' }, btn('추천값 적용', 'sm', (ev) => applyRec(c, ev.currentTarget), { disabled: !r.changes.length }),
           PS.recBase ? btn('적용 전으로', 'sm ghost', () => { PS.layer = PS.recBase; PS.recBase = null; PS.fitApplied = false; draw(); }) : null));
     }).catch(() => put(box, h('p', { class: 'hint' }, '자동 추천을 계산하지 못했어 — 아래에서 직접 맞춰줘.')));
     PS.el.fit = box;
     return box;
   }
-  function applyRec() {
-    const r = PS.rec;
-    if (!r || !PS.layer) return;
-    PS.recBase = JSON.parse(JSON.stringify(PS.layer));
+  // 누른 때의 위치·배경으로 다시 계산해서, 바뀐다고 보여주는 칸(changes)만 바꿈 — 손으로 맞춘 다른 칸은 그대로 (1.5.2 검토).
+  // 원본 크기 그대로·회전·가장자리 설정은 추천이 바꾸지 않음
+  async function applyRec(c, button) {
+    const ps = PS;
+    if (!c || !ps.layer) return;
+    if (button) button.disabled = true;
+    let r = null;
+    try { r = await fitFor(c); } catch { r = null; }
+    if (PS !== ps || !ps.layer || ps.cands[ps.pick] !== c) return;
+    if (!r || !r.changes.length) { if (button && button.isConnected) button.disabled = false; toast(r ? '지금 값이 추천값과 같아.' : '자동 추천을 계산하지 못했어.'); return; }
     const L = IMG.cleanLayer(r.layer);
-    // 원본 크기 그대로·회전·가장자리 설정은 사용자가 고른 그대로
-    PS.layer = { ...L, one: PS.layer.one, rot: PS.layer.rot, mask: { ...PS.layer.mask }, ratio: PS.layer.ratio };
-    PS.fitApplied = true;
+    const next = JSON.parse(JSON.stringify(ps.layer));
+    for (const ch of r.changes) if (!/^(one|rot|mask|ratio)(\.|$)/.test(ch.key)) setAt(next, ch.key, getAt(L, ch.key));
+    ps.recBase = JSON.parse(JSON.stringify(ps.layer));
+    ps.layer = IMG.cleanLayer(next);
+    ps.fitApplied = true;
     draw();
   }
   const limitBytes = () => (cfg && cfg.limits && Number(cfg.limits.composite_bytes)) || 12 * 1024 * 1024;
@@ -1033,7 +1095,7 @@ export function createProduct(ui, kit) {
       sizeLine(c),
       saveErrBox(c),
       h('div', { class: 'go' }, btn('기본값으로', 'sm ghost', () => { PS.layer = IMG.defaultLayer(spec()); PS.recBase = null; PS.fitApplied = false; draw(); }),
-        btn(result && PS.savedKey === saveKey(PS, c) ? '저장됨 ✓' : '합성 저장 (새 이미지로)', 'sm', (ev) => saveComposite(ev.currentTarget, c))),
+        (PS.el.saveBtn = btn('합성 저장 (새 이미지로)', 'sm', (ev) => saveComposite(ev.currentTarget, c)))),
       result ? h('div', { class: 'stack' },
         h('div', { class: 'chips' }, kindChip(result), h('span', { class: 'chip ' + (approved ? 'v-ok' : 'v-unk') }, approved ? '상품 검수 승인' : '상품 검수 전')),
         h('div', { class: 'go' }, btn(approved ? '상품 디테일 검수 다시 보기' : '원본과 비교해서 검수·승인', 'sm', () => checkSheet(result, { onDone: (im) => { Object.assign(result, im); draw(); } })))) : null,
@@ -1065,7 +1127,17 @@ export function createProduct(ui, kit) {
     return cv;
   }
   let composing = false, again = false;
+  // 저장한 그대로면 '저장됨 ✓' 이고 눌러도 같은 합성이 또 생기지 않게 잠금 — 위치·크기·슬라이더를 바꾸면 바로 '합성 저장'으로 (1.5.2)
+  function syncSave() {
+    const b = PS && PS.el.saveBtn, c = PS && PS.cands[PS.pick];
+    if (!b || !c || PS.saving) return;
+    const same = !!(PS.result && PS.result.kind === 'composite' && PS.savedKey === saveKey(PS, c));
+    b.textContent = same ? '저장됨 ✓' : '합성 저장 (새 이미지로)';
+    b.disabled = same;
+  }
   async function recompose() {
+    syncSave();
+    refreshFitSoon();
     if (!PS || !PS.el.compCv) return;
     if (composing) { again = true; return; }
     composing = true;
@@ -1084,7 +1156,7 @@ export function createProduct(ui, kit) {
   // 이미 저장한 것과 같은 합성인지: 위치·크기·그림자·밝기, 제작 목적·비율, 배경, 마스크, 저장 크기가 모두 같을 때만 '저장됨'
   const saveKey = (ps, c) => JSON.stringify([ps.layer, ps.purpose, ps.ratio || prefRatio(ps.purpose), c.image.id, ps.maskRev || 0, ps.outLong || 0]);
   // 결과에 같이 남길 장면 정보 (이 기기에서 추정한 값 · 추천값을 적용했는지 — 서버가 정리해서 저장)
-  const fitRecord = (c) => { const a = PS.fitProd && PS.fitProd.a, b = c.fitBg; return a || b ? { product: a, background: b, applied: !!PS.fitApplied, match: PS.rec ? PS.rec.match : null } : undefined; };
+  const fitRecord = (c) => { const a = PS.fitProd && PS.fitProd.a, b = c.fitBg; return a || b ? { product: a, background: b, applied: !!PS.fitApplied, match: c.fitRec ? c.fitRec.match : null } : undefined; };
   // 원래 크기로 다시 그려서 저장 (원본 상품 사진·마스크 원래 크기 — 미리보기 사본이 아님)
   // 1.5.2: 배경 지우기 도구를 먼저 내려 메모리 확보 → 그리기 → PNG(무손실, 불투명) → 크기가 서버 한도를 넘으면 올리지 않고 줄이기를 권함 →
   //        올리는 진행률 → 실패하면 이유와 '다시 저장(같은 요청 번호 — 두 장 안 생김)'·'그만두기(그 요청의 파일만 정리)'
@@ -1136,6 +1208,7 @@ export function createProduct(ui, kit) {
     } finally {
       ps.saving = false;
       if (button && button.isConnected) { button.disabled = false; button.textContent = '합성 저장 (새 이미지로)'; }
+      if (PS === ps) syncSave(); // 저장이 끝난 상태로 버튼을 맞춤 (그 사이 다시 그린 화면의 버튼까지)
     }
   }
   const NO_RETRY = ['bad_image', 'bad_field', 'mask_mismatch', 'background_mismatch', 'product_not_found', 'background_not_found', 'db_update_needed', 'too_large', 'mask_size_mismatch', 'product_image_required', 'background_image_required'];
@@ -1165,7 +1238,7 @@ export function createProduct(ui, kit) {
     ps.failedKeys = ps.failedKeys.filter((k) => k !== t.reqKey);
     ps.saveTry = null; ps.saveErr = null;
     toast(j.reused ? '이미 저장돼 있던 합성이야 (같은 요청이라 두 장을 만들지 않았어)' : '합성 이미지를 새로 저장했어 (원본은 그대로)');
-    if (PS !== ps) return;
+    if (PS !== ps || !ps.product || ps.product.id !== t.meta.product_image_id) return;
     ps.result = j.image; ps.savedId = j.image.id; ps.parentId = j.image.id; ps.savedKey = t.key;
     if (ps.failedKeys.length) cleanupFailed(ps);
     draw();
@@ -1274,15 +1347,17 @@ export function createProduct(ui, kit) {
           const link = async (b, move) => {
             b.disabled = true;
             try {
-              await api(`/posts/${pid}/images/link`, { method: 'POST', body: { image_id: img.id, slot_key: s.key, move: move || undefined } });
+              await api(`/posts/${pid}/images/link`, { method: 'POST', body: { image_id: img.id, slot_key: s.key, dup_check: true, move: move || undefined } });
               toast(`${name}에 넣었어${move ? ' (다른 자리에서 옮겨 왔어)' : ''}`);
               if (PS) PS.done = true;
               refreshPost(pid); ui.load();
             } catch (e) {
               if (e && e.code === 'image_in_other_slot') {
-                const other = slots.find((x) => x.key === e.slot_key);
-                put(row, h('p', { class: 'notice' }, `이 이미지는 ${other ? '사진 ' + other.n : '다른 자리'}에 이미 들어 있어. 자리마다 다른 이미지가 좋아.`),
-                  h('div', { class: 'go' }, btn(`${other ? '사진 ' + other.n : '그 자리'}에서 옮겨 오기`, 'sm', (ev) => link(ev.currentTarget, true)), btn('그대로 두기', 'sm ghost', () => drawSlots())));
+                // 그 이미지가 있는 본문 자리를 모두 (옮기면 그 자리들에서는 빠짐 — 이미지는 보관함에 그대로)
+                const keys = (Array.isArray(e.slot_keys) && e.slot_keys.length ? e.slot_keys : [e.slot_key]).map(String);
+                const where = [...new Set(keys.map((k) => { const o = slots.find((x) => x.key === k); return o ? '사진 ' + o.n : '다른 자리'; }))].join('·') || '다른 자리';
+                put(row, h('p', { class: 'notice' }, `이 이미지는 ${where}에 이미 들어 있어. 자리마다 다른 이미지가 좋아. 옮기면 ${where}에서는 빠져.`),
+                  h('div', { class: 'go' }, btn(`${where}에서 옮겨 오기`, 'sm', (ev) => link(ev.currentTarget, true)), btn('그대로 두기', 'sm ghost', () => drawSlots())));
               } else if (!e || e.code !== 'auth') toast(ui.errText(e), 4000);
             } finally { if (b.isConnected) b.disabled = false; }
           };
@@ -1706,10 +1781,10 @@ export function createProduct(ui, kit) {
           if (p.row.mode === 'layer' && ps.mask && ps.src) {
             const cv = h('canvas', { class: 'cthumb' });
             const cand = ps.cands.find((x) => x.image.id === r.image.id) || { image: r.image };
-            (async () => { const rec = await fitFor(cand); const lay = IMG.cleanLayer({ ...IMG.defaultLayer(spec()), ...rec.layer }); await previewInto(cv, cand, lay, 520); })().catch(() => put(tile, h('b', null, p.row.label), thumb(r.image, null)));
+            (async () => { const rec = await fitFor(cand, { store: false }); const lay = IMG.cleanLayer({ ...IMG.defaultLayer(spec()), ...rec.layer }); await previewInto(cv, cand, lay, 520); })().catch(() => put(tile, h('b', null, p.row.label), thumb(r.image, null)));
             tile.append(cv);
           } else tile.append(thumb(r.image, null));
-          tile.append(h('p', { class: 'hint' }, `${g.model || r.image.model} · ${IMG.qualityLabel(g.model || p.row.model, g.quality || p.q)} · ${r.image.width}×${r.image.height} · ${secs}초 · 비용 ${usd(k ? k.usd : 0)} (${k ? k.label : g.cost_status || '?'})`),
+          add(tile, h('p', { class: 'hint' }, `${g.model || r.image.model} · ${IMG.qualityLabel(g.model || p.row.model, g.quality || p.q)} · ${r.image.width}×${r.image.height} · ${secs}초 · 비용 ${usd(k ? k.usd : 0)} (${k ? k.label : g.cost_status || '?'})`),
             p.row.mode === 'reference' ? h('p', { class: 'notice' }, "AI가 상품까지 그렸어 — '상품 외형 보존'은 원본과 비교해서 매겨줘.") : null,
             evalBox(r.image, batch));
           return tile;

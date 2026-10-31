@@ -97,6 +97,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const byId = (list) => Object.fromEntries((list || []).map((x) => [x.id, x]));
 const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+// 이미 있는 요소에 더하기 — null·false 는 건너뜀 (DOM append 는 null 을 'null' 글자로 넣음 — 1.2.0부터 사진 자리 버튼 줄에 'null' 이 보였어, 1.5.2)
+const add = (el, ...kids) => { for (const k of kids.flat(Infinity)) if (k != null && k !== false && k !== '') el.append(k instanceof Node ? k : String(k)); return el; };
 const fmtBytes = (n) => (n == null ? '' : n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + 'KB' : (n / 1048576).toFixed(1) + 'MB');
 const typeName = (t) => ({ 'image/jpeg': 'JPEG', 'image/png': 'PNG', 'image/webp': 'WebP' }[t] || t);
 const outExt = (img) => (img.kind === 'card' || img.mime === 'image/png' ? 'png' : 'jpg');
@@ -488,7 +490,7 @@ export function createStudio(ui) {
       row2.append(risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)),
         own ? null : btn('상품 사진으로 장면 만들기', 'sm ghost', () => prd().start({ postId: p.id, slotKey: s.key })));
     } else {
-      row2.append(btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
+      add(row2, btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
         img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => regen(p, s, d, img), { disabled: running }) : null,
         btn(row.used_at ? '사용 완료 취소' : '사용 완료', 'sm ghost', (ev) => markUsed(p, s, !row.used_at, ev.currentTarget)),
         btn('빼기', 'sm ghost', (ev) => { if (confirmBox(ev.currentTarget, '연결을 뺄까?')) unlink(p, s, ev.currentTarget); }));
@@ -568,27 +570,36 @@ export function createStudio(ui) {
   // ── 연결·빼기·순서·사용 완료 ──
   // extra: { purpose } — AI로 만든 바로 그 이미지를 연결할 때는 만들 때 고른 용도로 (내려받을 때 고른 비율로 자르게)
   async function linkTo(p, s, img, button, extra) {
-    let moveFrom = '';
+    let moveFrom = null;
     const j = await run(button, async () => {
-      try { return await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, ...(extra || {}) } }); } catch (e) {
-        // 1.5.2: 같은 이미지가 이 글의 다른 사진 자리에 이미 있으면 → 옮겨 올지 물어봄 (반복해서 쓰지 않게)
-        if (e && e.code === 'image_in_other_slot') { moveFrom = String(e.slot_key || ''); return null; }
+      try { return await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, dup_check: true, ...(extra || {}) } }); } catch (e) {
+        // 1.5.2: 같은 이미지가 이 글의 다른 본문 자리에 이미 있으면 → 옮겨 올지 물어봄 (반복해서 쓰지 않게)
+        if (e && e.code === 'image_in_other_slot') { moveFrom = otherKeys(e); return null; }
         throw e;
       }
     }, undefined);
-    if (moveFrom) {
-      const other = ((dataOf(p.id) || {}).slots || []).find((x) => x.key === moveFrom);
-      openSheet('같은 이미지가 다른 자리에 있어',
-        thumb(img, null),
-        h('p', null, `이 이미지는 ${other ? slotName(other) : '이 글의 다른 사진 자리'}에 이미 들어 있어. 자리마다 다른 이미지를 넣는 게 좋아.`),
-        h('div', { class: 'go' }, btn(`${other ? slotName(other) : '그 자리'}에서 ${slotName(s)}로 옮기기`, 'sm', async (ev) => {
-          const r = await run(ev.currentTarget, () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, move: true, ...(extra || {}) } }), `${slotName(s)}로 옮겼어`);
-          if (r) { closeSheet(); await refresh(p.id); }
-        }), btn('그대로 두기', 'sm ghost', closeSheet)));
-      return null;
-    }
+    if (moveFrom) { moveAsk(p, s, img, moveFrom, extra, null); return null; }
     if (j) { toast(`${slotName(s)}에 연결했어`); await refresh(p.id); }
     return j;
+  }
+  const otherKeys = (e) => (Array.isArray(e.slot_keys) && e.slot_keys.length ? e.slot_keys : [e.slot_key]).map((k) => String(k || '')).filter(Boolean);
+  // 같은 이미지가 있는 자리를 모두 보여주고, 옮기면 그 자리들에서는 빠짐 (이미지는 보관함에 그대로). after: 옮긴 뒤 할 일 (사라진 자리 연결 빼기 등)
+  function moveAsk(p, s, img, keys, extra, after) {
+    const all = (dataOf(p.id) || {}).slots || [];
+    const names = keys.map((k) => { const o = all.find((x) => x.key === k); return o ? slotName(o) : '다른 자리'; });
+    const where = [...new Set(names)].join('·') || '이 글의 다른 사진 자리';
+    openSheet('같은 이미지가 다른 자리에 있어',
+      thumb(img, null),
+      h('p', null, `이 이미지는 ${where}에 이미 들어 있어. 자리마다 다른 이미지를 넣는 게 좋아.`),
+      h('p', { class: 'hint' }, `옮기면 ${where}에서는 빠져 (이미지는 보관함에 그대로).`),
+      h('div', { class: 'go' }, btn(`${where}에서 ${slotName(s)}로 옮기기`, 'sm', async (ev) => {
+        const r = await run(ev.currentTarget, async () => {
+          const x = await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, move: true, dup_check: true, ...(extra || {}) } });
+          if (after) await after();
+          return x;
+        }, `${slotName(s)}로 옮겼어`);
+        if (r) { closeSheet(); await refresh(p.id); }
+      }), btn('그대로 두기', 'sm ghost', closeSheet)));
   }
   async function unlink(p, s, button) {
     const j = await run(button, () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: null } }), '연결을 뺐어 (이미지는 보관함에 그대로)');
@@ -621,12 +632,19 @@ export function createStudio(ui) {
       thumb(img, null),
       h('p', { class: 'hint' }, '이 이미지를 넣을 자리를 골라줘. 그 자리에 있던 이미지는 보관함에 그대로 남아.'),
       h('div', { class: 'stack' }, slots.map((s) => btn(`${slotName(s)} · ${s.text}`, 'wide ghost', async (ev) => {
+        const unlinkOld = () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: o.slot_key, image_id: null } });
+        let keys = null;
         const ok = await run(ev.currentTarget, async () => {
-          await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, move: true } });
-          await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: o.slot_key, image_id: null } });
+          // 1.5.2: 이 이미지가 본문 다른 자리에도 있으면 거기서 빼지 말고 먼저 물어봄
+          try { await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, dup_check: true } }); } catch (e) {
+            if (e && e.code === 'image_in_other_slot') { keys = otherKeys(e); return false; }
+            throw e;
+          }
+          await unlinkOld();
           return true;
-        }, `${slotName(s)}에 연결했어`);
-        if (ok) { closeSheet(); refresh(p.id); }
+        }, undefined);
+        if (keys) { moveAsk(p, s, img, keys, null, unlinkOld); return; }
+        if (ok) { toast(`${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
       }))));
   }
 
@@ -2065,7 +2083,7 @@ export function createStudio(ui) {
         const ai = rv.find((r) => r.kind === 'ai_review');
         const me = rv.find((r) => r.kind === 'user_eval');
         const box = det('lib-review:' + img.id, `검수·평가 기록 (${rv.length})`, false, 'plain');
-        box.append(ai ? reviewView(ai, img, null, null) : h('p', { class: 'hint' }, 'AI 검수 기록 없음'),
+        add(box, ai ? reviewView(ai, img, null, null) : h('p', { class: 'hint' }, 'AI 검수 기록 없음'),
           me ? h('p', { class: 'hint' }, `내 평가: ${IMG.EVAL_CRITERIA.filter(([k]) => me.scores && me.scores[k]).map(([k, l]) => `${l} ${me.scores[k]}/3`).join(' · ') || '점수 없음'}${me.preferred ? ' · 비교에서 제일 나음' : ''}`) : null);
         const hist = det('lib-hist:' + img.id, '수정 이력', false, 'plain');
         let loaded = false;

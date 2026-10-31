@@ -219,12 +219,13 @@ export function recommendLayer({ prod, bg, spec = {}, layer = {}, W = 0, H = 0, 
 }
 
 // 5번 장면 칸의 '추정' 기본값 (사용자가 고르지 않았을 때만 씀): 빛 방향·색 느낌·밝기
+// 4번 장면 칸에 미리 채울 값 — 확신이 낮은 빛·색 추정은 채우지 않음 (빈 배경 프롬프트에 단정해서 넣지 않게, 1.5.2 검토). 화면은 추정을 글로만 보여줌
 export function sceneHints(prod) {
   if (!prod) return { light: '', warmth: '', bright: '', view: '', shape: '' };
   const pb = prod.bright ? prod.bright.product : null;
   return {
-    light: prod.light && prod.light.dir && prod.light.confidence !== 'low' ? prod.light.dir : prod.light && prod.light.dir ? prod.light.dir : '',
-    warmth: prod.temp ? prod.temp.value : '',
+    light: prod.light && prod.light.dir && prod.light.confidence !== 'low' ? prod.light.dir : '',
+    warmth: prod.temp && prod.temp.confidence !== 'low' ? prod.temp.value : '',
     bright: pb == null ? '' : pb > 0.68 ? 'bright' : pb < 0.36 ? 'dim' : 'medium',
     view: prod.view ? prod.view.value : '',
     shape: shapeOf(prod.aspect),

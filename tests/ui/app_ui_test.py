@@ -200,6 +200,7 @@ class Mock:
         self.held = []
         self.masks, self.files, self.no018 = [], {}, False  # 1.5.1 상품 마스크·저장소 파일(마스크·합성)·018 전 DB 흉내
         self.composite_limit, self.composite_fail, self.cleanups = 12 * 1024 * 1024, [], []  # 1.5.2 합성 저장 한도·실패 흉내((상태, 'stored'|'none'))·정리 요청
+        self.abort_composite, self.aborted = 0, []  # 1.5.2 연결 끊김 흉내: 합성 저장 요청이 서버에 닿기 전에 끊김 (요청 번호만 기록)
         self.settings.update({'image_gen_model': 'gpt-image-2.5-flare', 'image_edit_model': 'gpt-image-2.5-sunburst', 'image_quality': 'medium',
                               'image_daily_limit': 5, 'image_monthly_budget_usd': 2, 'image_fx_krw': 1400, 'image_fx_date': D(-1), 'image_fx_source': '테스트 환율',
                               'image_prices': {'image_output_per_m': 30, 'image_input_per_m': 8, 'text_input_per_m': 5, 'checked_at': '2026-10-22',
@@ -553,11 +554,11 @@ class Mock:
                 return 409, {'error': 'product_check_needed'}
             # 1.5.2 서버처럼: 같은 이미지를 본문 여러 자리에 넣지 않음 (move 면 옮겨 옴). 대표·SNS 자리와 본문에서 사라진 자리는 따지지 않음
             moved = []
-            if im and not body['slot_key'].startswith('x:'):
+            if im and not body['slot_key'].startswith('x:') and (body.get('dup_check') is True or body.get('move') is True):  # 1.5.2 화면만 확인을 부탁함
                 keys = {x['key'] for x in parse_slots(post.get('body') or '')}
                 others = [r['slot_key'] for r in self.slots if r['post_id'] == m.group(1) and r['image_id'] == im['id'] and r['slot_key'] != body['slot_key'] and r['slot_key'] in keys]
                 if others and body.get('move') is not True:
-                    return 409, {'error': 'image_in_other_slot', 'slot_key': others[0]}
+                    return 409, {'error': 'image_in_other_slot', 'slot_key': others[0], 'slot_keys': others}
                 moved = others
             row = self.link(m.group(1), body['slot_key'], body.get('image_id'), body.get('purpose'))
             for k in moved:
@@ -993,7 +994,9 @@ def serve():
 RESULTS = []
 # 개발할 때만: UI_ONLY=정규식 이면 이름이 맞는 시험과 로그인 시험만 돌림 (결과 줄에 '일부만'이라고 표시 — 전체 통과로 보면 안 됨)
 ONLY = re.compile(__import__('os').environ['UI_ONLY']) if __import__('os').environ.get('UI_ONLY') else None
+DESKTOP = __import__('os').environ.get('UI_DESKTOP') == '1'
 ALWAYS = ('예전 링크(?k=틀린 코드)', '접속 코드 로그인')
+FAIL_SHOT = None  # main() 이 화면을 연 뒤 채움
 
 
 def check(name, fn):
@@ -1007,6 +1010,11 @@ def check(name, fn):
         RESULTS.append((name, False, f'{type(e).__name__}: {e}'))
         print('실패', name, '\n   ', type(e).__name__, str(e).split('\n')[0][:300])
         traceback.print_exc(limit=None if ONLY else 1)
+        if FAIL_SHOT:  # 1.5.2: 실패한 순간의 화면 (원인 찾기용)
+            try:
+                FAIL_SHOT(f'fail-{len(RESULTS):02d}')
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def main():
@@ -1016,9 +1024,12 @@ def main():
     console_errors = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
-        ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2, is_mobile=True, has_touch=True, locale='ko-KR',
-                                  timezone_id='Asia/Seoul',
-                                  user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1')
+        if DESKTOP:  # 1.5.2: UI_DESKTOP=1 이면 데스크톱 크기 Chromium (휴대폰 흉내 없이)
+            ctx = browser.new_context(viewport={'width': 1280, 'height': 860}, device_scale_factor=1, is_mobile=False, has_touch=False, locale='ko-KR', timezone_id='Asia/Seoul')
+        else:
+            ctx = browser.new_context(viewport={'width': 390, 'height': 844}, device_scale_factor=2, is_mobile=True, has_touch=True, locale='ko-KR',
+                                      timezone_id='Asia/Seoul',
+                                      user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1')
 
         def api_route(route):
             req = route.request
@@ -1051,6 +1062,10 @@ def main():
                     body = json.loads(req.post_data) if req.post_data else {}
                 except Exception:  # noqa: BLE001
                     body = {}
+            if mock.abort_composite and req.method == 'POST' and path == 'images/composite':  # 1.5.2 연결 끊김 흉내 (서버에 안 닿음)
+                mock.abort_composite -= 1
+                mock.aborted.append((body.get('meta') or {}).get('request_key'))
+                return route.abort('internetdisconnected')
             if gen and not (req.method == 'POST' and path == 'images/generate'):
                 status, data = 404, {'error': 'not_found'}  # 실제 서버처럼 blog-gen 은 생성 요청만
             else:
@@ -1089,9 +1104,15 @@ def main():
         def no_overflow(label):
             w = page.evaluate('() => [document.documentElement.scrollWidth, window.innerWidth]')
             assert w[0] <= w[1] + 1, f'{label}: 가로로 넘침 {w[0]}px > {w[1]}px'
+            # 1.5.2: 빈 값이 글자로 새어 나온 곳이 없는지 (DOM append(null) 은 'null' 글자를 넣음 — 1.2.0부터 몇 군데 보였어)
+            txt = page.evaluate('() => document.body.innerText')
+            leak = re.findall(r'(?<![A-Za-z_])(?:null|undefined|NaN|\[object Object\])(?![A-Za-z_])', txt)
+            assert not leak, f'{label}: 화면에 빈 값 글자 {leak[:3]}'
 
         def shot(name):
             page.screenshot(path=str(OUT / f'{name}.png'), full_page=True)
+        global FAIL_SHOT
+        FAIL_SHOT = lambda n: page.screenshot(path=str(OUT / f'{n}.png'), full_page=False)  # noqa: E731
 
         def goto_hash(h):
             page.evaluate(f"location.hash = '{h}'")
@@ -3083,6 +3104,13 @@ def main():
             expect(view).to_contain_text('상품 사진 분석 (이 기기에서 추정')
             open_adv(view)
             expect(view.locator('[aria-label="빛이 오는 쪽"] button')).to_have_count(4)
+            # 직접 고른 '지정 안 함'은 영역을 고쳐 다시 추정해도 그대로 (1.5.2 검토)
+            view.locator('[aria-label="빛이 오는 쪽"]').get_by_role('button', name='지정 안 함').click()
+            view.get_by_role('button', name='1칸 넓히기').click()
+            page.wait_for_timeout(300)
+            expect(view.locator('[aria-label="빛이 오는 쪽"]').get_by_role('button', name='지정 안 함')).to_have_attribute('aria-pressed', 'true')
+            view.get_by_role('button', name='되돌리기').click()
+            page.wait_for_timeout(300)
             view.locator('[aria-label="빛이 오는 쪽"]').get_by_role('button', name='왼쪽에서').click()
             view.locator('select[aria-label="모드"]').select_option('free_draft')
             view.get_by_role('button', name='2장 후보').click()
@@ -3093,15 +3121,24 @@ def main():
             assert len(reqs) == 2 and reqs[0]['product']['light'] == 'left' and reqs[0]['product_image_id'] == prod['id'] and reqs[0]['refs'] == [], reqs[0]
             view.get_by_role('button', name='이 배경으로 합성하기').first.click()
             expect(view.locator('canvas.compcv')).to_be_visible()
-            # 자동 추천 (추정): 적용 → 적용 전으로
+            # 자동 추천 (추정): 적용 → 적용 전으로. 손으로 맞춘 칸(상품 밝기)은 추천 목록에 없으면 적용해도 그대로 (1.5.2 검토)
+            tone_in = view.locator('input[aria-label="상품 밝기"]')
+            tone_in.evaluate("el => { el.value = '0.2'; el.dispatchEvent(new Event('input', { bubbles: true })); }")
+            page.wait_for_timeout(900)  # 추천 목록이 지금 값 기준으로 다시 계산됨
             fit = view.locator('.fitbox')
             expect(fit).to_contain_text('자동 추천', timeout=20000)
             expect(fit).to_contain_text('확정값이 아니야')
             ap = fit.get_by_role('button', name='추천값 적용')
             if ap.is_enabled():
+                listed_tone = '상품 밝기:' in fit.inner_text()
                 ap.click()
                 expect(view.locator('.fitbox').get_by_role('button', name='적용 전으로')).to_be_visible()
+                if not listed_tone:
+                    assert view.locator('input[aria-label="상품 밝기"]').input_value() == '0.2', '추천 목록에 없는 칸은 그대로'
                 view.locator('.fitbox').get_by_role('button', name='적용 전으로').click()
+                assert view.locator('input[aria-label="상품 밝기"]').input_value() == '0.2', '적용 전으로 = 누르기 직전 값'
+            view.locator('input[aria-label="상품 밝기"]').evaluate("el => { el.value = '0'; el.dispatchEvent(new Event('input', { bubbles: true })); }")  # 뒤 시험(원본 픽셀 비교)을 위해 되돌림
+            page.wait_for_timeout(300)
             expect(view).to_contain_text('저장 크기:')
             expect(view).to_contain_text('서버 한도 12.0MB')
             # 진행 상황은 이 기기에만, 번호와 설정만 (서명 주소·세션 없음)
@@ -3110,7 +3147,7 @@ def main():
             assert prod['id'] in jobs and 'token=' not in jobs and 'https://' not in jobs and 'gf-session' not in jobs and CODE not in jobs, jobs[:400]
             assert re.search(r'"pick_id":"[0-9a-f-]{36}"', jobs) and re.search(r'"cands":\[\{"image_id":"[0-9a-f-]{36}"', jobs), jobs[:400]
             shot('50-product152-composer')
-        check('1.5.2 첫 화면 세 방식·배경 지우기 일꾼(취소)·품질 점수·확대·다시 하기·넓히기·흰 바탕 보기·추정 빛을 배경 요청에·자동 추천 적용/되돌리기·진행 상황은 이 기기에 번호만', t_product_152_flow)
+        check('1.5.2 첫 화면 세 방식·배경 지우기 일꾼(취소)·품질 점수·확대·다시 하기·넓히기·흰 바탕 보기·직접 고른 빛은 다시 추정해도 그대로·고른 빛을 배경 요청에·자동 추천 적용(목록에 없는 칸은 그대로)/되돌리기·진행 상황은 이 기기에 번호만', t_product_152_flow)
 
         def t_product_152_resume_save():
             view = page.locator('.view.product')
@@ -3178,11 +3215,34 @@ def main():
             assert mock.cleanups and k2 in mock.cleanups[-1], mock.cleanups
             assert not any(pth.endswith('/' + k2 + '.png') for pth in mock.files), '그 번호의 파일만 지움'
             assert any(pth.endswith('/' + k1 + '.png') for pth in mock.files) and prod['url'].endswith('product.png'), '저장된 합성·원본은 그대로'
+            # 저장한 것과 같은 설정이면 '저장됨 ✓'(잠김 — 같은 합성이 또 생기지 않게), 슬라이더를 움직이면 바로 '합성 저장'으로
+            view.get_by_label(re.compile('원본 크기 그대로')).check()
+            page.wait_for_timeout(400)
+            expect(view.get_by_role('button', name='저장됨 ✓', exact=True)).to_be_disabled()
+            view.locator('input[aria-label="배경 밝기"]').evaluate("el => { el.value = '0.05'; el.dispatchEvent(new Event('input', { bubbles: true })); }")
+            expect(view.get_by_role('button', name='합성 저장 (새 이미지로)')).to_be_enabled()
+            # 인터넷이 끊겼다가 돌아옴: 요청이 서버에 못 닿음 → '인터넷이 끊겼어' → 연결되면 다시 저장 → 같은 요청 번호로 한 장만
+            n, n_img = len(comp_calls()), len([i for i in mock.images if i['kind'] == 'composite'])
+            mock.abort_composite, mock.aborted = 1, []
+            ctx.set_offline(True)
+            try:
+                view.get_by_role('button', name='합성 저장 (새 이미지로)').click()
+                bad = view.locator('.badbox', has_text='저장하지 못했어')
+                expect(bad).to_contain_text('인터넷이 끊겼어', timeout=30000)
+                assert len(mock.aborted) == 1 and len(comp_calls()) == n, '끊긴 요청은 서버에 안 닿음'
+            finally:
+                ctx.set_offline(False)
+            bad.get_by_role('button', name='다시 저장 (같은 요청)').click()
+            expect(view.get_by_role('button', name='저장됨 ✓', exact=True)).to_be_visible(timeout=30000)
+            calls = comp_calls()[n:]
+            assert len(calls) == 1 and calls[0]['body']['meta']['request_key'] == mock.aborted[0], (mock.aborted, [c['body']['meta'].get('request_key') for c in calls])
+            assert len([i for i in mock.images if i['kind'] == 'composite']) == n_img + 1, '한 장만'
             no_overflow('1.5.2 합성 저장')
-        check('1.5.2 새로고침 뒤 이어서 작업하기(영역·후보·고른 배경)·한도 넘으면 안 올리고 줄이기 권함·저장 실패 이유·같은 요청 번호로 다시 저장(한 장만)·그만두면 그 파일만 정리', t_product_152_resume_save)
+        check('1.5.2 새로고침 뒤 이어서 작업하기(영역·후보·고른 배경)·한도 넘으면 안 올리고 줄이기 권함·저장 실패 이유·같은 요청 번호로 다시 저장(한 장만)·그만두면 그 파일만 정리·인터넷 끊김→복구 뒤 다시 저장', t_product_152_resume_save)
 
         def t_product_152_check_compare():
             view = page.locator('.view.product')
+            mock.settings['image_daily_limit'] = max(50, mock.settings['image_daily_limit'])  # 이 시험만 따로 돌려도 (앞 시험들이 만든 장수 때문에 막히지 않게)
             comp = PSPEC['comp152']
             # 저장한 합성(원본 크기 그대로)을 검수: 밀어서 비교·상품 부분 확대·원본 픽셀 비교
             view.get_by_role('button', name=re.compile('원본과 비교해서 검수·승인|상품 디테일 검수 다시 보기')).first.click()
@@ -3203,7 +3263,8 @@ def main():
             expect(rows).to_have_count(4)
             assert rows.nth(2).locator('input[type=checkbox]').first.is_disabled() and rows.nth(3).locator('input[type=checkbox]').first.is_disabled(), '키 없는 유료 줄'
             go = sheet.get_by_role('button', name='무료 · 비교 만들기')
-            expect(go).to_be_enabled()
+            page.wait_for_timeout(300)
+            assert go.is_enabled(), '비교 만들기가 잠김: ' + sheet.inner_text()[-500:]
             n0 = len(gen_bodies())
             go.click()
             expect(sheet).to_contain_text('공급자 비교 결과', timeout=90000)
@@ -3243,14 +3304,59 @@ def main():
                 own = next((x for x in sl if '직접 찍기' in x['text']), None)
                 if own:
                     expect(studio.locator('.slot', has_text=own['text']).first).to_contain_text('직접 찍은 사진만')
-                # 앱에서 같은 이미지를 세 번째 자리에 넣으려 하면: 서버가 거절 → 옮겨 올지 물어봄
-                r = page.evaluate(f"""async () => {{ const s = JSON.parse(localStorage.getItem('gf-session')); const r = await fetch('{API}/posts/{P8}/images/link', {{ method: 'POST', headers: {{ 'content-type': 'application/json', 'x-app-session': s }}, body: JSON.stringify({{ image_id: '{dup['id']}', slot_key: '{gen[2]['key'] if len(gen) > 2 else gen[1]['key']}' }}) }}); return [r.status, (await r.json()).error]; }}""")
-                assert r == [409, 'image_in_other_slot'], r
+                # 앱에서(보관함에서 고르기) 같은 이미지를 다른 자리에 넣으면: 서버가 거절 → 그 이미지가 있는 자리를 모두 보여주고 옮길지 물어봄
+                third = gen[2] if len(gen) > 2 else None
+                if third:
+                    card = studio.locator('.slot', has_text=third['text']).first
+                    if card.get_by_role('button', name='보관함에서', exact=True).count():
+                        card.get_by_role('button', name='보관함에서', exact=True).click()
+                    else:
+                        card.get_by_role('button', name='바꾸기', exact=True).click()
+                        sheet.get_by_role('button', name='보관함에서 고르기').click()
+                    sheet.locator('button.pick', has=page.locator('img[alt="반복 시험 사진"]')).first.click()
+                    expect(sheet).to_contain_text('같은 이미지가 다른 자리에 있어', timeout=10000)
+                    expect(sheet).to_contain_text(f"사진 {gen[0]['n']}·사진 {gen[1]['n']}에 이미 들어 있어")
+                    expect(sheet).to_contain_text('옮기면')
+                    sheet.get_by_role('button', name='그대로 두기').click()
+                    assert not [r for r in mock.slots if r['post_id'] == P8 and r['slot_key'] == third['key'] and r['image_id'] == dup['id']], '거절하면 연결하지 않음'
+                # 서버(모의): 1.5.2 화면은 dup_check 로 확인을 부탁 → 거절(자리 모두), 옛 화면(dup_check 없음)은 예전처럼 연결
+                tgt = gen[2]['key'] if len(gen) > 2 else gen[1]['key']
+                call = lambda extra: page.evaluate(f"""async () => {{ const s = JSON.parse(localStorage.getItem('gf-session')); const r = await fetch('{API}/posts/{P8}/images/link', {{ method: 'POST', headers: {{ 'content-type': 'application/json', 'x-app-session': s }}, body: JSON.stringify({{ image_id: '{dup['id']}', slot_key: '{tgt}'{extra} }}) }}); const j = await r.json(); return [r.status, j.error || '', (j.slot_keys || []).length]; }}""")
+                r = call(', dup_check: true')
+                assert r[:2] == [409, 'image_in_other_slot'] and r[2] >= 1, r
+                assert call('')[0] == 200, '옛 화면은 예전 그대로'
                 no_overflow('1.5.2 자리 정보')
                 shot('55-product152-slots')
             finally:
                 mock.slots = [r for r in mock.slots if r['post_id'] != P8] + saved
-        check('1.5.2 원고 자리 정보(왜·직접 찍기·실제 상품)·같은 이미지 반복 알림·서버(모의)는 반복 연결을 거절', t_product_152_slots)
+        check('1.5.2 원고 자리 정보(왜·직접 찍기·실제 상품)·같은 이미지 반복 알림·다른 자리에 넣으면 있는 자리를 모두 보여주고 물어봄·옛 화면 요청은 예전처럼', t_product_152_slots)
+
+        def t_product_152_device():
+            close_sheet()
+            # 무거운 처리(배경 지우기·합성 저장) 중에 페이지가 꺼졌다 다시 열림(아이폰이 메모리가 모자라면 흔함) → 다음엔 간단 모드 + 이유, 사용자가 되돌릴 수 있음
+            page.evaluate("localStorage.setItem('gf-heavy', JSON.stringify({ stage: 'mask', at: Date.now() }))")
+            page.reload()
+            expect(page.locator('#app')).to_be_visible(timeout=20000)
+            goto_hash('content/images')
+            page.get_by_role('button', name='이 상품으로 장면 만들기').first.click()
+            view = page.locator('.view.product')
+            expect(view.get_by_role('heading', name='이 상품으로 장면 만들기')).to_be_visible()
+            page.wait_for_timeout(600)
+            if view.get_by_role('button', name='새로 시작하기').count():
+                view.get_by_role('button', name='새로 시작하기').click()
+            view.get_by_role('button', name='보관함에서 고르기').click()
+            sheet.locator('button.pick').first.click()
+            expect(view).to_contain_text('전에 이 기기에서 처리가 멈췄거나 메모리가 모자라서 사진을 작게 처리해', timeout=20000)
+            assert page.evaluate("[localStorage.getItem('gf-tier-failed'), localStorage.getItem('gf-heavy') || '']") == ['1', ''], '흔적은 한 번만 쓰고 지움'
+            view.get_by_role('button', name='보통 크기로 처리하기').click()
+            expect(view).to_contain_text('처리 크기: 보통')
+            assert page.evaluate("localStorage.getItem('gf-tier')") == 'normal' and page.evaluate("localStorage.getItem('gf-tier-failed')") != '1'
+            # 기기에 남기는 건 모드 표시뿐 (사진·키·세션 없음)
+            keys = page.evaluate("Object.keys(localStorage).filter((k) => k.startsWith('gf-tier') || k.startsWith('gf-heavy'))")
+            vals = page.evaluate("Object.keys(localStorage).filter((k) => k.startsWith('gf-tier') || k.startsWith('gf-heavy')).map((k) => localStorage.getItem(k)).join('|')")
+            assert set(keys) <= {'gf-tier', 'gf-tier-failed', 'gf-heavy'} and len(vals) < 40, (keys, vals)
+            no_overflow('1.5.2 간단 모드')
+        check('1.5.2 처리 중 페이지가 꺼졌던 기기는 간단 모드로 열고 이유를 알림·보통으로 되돌리기 (기기에는 모드 표시만)', t_product_152_device)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
@@ -3285,7 +3391,7 @@ def main():
     RESULTS.append(('콘솔 오류 없음', not errs, '; '.join(errs)[:500]))
     print(('통과' if not errs else '실패'), '콘솔 오류 없음', '' if not errs else errs[:5])
     passed = sum(1 for r in RESULTS if r[1])
-    print(f'\n화면 테스트: {passed}/{len(RESULTS)} 통과' + (' (일부만 — UI_ONLY)' if ONLY else ''))
+    print(f'\n화면 테스트: {passed}/{len(RESULTS)} 통과' + (' (일부만 — UI_ONLY)' if ONLY else '') + (' (데스크톱 크기)' if DESKTOP else ''))
     (OUT / 'result.json').write_text(json.dumps([{'name': n, 'ok': ok, 'error': e} for n, ok, e in RESULTS], ensure_ascii=False, indent=1), encoding='utf-8')
     sys.exit(0 if passed == len(RESULTS) else 1)
 
