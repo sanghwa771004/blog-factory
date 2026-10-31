@@ -254,4 +254,4 @@ select conname, pg_get_constraintdef(oid) from pg_constraint where conname in ('
 ## 10. ZIP
 - `blog-factory-1.5.2.zip` — `release/1.5.2` 가지의 이 보고서가 든 커밋을 그대로 묶음 (`git archive`). 배경 지우기 모델·실행기 파일 포함 (해시는 5번).
 - `글공장-1.5.2-GPT용-2026-10-31.zip` — 위와 같고, 코드 읽기에 필요 없는 큰 실행 파일 3개(`models/u2netp.onnx`·`vendor/onnxruntime-web/ort-wasm-simd-threaded.wasm`·`ort.wasm.bundle.min.mjs`)만 빼고 `README-GPT.md`(안내)를 더함. 빠진 파일을 빈 파일로 채우지 않았어.
-- 두 ZIP 모두 비밀값 검사: 접속 코드·그 해시·사용자 메일·Supabase 비밀 키·JWT·OpenAI/Google 키 모양·세션 모양 → **0건** (예외 하나: 1.2.0부터 있는 시험용 가짜 키 `tests/image_service.test.js` 의 `sk-proj-abcdefghijklmnop1234567890` — 오류 문구에서 키를 가리는지 보는 시험, 진짜 키 아님).
+- 두 ZIP 모두 비밀값 검사: 접속 코드·그 해시·사용자 메일·Supabase 비밀 키·JWT·OpenAI/Google 키 모양·세션 모양 → **0건** (예외 하나: 1.2.0부터 있는 `tests/image_service.test.js` 의 시험용 가짜 OpenAI 키 모양 글자 — 오류 문구에서 키를 가리는지 보는 시험, 진짜 키 아님).
