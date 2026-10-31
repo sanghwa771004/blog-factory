@@ -74,7 +74,8 @@ describe('지시서 5번: 모델 기본값 — 고품질은 Sunburst(high), 빠�
 describe('지시서 1·7번: 두 방식은 섞지 않고 프롬프트도 따로', () => {
   test('요청 정리: 모르는 값은 기본값, 배경만 템플릿은 원본 보존 합성에서만, 직접 적는 칸은 300자', () => {
     assert.deepEqual(cleanProductSpec({ mode: 'x', template: 'nope', purpose: 'x', angle: 'x', place: 'x' }),
-      { mode: 'layer', template: 'table', purpose: 'blog_body', angle: 'front', place: 'center', custom: '', name: '' });
+      // 1.5.2: 빛·색·밝기·모양 칸이 더해짐 (모르는 값·빈 값은 '' = 지정 안 함)
+      { mode: 'layer', template: 'table', purpose: 'blog_body', angle: 'front', place: 'center', custom: '', name: '', light: '', warmth: '', bright: '', shape: '' });
     assert.equal(cleanProductSpec({ mode: 'reference', template: 'bg_only' }).template, 'table');
     assert.equal(cleanProductSpec({ mode: 'layer', template: 'bg_only' }).template, 'bg_only');
     assert.equal(cleanProductSpec({ custom: '가'.repeat(400) }).custom.length, 300);

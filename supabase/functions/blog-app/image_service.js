@@ -38,7 +38,8 @@ export async function sha256Hex(bytes) {
   const d = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
-// 저장 경로: 종류/연/월/임의값.확장자 (원고 제목·사용자 정보는 경로에 넣지 않음)
+// 저장 경로: 종류/연/월/임의값.확장자 (원고 제목·사용자 정보는 경로에 넣지 않음). 1.5.2: 합성 저장은 화면이 보낸 요청 번호를 id 로 (같은 요청이면 같은 경로)
+/** @param {string} folder @param {string} ext @param {Date} [now] @param {string} [id] */
 export function storagePath(folder, ext, now = new Date(), id = crypto.randomUUID()) {
   return `${folder}/${now.getUTCFullYear()}/${String(now.getUTCMonth() + 1).padStart(2, '0')}/${id}.${ext}`;
 }

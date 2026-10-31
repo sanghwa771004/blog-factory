@@ -398,23 +398,24 @@ export function maskQuality(mask, w, h, rgba = null) {
     }
     return mx - mn;
   };
-  let fgN = 0, soft = 0, bnd = 0, gsum = 0;
+  // 사진 전체의 '뚜렷한 윤곽' 세기 (표본 99번째 값) → 경계 칸 가운데 그만큼(의 1/4 이상) 밝기가 바뀌는 칸의 비율 = 경계가 실제 윤곽 위에 있는 정도
+  let thr = 0.04;
+  if (g) {
+    const hist = new Uint32Array(101); let n = 0;
+    const st = Math.max(1, Math.round(Math.sqrt(N / 40000)));
+    for (let y = 1; y < h - 1; y += st) for (let x = 1; x < w - 1; x += st) { hist[Math.min(100, Math.round(near(y * w + x, x, y) * 100))]++; n++; }
+    let acc = 0, p99 = 0;
+    for (let k = 0; k <= 100; k++) { acc += hist[k]; if (acc >= n * 0.99) { p99 = k / 100; break; } }
+    thr = Math.max(0.04, p99 * 0.25);
+  }
+  let fgN = 0, soft = 0, bnd = 0, onEdge = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
     const i = y * w + x, v = mask[i], on = v >= 128;
     if (on) fgN++;
     if (v > 24 && v < 232) soft++;
-    if ((x + 1 < w && (mask[i + 1] >= 128) !== on) || (y + 1 < h && (mask[i + w] >= 128) !== on)) { bnd++; if (g) gsum += near(i, x, y); }
+    if ((x + 1 < w && (mask[i + 1] >= 128) !== on) || (y + 1 < h && (mask[i + w] >= 128) !== on)) { bnd++; if (g && near(i, x, y) >= thr) onEdge++; }
   }
-  // 사진 전체의 '뚜렷한 윤곽' 세기 (표본 90번째 값) — 경계의 밝기 변화가 이것에 비해 얼마나 되는지
-  let edge = null;
-  if (g && bnd) {
-    const hist = new Uint32Array(101); let n = 0;
-    const st = Math.max(1, Math.round(Math.sqrt(N / 40000)));
-    for (let y = 1; y < h - 1; y += st) for (let x = 1; x < w - 1; x += st) { hist[Math.min(100, Math.round(near(y * w + x, x, y) * 100))]++; n++; }
-    let acc = 0, p90 = 0;
-    for (let k = 0; k <= 100; k++) { acc += hist[k]; if (acc >= n * 0.9) { p90 = k / 100; break; } }
-    edge = Math.round(Math.min(1.5, gsum / bnd / Math.max(0.02, p90)) * 100) / 100;
-  }
+  const edge = g && bnd ? Math.round((onEdge / bnd) * 100) / 100 : null;
   const cov = fgN / N;
   const { fg, holes } = partsOf(mask, w, h);
   const big = fg[0] || 0;
@@ -432,7 +433,7 @@ export function maskQuality(mask, w, h, rgba = null) {
   if (touches.bottom > 0.03 && cov <= 0.97) issues.push('cut_bottom');
   const softRatio = bnd ? soft / bnd : 0;   // 흐릿한 띠의 두께(대략 몇 칸)
   if (softRatio > 6 && cov >= 0.02) { s -= 15; issues.push('soft'); }
-  if (edge != null && edge < 0.35 && cov >= 0.02 && cov <= 0.97) { s -= 20; issues.push('weak_edge'); }
+  if (edge != null && edge < 0.6 && cov >= 0.02 && cov <= 0.97) { s -= edge < 0.4 ? 35 : 25; issues.push('weak_edge'); }
   if (bigHoles) issues.push('holes');
   s = Math.max(0, Math.min(100, s));
   return { score: s, level: s >= 75 ? 'good' : s >= 50 ? 'check' : 'fix', coverage: Math.round(cov * 1000) / 1000, parts: 1 + extra, holes: bigHoles,
