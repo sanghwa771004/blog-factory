@@ -54,6 +54,9 @@ select conname, pg_get_constraintdef(oid) from pg_constraint where conname in ('
 - 실행 뒤 확인 (읽기만): `select indexname, indexdef from pg_indexes where indexname = 'post_images_composite_path_uniq';` → 한 줄이면 끝.
 - 019 를 안 넣어도 1.5.2 서버는 돌아가 (그때는 아주 드문 동시 요청에서 두 줄이 생길 수 있는 예전 상태).
 
+**배포 진행 기록**
+- 2026-10-31 19:51 KST (사용자 승인 '서버에 올려줘 18,19둘다'): **018 끝부분 적용** (마이그레이션 `20261031105108 018_product_scene_1_5_1_part5` — 이번엔 확인 창 문제 없이 들어감), **019 적용** (`20261031105118 019_composite_once_1_5_2`). 확인 쿼리: 종류·공급자 검사에 `composite` 들어감, 색인 `post_images_composite_path_uniq` 있음, 데이터 그대로 (원고 19 · 이미지 16 · 합성 0). 서버·앱 화면은 아직 1.5.0.
+
 **안전한 배포 순서 (승인 뒤에)**
 1. (사용자) 위 018 끝부분 → 확인 쿼리
 2. 019 (색인만 — 승인하면 내가 적용하거나 SQL Editor 에서 실행) → 확인 쿼리
