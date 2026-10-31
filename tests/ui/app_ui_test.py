@@ -2801,7 +2801,7 @@ def main():
             view.locator('.pstep').last.locator('.go', has_text='쓰레드 게시물 이미지').get_by_role('button', name='여기에 넣기').click()
             expect(page.locator('#toast')).to_contain_text('넣었어')
             lk = [c for c in mock.calls if c['path'].endswith('/images/link')][n_link:]
-            assert lk and lk[0]['body'] == {'image_id': comp['id'], 'slot_key': 'x:threads'} and lk[0]['path'] == f'posts/{P8}/images/link', lk
+            assert lk and lk[0]['body'] == {'image_id': comp['id'], 'slot_key': 'x:threads', 'dup_check': True} and lk[0]['path'] == f'posts/{P8}/images/link', lk  # 1.5.2: 반복 확인을 부탁 (대표·SNS 자리는 서버가 따지지 않음)
             mock.link(P8, 'x:threads', None)
         check('1.5.1 상품 디테일 검수(원본 보존 합성): 원본과 나란히, 아홉 칸 다 괜찮아야 승인 → 사용 가능, 게시글 자리에 넣기', t_product_check_insert)
 
@@ -2916,7 +2916,11 @@ def main():
                 if not pick.is_visible():
                     sheet.locator('summary', has_text='참고 사진').click()
                 pick.click()
-                sheet.locator('button.pick', has_text='직접').first.click()
+                item = sheet.locator('button.pick', has_text='직접')
+                page.wait_for_timeout(500)
+                if not item.count():  # 이 시험만 따로 돌리면 '이 글 이미지'에 직접 올린 사진이 없을 수 있어서 보관함 전체에서
+                    sheet.get_by_role('button', name='보관함 전체').click()
+                item.first.click()
                 expect(sheet.locator('select[aria-label="참고 사진 역할"]')).to_have_value('subject')
             # 앞 시험이 본문을 고쳤을 수 있어서 자리를 글로 찾음: 일반 자리(실제 상품이 보여야 하는 자리가 아님)와 구성품 자리(실제 상품 자리)
             slots8 = parse_slots(next(p for p in mock.posts if p['id'] == P8)['body'])
@@ -3043,6 +3047,7 @@ def main():
 
         def t_product_152_flow():
             close_sheet()
+            mock.settings['image_daily_limit'] = max(50, mock.settings['image_daily_limit'])  # 1.5.x 시험만 따로 돌려도 하루 한도에 막히지 않게 (다시 읽을 때 화면에 반영)
             reload_keys(openai=False, gemini=False)
             prod = mock.add_image('upload', None, None, 'product', rights_confirmed=True, source_type='own', description='1.5.2 시험 전기요')
             PSPEC['prod152'] = prod
