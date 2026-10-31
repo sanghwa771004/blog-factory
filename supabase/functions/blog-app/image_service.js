@@ -287,7 +287,8 @@ function cfError(status, j) {
   const errs = (j && Array.isArray(j.errors) ? j.errors : []);
   const msg = scrub(errs.map((e) => `${e.code || ''} ${e.message || ''}`).join(' / ') || '', 300);
   const m = msg.toLowerCase();
-  if (/4006|free allocation|neurons|daily/.test(m)) return { code: 'cf_daily_free_used', message: '오늘 무료 사용량(하루 10,000 뉴런)을 다 썼어. 한국 시간 오전 9시에 다시 채워져. (청구 없음)', billed: 'no', retryable: false };
+  // 1.5.2: Cloudflare 문서의 오류 3036('daily free allocation of 10,000 neurons')도 — 무료 한도 소진 (2026-10-31 확인)
+  if (/4006|3036|free allocation|neurons|daily/.test(m)) return { code: 'cf_daily_free_used', message: '오늘 무료 사용량(하루 10,000 뉴런)을 다 썼어. 한국 시간 오전 9시에 다시 채워져. (청구 없음)', billed: 'no', retryable: false };
   if (status === 401 || status === 403 || /authentication|unauthori[sz]ed|10000\b/.test(m)) return { code: 'cf_key_invalid', message: 'Cloudflare 계정 ID나 토큰이 맞지 않아. Supabase Secrets의 CF_ACCOUNT_ID·CF_API_TOKEN을 확인해줘 (토큰 권한: Workers AI 읽기·편집).', billed: 'no', retryable: false };
   if (status === 429) return { code: 'cf_rate_limited', message: 'Cloudflare가 잠깐 요청을 막았어. 1분쯤 뒤에 다시 해줘.', billed: 'no', retryable: true };
   if (status >= 500) return { code: 'cf_server', message: 'Cloudflare 서버에 문제가 있어. 조금 뒤에 다시 해줘.', billed: 'no', retryable: true };

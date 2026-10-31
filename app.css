@@ -321,3 +321,35 @@ canvas.cthumb{border-radius:8px;background:var(--chip)}
 .rangef span{display:flex;justify-content:space-between;gap:8px}
 .rangef input[type=range]{width:100%;accent-color:var(--accent)}
 @media (min-width:600px){.tgrid{grid-template-columns:repeat(4,minmax(0,1fr))}}
+/* 1.5.2 상품 장면: 세 방식·진행 단계·이어 하기·마스크 품질·확대·자동 추천·비교 슬라이더·확대·자리 정보 */
+.modecards.three{grid-template-columns:minmax(0,1fr)}
+@media (min-width:600px){.modecards.three{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.modecard small.lim{color:var(--warn)}
+.pprog{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
+.pprog li button{font:inherit;font-size:12.5px;border:1px solid var(--line);background:var(--bg);color:var(--muted);border-radius:999px;padding:4px 10px;cursor:pointer}
+.pprog li.done button{border-color:var(--done);color:var(--done);background:var(--done-bg)}
+.pprog li.cur button{border-color:var(--accent);color:var(--ink);background:var(--accent-soft);font-weight:600}
+.panel.resume{border:2px solid var(--accent)}
+.mq{display:flex;flex-direction:column;gap:3px;border-radius:10px;padding:10px 12px;font-size:13px}
+.mq-good{background:var(--done-bg);color:var(--done)}
+.mq-check{background:var(--warn-bg);color:var(--warn)}
+.mq-fix{background:var(--late-bg);color:var(--late)}
+.mq .hint{color:inherit;opacity:.8}
+.maskwrap.zoomed{overflow:auto;max-height:70vh;-webkit-overflow-scrolling:touch}
+.maskwrap.zoomed canvas{max-height:none;max-width:none;touch-action:pan-x pan-y}
+.maskwrap.zoomed.painting canvas{touch-action:none}
+.fitbox{display:flex;flex-direction:column;gap:4px;background:var(--bg);border:1px dashed var(--line);border-radius:10px;padding:10px 12px}
+.fitbox .lic{margin:0;padding-left:18px;font-size:13px}
+.slotinfo{display:flex;flex-direction:column;gap:2px;background:var(--bg);border-radius:8px;padding:6px 10px}
+.slotinfo small{color:var(--muted);font-size:12.5px;line-height:1.45}
+.swipe{position:relative;width:100%;border-radius:10px;overflow:hidden;background:var(--chip)}
+.swipe>canvas{display:block;width:100%;height:auto}
+.swipe-top{position:absolute;inset:0;border-right:2px solid var(--accent)}
+.swipe-top canvas{display:block}
+.zoomrow{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.zoomrow figure{margin:0;display:flex;flex-direction:column;gap:4px;min-width:0}
+.zoomrow figcaption{font-size:12.5px;color:var(--muted);text-align:center}
+.zoombox{overflow:auto;max-height:60vh;border-radius:8px;background:var(--chip);-webkit-overflow-scrolling:touch}
+.zoombox canvas{display:block;width:250%;max-width:none;height:auto}
+canvas.cropcv{max-width:100%}
+.zoombox canvas.cropcv{max-width:none}

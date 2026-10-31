@@ -1,4 +1,4 @@
-// 블로그 글공장 서버 API (1.5.1)
+// 블로그 글공장 서버 API (1.5.2)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
@@ -15,13 +15,15 @@ import {
   // 1.5.1 상품 장면
   cleanProductSpec, buildProductScene, promptFromProductScene, productGate, PRODUCT_PRESETS, PRODUCT_TEMPLATES, PRODUCT_CHECKS, productSceneMode, productApproved,
   cleanLayer, productAttribution, compositeLicense, productGateErrors, checkImageFile, stripMetadata, altTextFor,
+  // 1.5.2 장면 정보·비교 평가
+  cleanFit, ALL_EVAL_KEYS,
 } from "./images.js";
 import {
   BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter,
   reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub, storagePath, sha256Hex,
 } from "./image_service.js";
 
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -1513,9 +1515,28 @@ async function providerStatus() {
   return out;
 }
 async function getImageConfig(_c: Ctx) {
-  const [settings, usage, status] = await Promise.all([imageSettings(), imageUsage(), providerStatus()]);
-  return json({ keys: keysInfo(), providers: providersInfo(), provider_status: status, settings, usage, test_model: TEST_MODEL, sign_seconds: SIGN_SECONDS, storage_limit: STORAGE_SOFT_LIMIT });
+  const [settings, usage, status, bucket] = await Promise.all([imageSettings(), imageUsage(), providerStatus(), bucketLimit()]);
+  return json({ keys: keysInfo(), providers: providersInfo(), provider_status: status, settings, usage, test_model: TEST_MODEL, sign_seconds: SIGN_SECONDS, storage_limit: STORAGE_SOFT_LIMIT,
+    limits: uploadLimits(bucket) });
 }
+// 1.5.2: 저장 한도 — 화면이 합성 PNG 를 올리기 전에 크기를 확인하게. 실제 한도 = 이 서버 코드의 한도와 버킷 설정(file_size_limit) 중 작은 쪽.
+// 버킷 설정을 못 읽으면 bucket_bytes: null (그때는 코드 한도만 — 화면은 '버킷 한도 확인 못 함'으로 표시)
+let bucketCache: { at: number; bytes: number | null } | null = null;
+async function bucketLimit(): Promise<number | null> {
+  if (bucketCache && Date.now() - bucketCache.at < 10 * 60_000) return bucketCache.bytes;
+  let bytes: number | null = null;
+  try {
+    const { data, error } = await sb.storage.getBucket(BUCKET);
+    const n = Number((data as J | null)?.file_size_limit ?? NaN);
+    if (!error && Number.isFinite(n) && n > 0) bytes = n;
+  } catch { bytes = null; }
+  bucketCache = { at: Date.now(), bytes };
+  return bytes;
+}
+const uploadLimits = (bucket: number | null) => {
+  const cap = (n: number) => (bucket ? Math.min(n, bucket) : n);
+  return { composite_bytes: cap(MAX_COMPOSITE_BYTES), mask_bytes: cap(MAX_MASK_BYTES), upload_bytes: cap(MAX_UPLOAD_BYTES), bucket_bytes: bucket, max_side: 4096 };
+};
 
 // 원고 하나의 이미지 화면: 사진 자리(본문 순서) + 본문 밖 자리 + 사라진 자리 + 이미지(서명 주소) + 생성 기록 + 카드뉴스 + 비용
 async function getPostImages(c: Ctx) {
@@ -1941,7 +1962,7 @@ async function evaluateImage(c: Ctx) {
   const b = await readJson(c.req, 5_000);
   const sc = (b.scores && typeof b.scores === "object" ? b.scores : {}) as J;
   const scores: J = {};
-  for (const [k] of EVAL_CRITERIA as [string, string][]) { const v = Number(sc[k]); if (v === 1 || v === 2 || v === 3) scores[k] = v; }
+  for (const k of ALL_EVAL_KEYS as string[]) { const v = Number(sc[k]); if (v === 1 || v === 2 || v === 3) scores[k] = v; } // 1.5.2: 상품 장면 비교 칸(외형 보존·조명·그림자·색감)도
   const { data, error } = await sb.rpc("image_eval_save", { p: { image_id: c.params[0], scores, preferred: b.preferred === true, batch_id: isUuid(b.batch_id) ? b.batch_id : "", note: str(b.note, 300).trim() } });
   if (error) { needs017(error, "image_eval_save"); rpcError(error); }
   return json({ review: data });
@@ -2061,6 +2082,14 @@ async function saveMask(c: Ctx) {
 async function saveComposite(c: Ctx) {
   await need018();
   const { bytes, type, meta } = await readImageForm(c, MAX_COMPOSITE_BYTES);
+  // 1.5.2: 같은 합성을 다시 보낼 때(응답을 못 받아 '다시 저장')는 화면이 같은 요청 번호를 보냄 → 이미 저장됐으면 그걸 돌려주고(두 장 생기지 않게),
+  // 파일만 올라가고 기록이 안 된 채 끝났으면 같은 자리에 덮어씀 (실패한 합성 파일이 쌓이지 않게). 원본 상품·배경·마스크는 건드리지 않음
+  const reqKey = typeof meta.request_key === "string" && /^[A-Za-z0-9_-]{8,80}$/.test(meta.request_key) ? meta.request_key : "";
+  if (reqKey) {
+    const { data: done, error: e0 } = await sb.from("post_images").select("*").eq("kind", "composite").like("storage_path", `composite/%/${likeEsc(reqKey)}.%`).is("deleted_at", null).limit(1);
+    if (e0) throw e0;
+    if ((done ?? []).length) return json({ image: (await withUrls([(done as J[])[0]]))[0], slot: null, reused: true }, 200);
+  }
   const chk = checkImageFile(bytes, type, MAX_COMPOSITE_BYTES) as J;
   if (!chk.ok) fail(400, "bad_image", { reason: chk.code });
   if (Number(chk.width) > 4096 || Number(chk.height) > 4096) fail(400, "bad_image", { reason: "too_many_pixels" });
@@ -2087,8 +2116,8 @@ async function saveComposite(c: Ctx) {
   }
   await storageGuard(bytes.length);
   const out = stripMetadata(bytes).bytes as Uint8Array;
-  const path = storagePath("composite", String(chk.ext));
-  const up = await sb.storage.from(BUCKET).upload(path, out, { contentType: String(chk.mime), upsert: false, cacheControl: "3600" });
+  const path = reqKey ? storagePath("composite", String(chk.ext), new Date(), reqKey) : storagePath("composite", String(chk.ext));
+  const up = await sb.storage.from(BUCKET).upload(path, out, { contentType: String(chk.mime), upsert: !!reqKey, cacheControl: "3600" });
   if (up.error) fail(502, "storage_failed");
   const desc = str(meta.description, 300).trim() || (slot ? String(slot.text ?? "") : "") || String(prod!.description || "상품 합성 이미지");
   const spec = cleanProductSpec(meta.spec) as J;
@@ -2102,12 +2131,35 @@ async function saveComposite(c: Ctx) {
     parent_image_id: isUuid(meta.parent_image_id) ? meta.parent_image_id : "",
     product_image_id: prod!.id, background_image_id: bg!.id, mask_id: meta.mask_id, layer,
     scene: { v: 1, kind: "product", mode: "layer", mode_label: "상품 원본 보존 합성", template: spec.template, purpose: spec.purpose, angle: spec.angle, place: spec.place,
-      background_prompt_preset: String(bg!.preset ?? ""), note: "상품 픽셀은 원본 사진 그대로 (AI가 다시 그리지 않음), 배경만 AI" },
+      light: spec.light, warmth: spec.warmth, bright: spec.bright, shape: spec.shape,
+      background_prompt_preset: String(bg!.preset ?? ""), note: "상품 픽셀은 원본 사진 그대로 (AI가 다시 그리지 않음), 배경만 AI",
+      // 1.5.2: 이 기기에서 추정한 빛·색·빈 자리와 추천값을 적용했는지 (추정값 — 확실한 값이 아님)
+      fit: meta.fit && typeof meta.fit === "object" ? cleanFit(meta.fit) : null },
     preset: PRODUCT_PRESETS.layer,
   };
   const r = await sb.rpc("image_save", { img, link, gen: null, fin: null });
   if (r.error) { await sb.storage.from(BUCKET).remove([path]); rpcError(r.error); }
   return json({ image: (await withUrls([(r.data as J).image as J]))[0], slot: (r.data as J).slot ?? null }, 201);
+}
+// LIKE 의 '_'·'%' 를 글자 그대로 (요청 번호에 '_' 가 들어갈 수 있어서)
+const likeEsc = (t: string) => t.replace(/[\\%_]/g, (m) => "\\" + m);
+// 1.5.2: 끝내 저장하지 못한 합성 파일 정리 — 화면이 그 합성에 쓴 요청 번호만 보냄. 'composite/' 아래, 그 번호 이름의 파일 중
+// 어떤 이미지 기록도 가리키지 않는 것만 지움 (원본 상품 사진·배경·마스크·저장된 합성은 경로가 달라서 건드릴 수 없음)
+async function cleanupComposites(c: Ctx) {
+  const b = await readJson(c.req, 5_000);
+  const keys = (Array.isArray(b.request_keys) ? b.request_keys : []).map((k) => String(k)).filter((k) => /^[A-Za-z0-9_-]{8,80}$/.test(k)).slice(0, 10);
+  if (!keys.length) return json({ removed: 0 });
+  const now = new Date(), prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 15));
+  let removed = 0;
+  for (const k of keys) {
+    const { data: used, error } = await sb.from("post_images").select("id").like("storage_path", `composite/%/${likeEsc(k)}.%`).limit(1);
+    if (error) throw error;
+    if ((used ?? []).length) continue; // 저장된 합성 — 지우지 않음
+    const paths = [now, prev].flatMap((d) => ["png", "webp", "jpg"].map((ext) => storagePath("composite", ext, d, k)));
+    const r = await sb.storage.from(BUCKET).remove([...new Set(paths)]);
+    if (!r.error) removed += ((r.data ?? []) as unknown[]).length;
+  }
+  return json({ removed });
 }
 // 상품 디테일 검수 저장·승인 (사용자가 원본과 결과를 나란히 보고 아홉 칸을 고름). AI 검수 의견은 참고로 따로 — 여기 섞지 않음
 // 승인을 풀면 이 이미지를 쓰는 발행 준비·예약 글은 '검수 필요'로 되돌림 (게시 완료 글은 그대로 두고 발행 전 검사에 보임)
@@ -2454,6 +2506,17 @@ async function linkSlot(c: Ctx) {
   }
   if (!isUuid(b.image_id)) fail(400, "bad_field", { field: "image_id" });
   const { post, slot, purpose } = await slotTarget({ ...b, post_id: postId }, true);
+  // 1.5.2: 같은 이미지를 본문 여러 자리에 반복하지 않게 — 지금 본문에 있는 다른 자리에 이미 들어 있으면 거절 (move: true 면 그 자리에서 옮겨 옴).
+  // 본문 밖 대표·SNS 자리는 본문 사진을 그대로 써도 돼서 따지지 않고, 본문에서 사라진 자리는 옮기는 중일 수 있어서 따지지 않음
+  let moveFrom: string[] = [];
+  if (!isExtraKey(slot!.key)) {
+    const bodyKeys = new Set(parseSlots(String(post!.body ?? "")).map((x: J) => String(x.key)));
+    const { data: dup, error: dErr } = await sb.from("post_image_slots").select("slot_key").eq("post_id", postId).eq("image_id", b.image_id);
+    if (dErr) throw dErr;
+    const others = ((dup ?? []) as J[]).map((r) => String(r.slot_key)).filter((k) => k !== slot!.key && bodyKeys.has(k));
+    if (others.length && b.move !== true) fail(409, "image_in_other_slot", { slot_key: others[0] });
+    moveFrom = others;
+  }
   const { data: ex, error: exErr } = await sb.from("post_image_slots").select("purpose, image_id").eq("post_id", postId).eq("slot_key", slot!.key).maybeSingle();
   if (exErr) throw exErr;
   // 1.5.1: 발행 준비 완료·예약·게시 완료 글에는 상품 디테일 검수를 승인한 상품 장면 이미지만 (카드뉴스 PNG는 그 배경까지 — 검토 중인 글에는 넣어 두고 승인은 나중에 해도 됨).
@@ -2468,7 +2531,11 @@ async function linkSlot(c: Ctx) {
     p_post: postId, p: { slot_key: slot!.key, slot_index: slot!.index, slot_text: slot!.text, slot_ctx: ctxOf(slot), image_id: b.image_id, purpose: use },
   });
   if (error) rpcError(error);
-  return json({ slot: data });
+  if (moveFrom.length) {
+    const { error: mErr } = await sb.from("post_image_slots").delete().eq("post_id", postId).eq("image_id", b.image_id).in("slot_key", moveFrom);
+    if (mErr) throw mErr;
+  }
+  return json({ slot: data, moved_from: moveFrom });
 }
 async function swapSlots(c: Ctx) {
   const b = await readJson(c.req, 10_000);
@@ -2679,6 +2746,7 @@ const ROUTES: [string, RegExp, (c: Ctx) => Promise<Response>][] = [
   ["POST", R("images/providers/check"), checkProviderRoute],
   ["POST", R(`images/${U}/small`), uploadSmallCopy],
   ["POST", R("images/composite"), saveComposite],
+  ["POST", R("images/composite/cleanup"), cleanupComposites],
   ["POST", R(`images/${U}/mask`), saveMask],
   ["POST", R(`images/${U}/product-check`), productCheck],
   ["POST", R(`images/${U}/review`), reviewImage],

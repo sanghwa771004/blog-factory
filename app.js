@@ -1,12 +1,12 @@
 // 글공장 앱 1.5.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.5.1';
-import * as L from './lib.js?v=1.5.1';
-import * as IMG from './images.js?v=1.5.1';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.5.1';
+} from './checks.js?v=1.5.2';
+import * as L from './lib.js?v=1.5.2';
+import * as IMG from './images.js?v=1.5.2';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.5.2';
 
-const APP_VER = '1.5.1';
+const APP_VER = '1.5.2';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -196,6 +196,27 @@ async function api(path, { method = 'GET', body, timeout, gen } = {}) {
   if (!r.ok) throw { ...j, code: j.error || 'server', status: r.status };
   return j;
 }
+// 1.5.2: 큰 파일 올리기 (합성 PNG) — 올라간 만큼(onProgress)을 알려주려고 XMLHttpRequest 로. 답·오류 모양은 api() 와 같음
+function apiUpload(path, form, { onProgress, timeout = 120000 } = {}) {
+  return new Promise((ok, no) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', API + path);
+    if (session) x.setRequestHeader('x-app-session', session);
+    x.timeout = timeout;
+    if (onProgress && x.upload) x.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded, e.total); };
+    x.onerror = () => no({ code: navigator.onLine === false ? 'offline' : 'network' });
+    x.ontimeout = () => no({ code: 'timeout' });
+    x.onabort = () => no({ code: 'cancelled' });
+    x.onload = () => {
+      let j = {};
+      try { j = JSON.parse(x.responseText || '{}'); } catch { /* 빈 응답 */ }
+      if (x.status === 401) { authLost(j.reason === 'expired' ? '오래 안 써서 로그아웃됐어. 접속 코드를 다시 넣어줘.' : ERR.auth); no({ code: 'auth' }); return; }
+      if (x.status < 200 || x.status >= 300) { no({ ...j, code: j.error || (x.status === 413 ? 'too_large' : 'server'), status: x.status }); return; }
+      ok(j);
+    };
+    x.send(form);
+  });
+}
 async function run(button, fn, okMsg) {
   if (button) button.disabled = true;
   try {
@@ -254,7 +275,7 @@ function checksFor(p, withOthers) {
 }
 // 이미지 스튜디오 (studio.js) — 화면 도구를 넘겨줌
 const ST = createStudio({
-  h, btn, field, det, opt, L, api: (...a) => api(...a), run: (...a) => run(...a), toast: (...a) => toast(...a), openSheet: (...a) => openSheet(...a), closeSheet: () => closeSheet(),
+  h, btn, field, det, opt, L, api: (...a) => api(...a), upload: (...a) => apiUpload(...a), run: (...a) => run(...a), toast: (...a) => toast(...a), openSheet: (...a) => openSheet(...a), closeSheet: () => closeSheet(),
   confirmBox: (...a) => confirmBox(...a), go: (x) => go(x), load: () => load(), markDirty, clearDirty: () => { dirty = false; },
   setSheetOnClose: (f) => { sheetOnClose = f; }, setSheetGuard: (f) => { sheetGuard = f; }, copyPlain: (t, b) => copyPlain(t, b), errText: (e) => errText(e), titleOf,
   get S() { return S; }, post: (id) => M.post[id], productsOf, slotsOf: (id) => M.slotsBy[id] || [], programs: () => M.prog,
@@ -333,6 +354,8 @@ function showGate(msg) {
 }
 function authLost(msg) {
   session = ''; LS.del('gf-session');
+  // 1.5.2: 이 기기에 둔 '상품 장면 작업 이어 하기' 기록도 지움 (같은 기기를 다른 사람이 쓸 수 있어서)
+  try { if (typeof indexedDB !== 'undefined') indexedDB.deleteDatabase('gf-jobs'); } catch { /* 무시 */ }
   showGate(msg);
 }
 $('#gateShow').addEventListener('change', (e) => { $('#gateInput').type = e.target.checked ? 'text' : 'password'; });

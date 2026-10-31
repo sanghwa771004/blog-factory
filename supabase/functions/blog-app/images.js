@@ -1124,6 +1124,33 @@ export const PRODUCT_PLACES = {
   left: { label: '왼쪽', en: 'in the left third of the frame', x: 0.34 },
   right: { label: '오른쪽', en: 'in the right third of the frame', x: 0.66 },
 };
+// 1.5.2: 빛이 오는 쪽·색 느낌·밝기 — 배경(또는 장면)을 상품 사진의 빛에 맞추려고. '' 은 '지정 안 함'(키가 '' 인 칸은 화면에 '자동'으로)
+// 화면은 상품 사진을 이 기기에서 분석한 '추정값'으로 미리 고르고 그렇다고 표시함 (픽셀만으로 실제 광원을 알 수는 없어서)
+export const PRODUCT_LIGHTS = {
+  '': { label: '지정 안 함', en: '' },
+  left: { label: '왼쪽에서', en: 'the main light comes from the left side of the frame', shadow_en: 'soft shadows fall toward the right' },
+  right: { label: '오른쪽에서', en: 'the main light comes from the right side of the frame', shadow_en: 'soft shadows fall toward the left' },
+  front: { label: '앞·위에서 고르게', en: 'soft, even light from the front and slightly above', shadow_en: 'short soft shadows fall straight down, just beneath objects' },
+};
+export const PRODUCT_WARMTH = {
+  '': { label: '지정 안 함', en: '' },
+  warm: { label: '따뜻하게', en: 'a slightly warm white balance (like warm indoor light)' },
+  neutral: { label: '중간', en: 'a neutral white balance' },
+  cool: { label: '차갑게', en: 'a slightly cool white balance (like overcast daylight)' },
+};
+export const PRODUCT_BRIGHT = {
+  '': { label: '지정 안 함', en: '' },
+  bright: { label: '밝게', en: 'bright, airy overall exposure' },
+  medium: { label: '보통', en: 'medium, natural exposure' },
+  dim: { label: '어둡게', en: 'a darker, moody exposure (still clean, not murky)' },
+};
+// 카메라 각도별 표면 높이·바닥 원근 (원본 보존 합성의 빈 배경이 상품 사진과 같은 시점이 되게)
+const SURFACE_EN = {
+  front: 'The resting surface is seen almost edge-on: its front edge sits low in the frame (around 80–90% of the height) and it recedes gently toward the back with a soft, natural horizon.',
+  high: 'The resting surface fills roughly the lower two-thirds of the frame, seen from about 30 degrees above; its lines converge only mildly toward the back.',
+  top: 'Flat lay: the surface fills the whole frame and is seen straight from above, with no horizon and no converging lines.',
+};
+const SHAPE_EN = { tall: 'a tall, narrow object', square: 'a compact, boxy object', wide: 'a wide, low object' };
 // 상품 장면 설명: 사용자가 직접 적는 칸 (금지 표현 검사는 서버·화면이 같이 함)
 export const PRODUCT_CUSTOM_MAX = 300;
 const pickKey = (map, k, d) => (Object.prototype.hasOwnProperty.call(map, k) ? k : d);
@@ -1140,6 +1167,9 @@ export function cleanProductSpec(o) {
     place: pickKey(PRODUCT_PLACES, x.place, 'center'),
     custom: clip(typeof x.custom === 'string' ? x.custom : '', PRODUCT_CUSTOM_MAX),
     name: clip(typeof x.name === 'string' ? x.name : '', 60),
+    // 1.5.2: 상품 사진에 맞춘 빛·색·밝기·모양 (화면이 상품 사진을 보고 추정해 미리 고르고, 사용자가 바꿀 수 있음. 빈 값 = 지정 안 함)
+    light: pickKey(PRODUCT_LIGHTS, x.light, ''), warmth: pickKey(PRODUCT_WARMTH, x.warmth, ''), bright: pickKey(PRODUCT_BRIGHT, x.bright, ''),
+    shape: ['tall', 'square', 'wide'].includes(x.shape) ? x.shape : '',
   };
 }
 // 상품 장면 설계서 (일반 장면 설계서와 따로 — 상품을 '새로 그리라'와 '정확히 두라'를 섞지 않게)
@@ -1154,6 +1184,7 @@ export function buildProductScene({ spec, ratio, size, refs, post, slot, hide, c
   return {
     v: 1, kind: 'product', mode: s.mode, mode_label: PRODUCT_MODES[s.mode].label, preset: PRODUCT_PRESETS[s.mode],
     template: s.template, template_label: T.label, purpose: s.purpose, purpose_label: Pp.label, angle: s.angle, place: s.place,
+    light: s.light, warmth: s.warmth, bright: s.bright, shape: s.shape,
     goal: `${Pp.look_ko} · ${T.label}${s.custom ? ` · ${s.custom}` : ''}`,
     setting: T.setting_ko, custom: sc(s.custom, PRODUCT_CUSTOM_MAX), size_ratio: Pp.size,
     platform: { purpose: s.purpose, label: (PURPOSES[s.purpose] || PURPOSES.blog_body).label, ratio: r, size: String(size || ''), channel: String(channel || '') },
@@ -1189,15 +1220,24 @@ export function promptFromProductScene(sc) {
   } else if (layer) {
     L.push(`Image type: Photograph — an empty background plate for product compositing; the final picture should read as ${Pp.layer_look_en || Pp.look_en}.`);
     L.push(`Scene: ${T.layer_setting_en || T.setting_en}.${T.light_en ? ` Light: ${T.light_en}.` : ''}`);
-    L.push(`Empty resting spot: a clear, flat, uncluttered part of the surface ${Pl.en}, large enough for an object about ${Math.round(Pp.size * 100)}% of the image height to stand on.`);
+    L.push(`Empty resting spot: a clear, flat, uncluttered part of the surface ${Pl.en}, large enough for ${SHAPE_EN[sc.shape] || 'an object'} about ${Math.round(Pp.size * 100)}% of the image height to stand on.`);
     L.push(`Camera: ${A.en}. Keep perspective natural and surface lines level so a product photographed from this angle fits in.`);
-    L.push('Light direction: soft and consistent, coming from one side, so a product added later can match; no colored light and no strong spotlight on the empty spot.');
+    L.push(`Surface and perspective: ${SURFACE_EN[sc.angle] || SURFACE_EN.front}`);
+    const Li = PRODUCT_LIGHTS[sc.light];
+    L.push(Li && Li.en ? `Light direction: ${Li.en}, matching the product photo that will be added; ${Li.shadow_en}. No colored light and no strong spotlight on the empty spot.`
+      : 'Light direction: soft and consistent, coming from one side, so a product added later can match; no colored light and no strong spotlight on the empty spot.');
+    const tone = [PRODUCT_BRIGHT[sc.bright] && PRODUCT_BRIGHT[sc.bright].en, PRODUCT_WARMTH[sc.warmth] && PRODUCT_WARMTH[sc.warmth].en].filter(Boolean);
+    if (tone.length) L.push(`Brightness and color: ${tone.join('; ')}.`);
     if ((T.layer_note_en || T.note_en) && sc.template !== 'in_use') L.push(T.layer_note_en || T.note_en);
     if (sc.template === 'in_use') L.push('Show only the setting itself; no people.');
   } else {
     L.push(`Image type: Photograph — ${Pp.look_en}.`);
     L.push(`Scene: the product from the reference photo(s) ${T.setting_en}, placed ${Pl.en}.${T.light_en ? ` Light: ${T.light_en}.` : ''}`);
     L.push(`Camera: ${A.en}.`);
+    const Li = PRODUCT_LIGHTS[sc.light];
+    if (Li && Li.en) L.push(`Light direction: ${Li.en}; ${Li.shadow_en}.`);
+    const tone = [PRODUCT_BRIGHT[sc.bright] && PRODUCT_BRIGHT[sc.bright].en, PRODUCT_WARMTH[sc.warmth] && PRODUCT_WARMTH[sc.warmth].en].filter(Boolean);
+    if (tone.length) L.push(`Brightness and color: ${tone.join('; ')}.`);
     if (T.note_en) L.push(T.note_en);
   }
   if (sc.custom && !sc.edit) L.push(`Extra direction from the author (Korean): ${sc.custom}`);
@@ -1280,7 +1320,14 @@ export function cleanLayer(o) {
     ratio: Object.prototype.hasOwnProperty.call(RATIOS, x.ratio) ? x.ratio : '',
     one: x.one === true, // 원본 크기 그대로 (늘리거나 줄이지 않음 — 회전도 0이면 상품 칸이 원본 픽셀 그대로)
     src_scaled: x.src_scaled === true, // 상품 사진이 아주 커서(긴 변 2,560px 넘음) 줄여 읽은 사진으로 합성했는지
+    // 1.5.2: 저장한 합성에서 상품이 그려진 자리 (결과 가로·세로에 대한 비율 — 화면이 그린 값). 검수 화면이 원본과 같은 부분을 잘라 비교하려고. 없으면 칸도 없음
+    ...(cleanBox(x.box) ? { box: cleanBox(x.box) } : {}),
   };
+}
+function cleanBox(b) {
+  if (!b || typeof b !== 'object' || ![b.l, b.t, b.w, b.h].every((v) => v !== null && v !== '' && Number.isFinite(Number(v)))) return null;
+  const f = (v, lo, hi) => Math.round(Math.min(hi, Math.max(lo, Number(v))) * 10000) / 10000;
+  return { l: f(b.l, -2, 3), t: f(b.t, -2, 3), w: f(b.w, 0, 3), h: f(b.h, 0, 3) };
 }
 // 제작 목적·놓을 자리에 맞춘 첫 레이어 설정
 export function defaultLayer(spec) {
@@ -1349,6 +1396,121 @@ export function productGateErrors(post, rows) {
     fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘 (본문에서 사라진 자리면 그 연결을 빼도 돼)."
       + (cards ? ' 카드뉴스는 배경으로 쓴 상품 장면을 승인하거나, 승인한 배경으로 카드를 다시 만들어줘.' : '')
       + ' 승인 전에는 발행 준비 완료·예약·게시 완료로 못 바꿔.' }] : [];
+}
+
+// ───────── 1.5.2: 장면 정보 기록·검수 도움말·후기 오해 표시·공급자 비교 평가·원고 자리 정보 ─────────
+// 원본 보존 합성 결과에 같이 남기는 '장면 정보' (scene.fit): 화면이 이 기기에서 픽셀만 보고 추정한 값과 추천값을 적용했는지.
+// 외부 AI로 분석한 게 아니고 확실한 값도 아니라서 source·confidence 를 늘 같이 남김
+const pickOf = (v, list) => (list.includes(v) ? v : '');
+const n11 = (v) => { const n = Number(v); return Number.isFinite(n) ? Math.round(Math.min(1, Math.max(-1, n)) * 100) / 100 : null; };
+const CONF = ['low', 'medium', 'high'];
+const est = (value, conf, vals) => (pickOf(value, vals) ? { value, confidence: pickOf(conf, CONF) || 'low' } : null);
+export function cleanFit(o) {
+  const x = o && typeof o === 'object' && !Array.isArray(o) ? o : {};
+  const p = x.product && typeof x.product === 'object' ? x.product : {};
+  const b = x.background && typeof x.background === 'object' ? x.background : {};
+  const at = (e) => (e && typeof e === 'object' ? e : {});
+  const asp = Number(p.aspect);
+  return {
+    v: 1, source: 'device_estimate',
+    product: {
+      view: est(at(p.view).value, at(p.view).confidence, ['front', 'high', 'top']), light: est(at(p.light).dir, at(p.light).confidence, ['left', 'right', 'front']),
+      shadow: est(at(p.shadow).side, at(p.shadow).confidence, ['left', 'right', 'below']), temp: est(at(p.temp).value, at(p.temp).confidence, ['warm', 'neutral', 'cool']),
+      aspect: Number.isFinite(asp) && asp > 0 ? Math.round(Math.min(10, Math.max(0.1, asp)) * 100) / 100 : null, bright: n11(at(p.bright).product),
+    },
+    background: {
+      light: est(at(b.light).dir, at(b.light).confidence, ['left', 'right', 'front']), temp: est(at(b.temp).value, at(b.temp).confidence, ['warm', 'neutral', 'cool']),
+      contrast: pickOf(b.contrast, ['soft', 'medium', 'hard']), bright: n11(b.bright),
+      spot: b.spot && typeof b.spot === 'object' ? { x: n11(b.spot.x), y: n11(b.spot.y), confidence: pickOf(b.spot.confidence, CONF) || 'low' } : null,
+    },
+    applied: x.applied === true, // '추천값 적용'을 눌렀는지 (그 뒤 슬라이더로 고쳤을 수 있음)
+    match: { light: pickOf(x.match && x.match.light, ['same', 'opposite', 'unknown']) || 'unknown' },
+  };
+}
+// 상품 디테일 검수 칸마다 볼 곳 — 원본 보존 합성과 AI 실사 장면은 검수 기준이 다름 (지시서 8번)
+export const PRODUCT_CHECK_HINTS = {
+  layer: {
+    shape: '상품 픽셀은 원본 그대로야 — 배경 지우기에서 잘려 나간 곳만 확인해',
+    color: '상품 밝기·색온도를 바꿨으면 원본과 색이 달라져',
+    details: '크기를 줄이거나 돌렸으면 작은 버튼·마감이 흐려질 수 있어 (확대해서)',
+    text: '줄이거나 돌렸으면 작은 글자가 뭉개질 수 있어 (확대해서)',
+    parts: '배경 지우기에서 빠진 구성품·손잡이·끈이 없는지',
+    scale: '탁자·소품 같은 배경 물건에 비해 상품 크기가 말이 되는지',
+    placement: '상품이 떠 보이지 않는지 · 바닥에 닿는 곳에 접촉 그림자가 있는지 · 그림자 방향이 배경 빛과 맞는지',
+    artifacts: '가장자리에 원래 배경색이 남지 않았는지(확대) · AI가 배경에 물건·글자를 그리지 않았는지',
+    consistency: '배경·그림자는 AI와 앱이 만든 거야 — 실제로 그 장소에서 찍은 사진처럼 쓰지 마',
+  },
+  reference: {
+    shape: 'AI가 상품까지 다시 그렸어 — 비율·모서리·두께가 원본과 같은지',
+    color: '색과 재질(무광·유광)이 원본과 같은지',
+    details: '버튼·포트·마감의 개수와 위치가 같은지',
+    text: '로고·글자를 한 글자씩 원본과 비교 (AI는 글자를 바꾸거나 지어내기 쉬워)',
+    parts: '구성품 개수·배치가 같은지 (없는 부품을 더하지 않았는지)',
+    scale: '주변 물건에 비해 크기가 말이 되는지',
+    placement: '상품이 떠 보이지 않는지 · 그림자가 자연스러운지',
+    artifacts: '가짜 문구·가짜 라벨·필요 없는 물체가 없는지',
+    consistency: '본문의 상품 정보(색상·구성)와 다르지 않은지',
+  },
+};
+// 실제 사용 후기·인증 사진처럼 오해될 가능성 (표시만 — 막는 건 '(직접 찍기)' 자리 규칙과 금지 표현 검사가 함)
+const REVIEWISH = /(후기|리뷰|써\s*보|사용\s*해\s*보|직접\s*(써|사용)|실사용|내돈내산|구매\s*인증|사용\s*중|사용기)/;
+export function reviewRiskOf({ img = null, slotText = '', post = null } = {}) {
+  const mode = productSceneMode(img);
+  const reasons = [];
+  const sc = (img && img.scene && typeof img.scene === 'object') ? img.scene : {};
+  if (post && post.content_type === 'experience_review') reasons.push('후기 글에 넣는 이미지야');
+  if (REVIEWISH.test(String(slotText || ''))) reasons.push('사진 자리 설명이 써본 경험을 말하고 있어');
+  if (sc.template === 'in_use') reasons.push("'제품을 사용하는 상황' 장면이야");
+  if (sc.template === 'pet') reasons.push('반려동물과 함께 있는 장면이야');
+  const level = !mode ? 'none' : reasons.length >= 2 || (reasons.length && mode === 'reference') ? 'high' : reasons.length ? 'medium' : 'low';
+  return {
+    mode, level, reasons,
+    label: mode === 'layer' ? '원본 보존 합성 — 상품은 진짜 사진, 배경·그림자는 AI와 앱이 만듦' : mode === 'reference' ? 'AI 합성 이미지 — 상품까지 AI가 그림' : '',
+    msg: level === 'high' || level === 'medium' ? '실제로 써본 사진처럼 보일 수 있어. 사진 아래 표기를 지우지 말고, 본문에서 써본 것처럼 쓰지 마.' : '',
+  };
+}
+// 공급자 비교 평가 항목 (상품 장면 — 지시서 9번). 생성 시간·비용은 기록에서 자동으로 보여줌. [키, 이름, 낮을수록 좋은 항목인지]
+export const PRODUCT_EVAL_CRITERIA = [
+  ['natural', '사진 자연스러움'], ['preserve', '상품 외형 보존'], ['composition', '구도'], ['lighting', '조명'], ['shadow', '그림자'],
+  ['color', '색감'], ['fit', '원고와의 일치도'], ['ai_look', 'AI 생성 티', true], ['usable', '실제 블로그 게시 가능성'],
+];
+// 서버가 받는 평가 칸 (일반 모델 비교 + 상품 장면 비교)
+export const ALL_EVAL_KEYS = [...new Set([...EVAL_CRITERIA, ...PRODUCT_EVAL_CRITERIA].map(([k]) => k))];
+// 원고의 사진 자리 정보 (지시서 10번): 왜 필요한지·무엇을 설명하는지·상품 사진이 필요한지·AI로 대신할 수 있는지·직접 찍어야 하는지·추천 프리셋
+// ai: 'no' = 직접 찍은 사진만 · 'real' = 진짜 상품 사진(직접 찍기·공식 사진·원본 보존 합성·참고 AI 합성) 권장 · 'yes' = AI 일반 장면으로 대신해도 됨
+export function slotInfo(slot, { post = null } = {}) {
+  const s = slot || {};
+  if (isExtraKey(s.key)) {
+    const x = extraSlot(s.key) || {};
+    const pr = recommendPreset({ post, slot: s, text: x.label, purpose: x.purpose });
+    return { explains: x.label || '본문 밖 이미지', why: x.purpose === 'blog_cover' ? '글 목록·공유 미리보기에 보이는 대표 이미지' : 'SNS에 같이 올릴 이미지', own: false, product: false, ai: 'yes',
+      preset: pr.id, preset_label: (PRESETS[pr.id] || {}).label || pr.id, preset_why: pr.why, extra: true };
+  }
+  const text = String(s.text || '');
+  const own = isOwnPhotoSlot(text);
+  const mark = /\(\s*제품\s*사진\s*\)/.test(text);
+  const risk = slotRisk(text);
+  const pr = recommendPreset({ post, slot: s, text: stripSlotMarks(text) });
+  const ctx = s.before || s.after || '';
+  return {
+    explains: stripSlotMarks(text) || '(설명 없음)',
+    why: s.heading ? `'${clip(s.heading, 40)}' 부분을 눈으로 보여주려고` : ctx ? `앞뒤 문장('${clip(ctx, 40)}${ctx.length > 40 ? '…' : ''}')을 보여주려고` : '본문 흐름을 쉬어 가게 하려고',
+    own, product: !own && (mark || risk.real), ai: own ? 'no' : mark || risk.real ? 'real' : 'yes',
+    preset: pr.id, preset_label: (PRESETS[pr.id] || {}).label || pr.id, preset_why: pr.why, extra: false,
+  };
+}
+// 같은 이미지가 본문 여러 자리에 반복되는지 (본문 밖 대표·SNS 자리는 본문 사진을 그대로 써도 돼서 빼고 봄)
+// rows: [{slot_key, image_id}] → { [image_id]: [slot_key, …] } (두 자리 이상만)
+export function duplicateSlots(rows) {
+  const m = new Map();
+  for (const r of rows || []) {
+    if (!r || !r.image_id || isExtraKey(r.slot_key)) continue;
+    if (!m.has(r.image_id)) m.set(r.image_id, []);
+    m.get(r.image_id).push(r.slot_key);
+  }
+  const out = {};
+  for (const [id, keys] of m) if (keys.length > 1) out[id] = keys;
+  return out;
 }
 
 // 프롬프트 토큰 수 어림: 영어·숫자는 약 3.5글자에 1토큰, 한글 등은 1글자에 1.2토큰으로 넉넉하게 (실제 사용량이 오면 그걸로 다시 계산)
@@ -1750,6 +1912,11 @@ export function imageChecks(post, rows, opts = {}) {
     if (img.kind === 'upload' && (img.source_type === 'official' || img.source_type === 'external')) credit.push(s.n);
   }
   if (pcheck.length) W.push({ code: 'product_check_needed', msg: `상품 디테일 검수를 승인하지 않은 상품 이미지가 ${pcheck.length}곳 있어 (${list(pcheck)}).`, fix: "이미지 미리보기의 '상품 디테일 검수'에서 원본과 비교하고 승인해줘. 승인 전에는 발행 준비 완료로 못 바꿔." });
+  // 1.5.2: 같은 이미지가 본문 여러 자리에 반복 (자리마다 다른 장면이어야 글이 덜 단조롭고, 같은 사진 반복은 검색에도 좋지 않음)
+  const dupN = [];
+  const seenImg = new Map();
+  for (const s of slots) { const img = byKey.get(s.key); const id = img && (img.id || img.sha256); if (!id) continue; if (seenImg.has(id)) { if (!dupN.includes(seenImg.get(id))) dupN.push(seenImg.get(id)); dupN.push(s.n); } else seenImg.set(id, s.n); }
+  if (dupN.length) W.push({ code: 'image_duplicate', msg: `같은 이미지가 여러 자리에 반복돼 있어 (${list(dupN.sort((a, b) => a - b))}).`, fix: '자리마다 다른 이미지를 넣어줘 (각 자리의 설명에 맞게 새로 만들거나 바꿔줘).' });
   if (layerOwn.length) W.push({ code: 'composite_in_own_slot', msg: `'직접 찍기' 자리에 합성 이미지가 있어 (${list(layerOwn)}).`, fix: "배경이 AI라 직접 찍은 사진이 아니야. 휴대폰으로 찍어서 '파일 올리기'로 바꿔줘." });
   if (unrev.length) W.push({ code: 'image_unreviewed', msg: `아직 검수하지 않은 이미지가 ${unrev.length}곳 있어 (${list(unrev)}).`, fix: "이미지 미리보기에서 확인하고 '사용 가능'으로 바꿔줘." });
   if (rejected.length) W.push({ code: 'image_rejected', msg: `'사용 안 함'으로 표시한 이미지가 연결돼 있어 (${list(rejected)}).`, fix: '다른 이미지로 바꾸거나 연결을 빼줘.' });

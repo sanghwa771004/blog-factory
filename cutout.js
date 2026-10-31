@@ -1,10 +1,12 @@
-// cutout.js — 상품 사진에서 '남길 영역'(마스크)을 만들고, 원본 픽셀을 그대로 AI 배경 위에 얹는 합성 (1.5.1)
+// cutout.js — 상품 사진에서 '남길 영역'(마스크)을 만들고, 원본 픽셀을 그대로 AI 배경 위에 얹는 합성 (1.5.1 · 1.5.2)
 // 모두 이 기기 브라우저 안에서 함 — 서버·외부 API를 부르지 않아서 배경 지우기 비용은 0원이고, 사진이 다른 곳으로 가지 않음.
 // · 배경 지우기 모델: U²-Netp (Apache-2.0 — models/NOTICE) + ONNX Runtime Web 1.30.0 (MIT — vendor/onnxruntime-web/LICENSE). 앱과 같은 주소에서 받음 (CSP 'self')
 // · Supabase Edge Function 은 CPU 시간이 짧고 그림 도구가 없어서 서버에서는 픽셀을 다루지 않음
 // · 원본 상품 사진 파일은 읽기만 하고 고치지 않음. 합성 결과는 새 PNG(다시 압축하지 않음)로 따로 저장
-// 순수 계산 함수(마스크 다듬기·합성)는 Node 시험에서도 돌아감. 브라우저 전용은 loadSegmenter·decodeImage·toPngBlob·maskFromPng 뿐
-import { cleanLayer, layerBox, RATIOS } from './images.js?v=1.5.1';
+// 순수 계산 함수(마스크 다듬기·품질 점수·합성)는 Node 시험에서도 돌아감. 브라우저 전용은 loadSegmenter·일꾼·decodeImage·toPngBlob·maskFromPng 뿐
+// 1.5.2: 배경 지우기는 따로 일꾼(seg-worker.js)에서 — 처리 중에도 화면이 안 멈추고, 취소·시간 제한·끝나면 메모리 풀기. 일꾼을 못 쓰는 브라우저는 예전처럼 화면 쪽에서
+//        기기 확인(WebAssembly SIMD·일꾼·메모리)으로 '간단 모드'(작게 처리), 마스크 품질 점수, 가장자리 다듬기, 2단계(정밀하게)
+import { cleanLayer, layerBox, RATIOS } from './images.js?v=1.5.2';
 
 export const SEG_SIZE = 320;                       // U²-Netp 입력 크기 (1×3×320×320)
 export const MAX_MASK_SIDE = 1600;                 // 마스크를 만드는 크기 (큰 사진은 같은 비율로 줄여서 — 서버도 같은 비율만 받음)
@@ -14,6 +16,42 @@ export const ORT_URL = './vendor/onnxruntime-web/ort.wasm.bundle.min.mjs';
 export const WASM_URL = './vendor/onnxruntime-web/ort-wasm-simd-threaded.wasm';
 export const WASM_SHA256 = '3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083ebbeb78842dee2';
 export const CACHE_NAME = 'gf-cutout-v1';
+export const MODEL_BYTES = 4574861;                // 받기 진행률 표시용 (압축돼서 오면 content-length 가 달라서)
+export const WASM_BYTES = 14239897;
+export const WORKER_URL = './seg-worker.js?v=1.5.2';
+
+// ───────── 이 기기·브라우저 확인 (1.5.2) ─────────
+// WebAssembly SIMD: 배경 지우기 실행기(ONNX Runtime Web 1.30 의 SIMD 판)가 꼭 필요 (iOS Safari 16.4 이상). 없으면 모델 없이 간단히·직접 칠하기만
+// (wasm-feature-detect 의 simd 검사와 같은 작은 모듈 — 실행하지 않고 검사만)
+const SIMD_TEST = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+export function capabilities(g = globalThis) {
+  const wasm = typeof g.WebAssembly === 'object' && !!g.WebAssembly && typeof g.WebAssembly.validate === 'function';
+  let simd = false;
+  try { simd = wasm && g.WebAssembly.validate(SIMD_TEST); } catch { simd = false; }
+  const nav = g.navigator || {};
+  const ua = String(nav.userAgent || '');
+  return {
+    wasm, simd, worker: typeof g.Worker === 'function', cache: !!g.caches, idb: !!g.indexedDB, offscreen: typeof g.OffscreenCanvas === 'function',
+    memory: Number(nav.deviceMemory) || 0, cores: Number(nav.hardwareConcurrency) || 0, // deviceMemory 는 Safari 에 없음 (0 = 모름)
+    ios: /iP(hone|ad|od)/.test(ua) || (/Macintosh/.test(ua) && Number(nav.maxTouchPoints) > 1),
+  };
+}
+// 처리 크기: 보통 / 간단 모드 (저사양·메모리 적음·전에 처리가 멈춤). 간단 모드는 상품 사진을 작게 읽어서 마스크·합성도 작게
+export const SIZES = { normal: { decode: 2560, mask: MAX_MASK_SIDE, preview: 900 }, lite: { decode: 1600, mask: 1024, preview: 600 } };
+export function deviceTier(cap = capabilities(), { failed = false, force = '' } = {}) {
+  const reasons = [];
+  if (!cap.wasm || !cap.simd) reasons.push('no_simd');
+  if (cap.memory && cap.memory <= 2) reasons.push('low_memory'); // deviceMemory 는 크롬 계열만 알려줌 (아이폰 Safari 는 모름 → 처리가 한 번 멈추면 그때 간단 모드로)
+  if (failed) reasons.push('failed');
+  // 코어 수는 메모리를 말해 주지 않아서(2코어 PC도 많음) 간단 모드 기준으로 쓰지 않음
+  const lite = force === 'lite' || (force !== 'normal' && reasons.length > 0);
+  return { lite, model: cap.wasm && cap.simd, worker: cap.worker, reasons, sizes: lite ? SIZES.lite : SIZES.normal, ios: cap.ios };
+}
+export const TIER_MSG = {
+  no_simd: '이 브라우저는 배경 지우기 도구(WebAssembly SIMD)를 못 돌려서 간단한 방법(테두리 색)과 직접 칠하기만 돼 (iPhone은 iOS 16.4 이상이면 돼).',
+  low_memory: '이 기기는 메모리가 적어 보여서 사진을 작게 처리해.',
+  failed: '전에 이 기기에서 처리가 멈췄거나 메모리가 모자라서 사진을 작게 처리해.',
+};
 
 const clamp255 = (v) => (v < 0 ? 0 : v > 255 ? 255 : v);
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
@@ -160,6 +198,27 @@ export function mapToMask(map, rgba, w, h, { guide = true, lo = 0.3, hi = 0.7 } 
   for (let i = 0; i < w * h; i++) m[i] = Math.round(255 * smooth(lo, hi, q[i]));
   return keepMain(m, w, h);
 }
+// 2단계 '정밀하게' (1.5.2): 1단계 결과의 상품 상자(+여백)만 잘라서 모델을 한 번 더 돌림. 모델 입력은 늘 320×320이라
+// 상품이 사진에서 작을수록 가장자리·가는 부분(끈·털)이 뭉개지는데, 잘라서 다시 보면 상품이 입력을 더 크게 채움. 상자 밖은 1단계 그대로.
+// runModel(rgba, w, h) → 모델의 320×320 출력 (화면 쪽이든 일꾼이든 같은 함수로). 시간은 대략 두 배
+export async function twoPassMap(rgba, w, h, runModel, { margin = 0.12, thr = 0.5, maxFill = 0.7 } = {}) {
+  const p1 = probToMap(await runModel(rgba, w, h), SEG_SIZE, w, h);
+  let x0 = w, y0 = h, x1 = -1, y1 = -1;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) if (p1[y * w + x] >= thr) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) return { map: p1, refined: false };
+  const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+  const mx = Math.round(bw * margin) + 2, my = Math.round(bh * margin) + 2;
+  const cx0 = Math.max(0, x0 - mx), cy0 = Math.max(0, y0 - my), cx1 = Math.min(w, x1 + 1 + mx), cy1 = Math.min(h, y1 + 1 + my);
+  const cw = cx1 - cx0, ch = cy1 - cy0;
+  // 상품이 이미 사진을 거의 채우면 다시 봐도 나아지지 않음
+  if (cw * ch > maxFill * w * h || cw < 16 || ch < 16) return { map: p1, refined: false };
+  const crop = new Uint8ClampedArray(cw * ch * 4);
+  for (let y = 0; y < ch; y++) crop.set(rgba.subarray(((cy0 + y) * w + cx0) * 4, ((cy0 + y) * w + cx1) * 4), y * cw * 4);
+  const p2 = probToMap(await runModel(crop, cw, ch), SEG_SIZE, cw, ch);
+  const out = Float32Array.from(p1);
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) out[(cy0 + y) * w + cx0 + x] = p2[y * cw + x];
+  return { map: out, refined: true, crop: { x: cx0, y: cy0, w: cw, h: ch } };
+}
 // 연결된 조각 (문턱 thr 이상 = 남김): 가장 큰 조각의 minFrac 보다 작은 조각은 지우고, 남긴 조각 안의 작은 구멍은 메움
 export function keepMain(mask, w, h, { thr = 128, minFrac = 0.04, holeFrac = 0.002 } = {}) {
   const N = w * h;
@@ -270,6 +329,115 @@ export function maskBBox(mask, w, h, thr = 16) {
   return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 export function maskCoverage(mask, thr = 128) { let n = 0; for (let i = 0; i < mask.length; i++) if (mask[i] >= thr) n++; return mask.length ? Math.round((n / mask.length) * 1000) / 1000 : 0; }
+// 넓히기(+)·좁히기(-) px칸 (넓히기 = 거꾸로 해서 좁히기)
+export function growMask(mask, w, h, px) {
+  if (!px) return Uint8ClampedArray.from(mask);
+  if (px < 0) return erodeMask(mask, w, h, -px);
+  const inv = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < w * h; i++) inv[i] = 255 - mask[i];
+  const e = erodeMask(inv, w, h, px);
+  for (let i = 0; i < w * h; i++) e[i] = 255 - e[i];
+  return e;
+}
+// 가장자리 다듬기 (1.5.2 편집 도구): 경계 근처 띠만 사진의 실제 윤곽에 맞춰 다시 (유도 필터). 띠 밖(확실한 안쪽·바깥)은 그대로 — 손으로 칠한 곳을 되돌리지 않게
+export function refineEdges(mask, rgba, w, h, { radius = 0 } = {}) {
+  const r = radius || Math.max(2, Math.round(Math.max(w, h) / 250));
+  const p = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) p[i] = mask[i] / 255;
+  const near = boxMean(p, w, h, r * 2);
+  const q = guidedFilter(grayOf(rgba, w, h), p, w, h, r, 1e-3);
+  const out = Uint8ClampedArray.from(mask);
+  for (let i = 0; i < w * h; i++) if (near[i] > 0.02 && near[i] < 0.98) out[i] = Math.round(255 * smooth(0.35, 0.65, q[i]));
+  return out;
+}
+// 연결된 조각·구멍 세기 (4방향, 문턱 thr) — 품질 점수용 (keepMain 과 같은 기준)
+function partsOf(mask, w, h, thr = 128) {
+  const N = w * h, lab = new Int32Array(N).fill(-1), stack = new Int32Array(N);
+  const fg = [], holes = [];
+  for (let s = 0; s < N; s++) {
+    if (lab[s] !== -1) continue;
+    const on = mask[s] >= thr;
+    let sp = 0, n = 0, touches = false;
+    stack[sp++] = s; lab[s] = 1;
+    while (sp) {
+      const p = stack[--sp]; n++;
+      const x = p % w, y = (p - x) / w;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) touches = true;
+      if (x > 0 && lab[p - 1] === -1 && (mask[p - 1] >= thr) === on) { lab[p - 1] = 1; stack[sp++] = p - 1; }
+      if (x < w - 1 && lab[p + 1] === -1 && (mask[p + 1] >= thr) === on) { lab[p + 1] = 1; stack[sp++] = p + 1; }
+      if (y > 0 && lab[p - w] === -1 && (mask[p - w] >= thr) === on) { lab[p - w] = 1; stack[sp++] = p - w; }
+      if (y < h - 1 && lab[p + w] === -1 && (mask[p + w] >= thr) === on) { lab[p + w] = 1; stack[sp++] = p + w; }
+    }
+    if (on) fg.push(n); else if (!touches) holes.push(n);
+  }
+  return { fg: fg.sort((a, b) => b - a), holes };
+}
+// 마스크 품질 점수 (1.5.2): 0~100 과 고칠 곳. 정답을 모르는 상태에서 보는 '추정'이야 — 점수가 높아도 확대해서 직접 확인해야 해
+// rgba(같은 크기 사진)를 주면 경계가 사진의 실제 윤곽(밝기 변화)과 맞는지도 봄
+export const MASK_QUALITY_MSG = {
+  empty: '남긴 부분이 거의 없어 — 다시 자동으로 하거나 칠해서 남겨줘.',
+  full: '거의 다 남았어 — 배경이 안 지워진 것 같아.',
+  parts: '떨어진 조각이 더 있어 — 상품의 일부(구성품)인지, 지워야 할 배경인지 확인해줘.',
+  cut: '남긴 부분이 사진 가장자리(위·옆)에 닿아 있어 — 상품이 잘렸거나 배경이 덜 지워졌을 수 있어.',
+  cut_bottom: '아래쪽이 사진 끝에 닿아 있어 — 바닥까지 찍힌 사진이면 괜찮아.',
+  soft: '가장자리가 흐릿한 곳이 많아 — 털·투명한 부분·배경과 비슷한 색일 수 있어. 확대해서 고쳐줘.',
+  weak_edge: '경계가 사진의 실제 윤곽과 잘 안 맞아 — 배경과 색이 비슷하면 이래. 확대해서 칠해줘.',
+  holes: '안쪽에 빈 곳이 있어 — 손잡이처럼 진짜 뚫린 곳이 아니면 남기기 붓으로 메워줘.',
+};
+export const MASK_LEVEL = { good: '좋아 보임', check: '확인 필요', fix: '고쳐야 함' };
+export function maskQuality(mask, w, h, rgba = null) {
+  const N = w * h;
+  if (!N || !mask || mask.length < N) return { score: 0, level: 'fix', coverage: 0, issues: ['empty'] };
+  const g = rgba && rgba.length >= N * 4 ? grayOf(rgba, w, h) : null;
+  const near = (i, x, y) => { // 3×3 안에서 가장 큰 밝기 차이
+    let mn = 1, mx = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const xx = x + dx, yy = y + dy;
+      if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+      const v = g[yy * w + xx]; if (v < mn) mn = v; if (v > mx) mx = v;
+    }
+    return mx - mn;
+  };
+  let fgN = 0, soft = 0, bnd = 0, gsum = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x, v = mask[i], on = v >= 128;
+    if (on) fgN++;
+    if (v > 24 && v < 232) soft++;
+    if ((x + 1 < w && (mask[i + 1] >= 128) !== on) || (y + 1 < h && (mask[i + w] >= 128) !== on)) { bnd++; if (g) gsum += near(i, x, y); }
+  }
+  // 사진 전체의 '뚜렷한 윤곽' 세기 (표본 90번째 값) — 경계의 밝기 변화가 이것에 비해 얼마나 되는지
+  let edge = null;
+  if (g && bnd) {
+    const hist = new Uint32Array(101); let n = 0;
+    const st = Math.max(1, Math.round(Math.sqrt(N / 40000)));
+    for (let y = 1; y < h - 1; y += st) for (let x = 1; x < w - 1; x += st) { hist[Math.min(100, Math.round(near(y * w + x, x, y) * 100))]++; n++; }
+    let acc = 0, p90 = 0;
+    for (let k = 0; k <= 100; k++) { acc += hist[k]; if (acc >= n * 0.9) { p90 = k / 100; break; } }
+    edge = Math.round(Math.min(1.5, gsum / bnd / Math.max(0.02, p90)) * 100) / 100;
+  }
+  const cov = fgN / N;
+  const { fg, holes } = partsOf(mask, w, h);
+  const big = fg[0] || 0;
+  const extra = fg.slice(1).filter((n) => n >= big * 0.02 && n >= N * 0.0005).length;
+  const bigHoles = holes.filter((n) => n >= N * 0.0005).length;
+  const side = (pts) => { let k = 0; for (const p of pts) if (mask[p] >= 128) k++; return pts.length ? k / pts.length : 0; };
+  const row = (y) => Array.from({ length: w }, (_, x) => y * w + x), col = (x) => Array.from({ length: h }, (_, y) => y * w + x);
+  const touches = { top: side(row(0)), bottom: side(row(h - 1)), left: side(col(0)), right: side(col(w - 1)) };
+  const issues = [];
+  let s = 100;
+  if (cov < 0.02) { s -= 70; issues.push('empty'); } else if (cov > 0.97) { s -= 70; issues.push('full'); }
+  if (extra) { s -= 12; issues.push('parts'); }
+  const cut = ['top', 'left', 'right'].filter((k) => touches[k] > 0.03).length;
+  if (cut && cov <= 0.97) { s -= 10 * cut; issues.push('cut'); }
+  if (touches.bottom > 0.03 && cov <= 0.97) issues.push('cut_bottom');
+  const softRatio = bnd ? soft / bnd : 0;   // 흐릿한 띠의 두께(대략 몇 칸)
+  if (softRatio > 6 && cov >= 0.02) { s -= 15; issues.push('soft'); }
+  if (edge != null && edge < 0.35 && cov >= 0.02 && cov <= 0.97) { s -= 20; issues.push('weak_edge'); }
+  if (bigHoles) issues.push('holes');
+  s = Math.max(0, Math.min(100, s));
+  return { score: s, level: s >= 75 ? 'good' : s >= 50 ? 'check' : 'fix', coverage: Math.round(cov * 1000) / 1000, parts: 1 + extra, holes: bigHoles,
+    soft: Math.round(softRatio * 10) / 10, edge, touches, issues };
+}
 // 마스크를 사진 크기로 (마스크가 사진보다 작으면 쌍선형으로 늘림 — 같은 비율)
 export function maskAt(mask, mw, mh, pw, ph) {
   if (mw === pw && mh === ph) return mask;
@@ -512,11 +680,13 @@ export const COMPOSE_WARN = {
 // ───────── 브라우저 전용 ─────────
 // 받은 파일은 해시가 맞을 때만 이 기기에 저장하고, 저장된 것도 쓸 때마다 해시를 확인 (와이파이 로그인 화면 같은 엉뚱한 응답이나
 // 같은 주소의 새 파일이 영영 남아서 배경 지우기가 계속 '간단히'로만 되지 않게 — 1.5.1 검토). 저장 이름에 해시를 넣어서 파일이 바뀌면 새로 받음
+// 1.5.2: 받는 동안 진행률(onProgress)과 취소(signal)
 async function sha256Hex(bytes) {
   const d = await crypto.subtle.digest('SHA-256', bytes);
   return [...new Uint8Array(d)].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
-async function cachedBytes(url, sha) {
+const cancelled = () => ({ code: 'cancelled' });
+async function cachedBytes(url, sha, { onProgress = null, signal = null, expect = 0 } = {}) {
   const key = `${url}?sha=${sha.slice(0, 16)}`;
   let cache = null;
   try { cache = typeof caches !== 'undefined' ? await caches.open(CACHE_NAME) : null; } catch { cache = null; }
@@ -525,29 +695,60 @@ async function cachedBytes(url, sha) {
       const hit = await cache.match(key);
       if (hit) {
         const b = new Uint8Array(await hit.arrayBuffer());
-        if ((await sha256Hex(b)) === sha) return b;
+        if ((await sha256Hex(b)) === sha) { if (onProgress) onProgress(b.length, b.length, true); return b; }
         await cache.delete(key);
       }
     } catch { /* 아래로 */ }
   }
-  const res = await fetch(url, { cache: 'no-cache' });
+  if (signal && signal.aborted) throw cancelled();
+  let res;
+  try { res = await fetch(url, { cache: 'no-cache', signal: signal || undefined }); } catch (e) { if (signal && signal.aborted) throw cancelled(); throw e; }
   if (!res.ok) throw new Error('fetch ' + res.status);
-  const buf = new Uint8Array(await res.arrayBuffer());
+  let buf;
+  if (onProgress && res.body && res.body.getReader) {
+    const rd = res.body.getReader();
+    const parts = [];
+    let got = 0;
+    for (;;) {
+      let r;
+      try { r = await rd.read(); } catch (e) { if (signal && signal.aborted) throw cancelled(); throw e; }
+      if (r.done) break;
+      parts.push(r.value); got += r.value.length;
+      onProgress(got, expect || Number(res.headers.get('content-length')) || 0, false);
+    }
+    buf = new Uint8Array(got);
+    let o = 0;
+    for (const p of parts) { buf.set(p, o); o += p.length; }
+  } else buf = new Uint8Array(await res.arrayBuffer());
   if ((await sha256Hex(buf)) !== sha) throw new Error(url === MODEL_URL ? 'model_hash' : 'wasm_hash');
   if (cache) { try { await cache.put(key, new Response(buf.slice(), { headers: { 'content-type': 'application/octet-stream' } })); } catch { /* 저장 공간 부족 등 — 다음에 다시 받음 */ } }
   return buf;
 }
 async function dropCache() { try { if (typeof caches !== 'undefined') await caches.delete(CACHE_NAME); } catch { /* 무시 */ } }
+// 두 파일을 같이 받으며 진행률을 하나로 (약 19MB)
+async function toolBytes({ onStage = null, signal = null } = {}) {
+  const got = { w: 0, m: 0 }, cached = { w: false, m: false };
+  const tell = () => { if (onStage) onStage({ stage: 'download', loaded: got.w + got.m, total: WASM_BYTES + MODEL_BYTES, cached: cached.w && cached.m }); };
+  const [wasm, model] = await Promise.all([
+    cachedBytes(WASM_URL, WASM_SHA256, { signal, expect: WASM_BYTES, onProgress: (n, _t, c) => { got.w = n; cached.w = !!c; tell(); } }),
+    cachedBytes(MODEL_URL, MODEL_SHA256, { signal, expect: MODEL_BYTES, onProgress: (n, _t, c) => { got.m = n; cached.m = !!c; tell(); } }),
+  ]);
+  return { wasm, model };
+}
+const ownBuffer = (u8) => (u8.byteOffset === 0 && u8.byteLength === u8.buffer.byteLength ? u8.buffer : u8.slice().buffer);
+
+// ── 화면 쪽에서 (일꾼을 못 쓰는 브라우저) ──
 let segP = null;
 // 배경 지우기 모델 준비 (처음 한 번 약 19MB를 받아서 이 기기에 저장해 둠 — 다음부터는 바로). 받은 모델은 해시로 확인
-export function loadSegmenter() {
+export function loadSegmenter(o = {}) {
   if (segP) return segP;
   segP = (async () => {
     const ort = await import(ORT_URL);
-    const [wasm, model] = await Promise.all([cachedBytes(WASM_URL, WASM_SHA256), cachedBytes(MODEL_URL, MODEL_SHA256)]);
+    const { wasm, model } = await toolBytes(o);
+    if (o.onStage) o.onStage({ stage: 'prepare' });
     ort.env.wasm.numThreads = 1;      // GitHub Pages 는 여러 스레드를 못 씀 (cross-origin isolation 없음)
     ort.env.wasm.proxy = false;
-    ort.env.wasm.wasmBinary = wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength);
+    ort.env.wasm.wasmBinary = ownBuffer(wasm);
     let session;
     try { session = await ort.InferenceSession.create(model, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' }); } catch (e) { await dropCache(); throw e; }
     return {
@@ -556,11 +757,89 @@ export function loadSegmenter() {
         const res = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, SEG_SIZE, SEG_SIZE]) });
         return res[session.outputNames[0]].data;
       },
+      release() { try { session.release(); } catch { /* 무시 */ } },
     };
   })();
   segP.catch(() => { segP = null; });
   return segP;
 }
+async function maskOnMain(rgba, w, h, { refine = false, onStage = null, signal = null } = {}) {
+  const seg = await loadSegmenter({ onStage, signal });
+  if (signal && signal.aborted) throw cancelled();
+  if (onStage) onStage({ stage: 'run', where: 'main' });
+  const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const run = (d, ww, hh) => seg.run(d, ww, hh);
+  const r = refine ? await twoPassMap(rgba, w, h, run) : { map: probToMap(await run(rgba, w, h), SEG_SIZE, w, h), refined: false };
+  if (signal && signal.aborted) throw cancelled();
+  const mask = mapToMask(r.map, rgba, w, h);
+  return { mask, quality: maskQuality(mask, w, h, rgba), refined: r.refined, where: 'main', ms: Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0) };
+}
+
+// ── 일꾼에서 (1.5.2 기본) ──
+// 처음 한 번 파일을 받아 넘기고, 끝나고 45초 동안 안 쓰면 일꾼을 끝내서 메모리를 풀어 (다음엔 이 기기에 저장된 파일로 금방 다시 준비)
+let SW = null, workerBroken = false, seqId = 0;
+const IDLE_MS = 45000;
+function killWorker(reason = 'cancelled') {
+  const sw = SW;
+  SW = null;
+  if (!sw) return;
+  clearTimeout(sw.idle);
+  try { sw.w.terminate(); } catch { /* 무시 */ }
+  for (const p of sw.pend.values()) p.no({ code: reason });
+  sw.pend.clear();
+}
+function ask(sw, msg, transfer, ms) {
+  const id = ++seqId;
+  return new Promise((ok, no) => {
+    const t = ms ? setTimeout(() => { if (sw.pend.has(id)) killWorker('timeout'); }, ms) : null;
+    sw.pend.set(id, { ok: (v) => { clearTimeout(t); ok(v); }, no: (e) => { clearTimeout(t); no(e); } });
+    sw.w.postMessage({ ...msg, id }, transfer || []);
+  });
+}
+async function workerReady({ onStage = null, signal = null } = {}) {
+  if (SW) { clearTimeout(SW.idle); return SW.ready; }
+  const w = new Worker(new URL(WORKER_URL, import.meta.url), { type: 'module' });
+  const sw = { w, pend: new Map(), idle: null, ready: null };
+  SW = sw;
+  w.onmessage = (ev) => {
+    const m = ev.data || {};
+    const p = sw.pend.get(m.id);
+    if (!p) return;
+    sw.pend.delete(m.id);
+    if (m.type === 'error') p.no(new Error(m.message || 'worker'));
+    else p.ok(m);
+  };
+  // 일꾼 파일을 못 읽었거나(옛 브라우저는 module 일꾼을 못 씀) 안에서 죽으면 → 화면 쪽으로 (한 번 실패하면 이번 접속 동안은 계속 화면 쪽)
+  w.onerror = (e) => { if (e && e.preventDefault) e.preventDefault(); workerBroken = true; if (SW === sw) killWorker('worker_failed'); };
+  sw.ready = (async () => {
+    const { wasm, model } = await toolBytes({ onStage, signal });
+    if (SW !== sw) throw cancelled();
+    if (onStage) onStage({ stage: 'prepare' });
+    await ask(sw, { type: 'init', wasm: ownBuffer(wasm), model: ownBuffer(model) }, [], 90000);
+    return sw;
+  })();
+  sw.ready.catch(() => { if (SW === sw) killWorker('worker_failed'); });
+  return sw.ready;
+}
+async function maskInWorker(rgba, w, h, { refine = false, onStage = null, signal = null } = {}) {
+  const onAbort = () => killWorker('cancelled');
+  if (signal) { if (signal.aborted) throw cancelled(); signal.addEventListener('abort', onAbort, { once: true }); }
+  try {
+    const sw = await workerReady({ onStage, signal });
+    if (onStage) onStage({ stage: 'run', where: 'worker' });
+    const copy = Uint8ClampedArray.from(rgba); // 넘기면 원래 배열이 비게 돼서 사본을 넘김 (화면이 쓰는 상품 사진은 그대로)
+    const r = await ask(sw, { type: 'mask', rgba: copy, w, h, refine }, [copy.buffer], refine ? 150000 : 90000);
+    if (SW === sw) { clearTimeout(sw.idle); sw.idle = setTimeout(() => { if (SW === sw && !sw.pend.size) killWorker('idle'); }, IDLE_MS); }
+    return { mask: r.mask, quality: r.quality, refined: r.refined, where: 'worker', ms: r.ms };
+  } finally { if (signal) signal.removeEventListener('abort', onAbort); }
+}
+// 배경 지우기 도구를 메모리에서 내림 (상품 화면을 나갈 때·합성을 저장하기 전 — 아이폰처럼 메모리가 빠듯한 기기를 위해)
+export function releaseSegmenter() {
+  killWorker('idle');
+  if (segP) { const p = segP; segP = null; p.then((s) => s && s.release && s.release()).catch(() => {}); }
+}
+export const segmenterState = () => ({ worker: !!SW, workerBroken, main: !!segP });
+
 // 이미지(주소·Blob) → RGBA (maxSide 를 주면 같은 비율로 줄여서)
 export async function decodeImage(src, maxSide = 0) {
   const blob = src instanceof Blob ? src : await (await fetch(src, { mode: 'cors', credentials: 'omit', cache: 'no-store' })).blob();
@@ -574,6 +853,7 @@ export async function decodeImage(src, maxSide = 0) {
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d', { willReadFrequently: true });
+  if (!ctx) { if (bmp.close) bmp.close(); throw new Error('canvas'); } // 아이폰에서 캔버스 메모리가 모자라면 null
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(bmp, 0, 0, w, h);
   const data = ctx.getImageData(0, 0, w, h).data;
@@ -581,14 +861,17 @@ export async function decodeImage(src, maxSide = 0) {
   cv.width = 0; cv.height = 0;
   return { data, w, h, blob, srcW: W, srcH: H, scaled: s < 1 }; // scaled: 원래 사진이 maxSide 보다 커서 줄여 읽었는지
 }
-export function rgbaCanvas(data, w, h) {
+export function rgbaCanvas(data, w, h, opaque = false) {
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
-  cv.getContext('2d').putImageData(new ImageData(data instanceof Uint8ClampedArray ? data : new Uint8ClampedArray(data), w, h), 0, 0);
+  const ctx = cv.getContext('2d', opaque ? { alpha: false } : undefined);
+  if (!ctx) throw new Error('canvas');
+  ctx.putImageData(new ImageData(data instanceof Uint8ClampedArray ? data : new Uint8ClampedArray(data), w, h), 0, 0);
   return cv;
 }
-export function toPngBlob(data, w, h) {
-  const cv = rgbaCanvas(data, w, h);
+// PNG 로 (무손실). opaque: 모든 칸이 불투명한 그림(합성 결과)은 투명도 칸 없이 — 브라우저에 따라 파일이 작아짐 (픽셀 값은 같음, 화면 시험으로 확인)
+export function toPngBlob(data, w, h, { opaque = false } = {}) {
+  const cv = rgbaCanvas(data, w, h, opaque);
   return new Promise((ok, no) => cv.toBlob((b) => { cv.width = 0; cv.height = 0; if (b) ok(b); else no(new Error('png')); }, 'image/png'));
 }
 // 마스크 저장 모양: 흰색 + 투명도 = 마스크 (불투명 = 남김) — 그대로 보면 상품 실루엣
@@ -601,18 +884,30 @@ export async function maskFromPng(src) {
   const { data, w, h } = await decodeImage(src);
   return { data: alphaMask(data, w, h), w, h };
 }
-// 자동 마스크: 모델(U²-Netp) → 안 되면 간단히(테두리 색). 사진에 원래 투명한 부분이 있으면 그걸로
-export async function autoMask(rgba, w, h, { useModel = true } = {}) {
-  if (hasTransparency(rgba)) return { mask: keepMain(alphaMask(rgba, w, h), w, h), method: 'alpha' };
+// 자동 마스크: 모델(U²-Netp — 일꾼, 안 되면 화면 쪽) → 안 되면 간단히(테두리 색). 사진에 원래 투명한 부분이 있으면 그걸로
+// opts: refine(2단계 정밀하게), onStage({stage:'download'|'prepare'|'run', loaded, total, where}), signal(취소)
+// 취소·시간 초과는 오류로 던짐 (마스크를 바꾸지 않음) — 그 밖의 실패는 간단한 방법으로 만들고 error 에 이유
+export async function autoMask(rgba, w, h, { useModel = true, refine = false, onStage = null, signal = null } = {}) {
+  const done = (mask, method, extra = {}) => ({ mask, method, quality: extra.quality || maskQuality(mask, w, h, rgba), ...extra });
+  if (hasTransparency(rgba)) return done(keepMain(alphaMask(rgba, w, h), w, h), 'alpha');
   if (useModel) {
+    const tier = deviceTier();
+    if (!tier.model) return done(simpleMask(rgba, w, h), 'auto_simple', { error: 'no_simd' });
     try {
-      const seg = await loadSegmenter();
-      const prob = await seg.run(rgba, w, h);
-      const map = probToMap(prob, SEG_SIZE, w, h);
-      return { mask: mapToMask(map, rgba, w, h), method: 'auto_u2netp' };
+      let r = null;
+      if (tier.worker && !workerBroken) {
+        try { r = await maskInWorker(rgba, w, h, { refine, onStage, signal }); } catch (e) {
+          if (e && ['cancelled', 'timeout'].includes(e.code)) throw e;
+          if (e && /model_hash|wasm_hash|fetch/.test(String(e.message || ''))) throw e;
+          workerBroken = true; // 일꾼만 안 되는 브라우저 → 화면 쪽으로 다시
+        }
+      }
+      if (!r) r = await maskOnMain(rgba, w, h, { refine, onStage, signal });
+      return done(r.mask, 'auto_u2netp', { quality: r.quality, refined: !!r.refined, where: r.where, ms: r.ms });
     } catch (e) {
-      return { mask: simpleMask(rgba, w, h), method: 'auto_simple', error: String((e && e.message) || e) };
+      if (e && ['cancelled', 'timeout'].includes(e.code)) throw e;
+      return done(simpleMask(rgba, w, h), 'auto_simple', { error: String((e && (e.code || e.message)) || e) });
     }
   }
-  return { mask: simpleMask(rgba, w, h), method: 'auto_simple' };
+  return done(simpleMask(rgba, w, h), 'auto_simple');
 }

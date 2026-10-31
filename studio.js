@@ -1,9 +1,9 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.5.1';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.5.1';
-import { createProduct, PRODUCT_ERR } from './product.js?v=1.5.1';
+import * as IMG from './images.js?v=1.5.2';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.5.2';
+import { createProduct, PRODUCT_ERR } from './product.js?v=1.5.2';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -40,6 +40,10 @@ export const IMAGE_ERR = {
   openai_unsupported_option: '이 모델이 그 크기·품질을 지원하지 않아. 설정 > 이미지에서 모델이나 품질을 바꿔줘.',
   openai_spend_limit: 'OpenAI에 걸어둔 사용 한도(Spend limit)에 닿았어. OpenAI 설정의 Limits에서 한도를 올리거나 다음 달까지 기다려줘.',
   timeout: '응답이 너무 늦어. 다시 눌러줘 (같은 요청이면 두 번 만들지 않아).',
+  // 1.5.2
+  offline: '인터넷이 끊겼어. 연결되면 다시 눌러줘 (만든 것은 그대로 있어).',
+  cancelled: '취소했어.',
+  image_in_other_slot: '이 이미지는 이 글의 다른 사진 자리에 이미 들어 있어. 자리마다 다른 이미지를 넣거나, 그 자리에서 옮겨 와줘.',
   cf_key_missing: '무료 이미지(Cloudflare) 계정 ID·토큰이 아직 없어. 설정 > 이미지에서 방법을 봐줘. 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.',
   cf_key_invalid: 'Cloudflare 계정 ID나 토큰이 맞지 않아. Supabase Secrets의 CF_ACCOUNT_ID·CF_API_TOKEN을 확인해줘.',
   cf_daily_free_used: '오늘 무료 사용량을 다 썼어. 한국 시간 오전 9시에 다시 채워져. (청구 없음)',
@@ -400,6 +404,10 @@ export function createStudio(ui) {
     if (genProv === 'gemini' && !(d.keys || {}).gemini) kids.push(h('p', { class: 'hint' }, 'AI 이미지: Gemini API 키가 아직 없어 (설정 > 이미지에서 방법 보기). 사진 찾기·직접 올리기·카드뉴스는 지금도 돼.'));
     if (st.image_gen_model === TEST_MODEL) kids.push(h('p', { class: 'notice' }, "설정의 생성 모델이 점검용 가짜 모델(gf-test-fake)이야. 실제 이미지가 아니라 회색 시험 그림이 나와."));
     if (!slots.length) kids.push(h('p', { class: 'hint' }, "본문에 [이미지: 설명] 줄이 없어. '본문 고치기'에서 사진이 들어갈 곳에 [이미지: 설명] 한 줄을 넣으면 여기에 자리가 생겨."));
+    // 1.5.2: 같은 이미지가 본문 여러 자리에 반복되면 그 자리들에 알림 (자리마다 다른 장면이어야 글이 덜 단조로움)
+    d._dups = IMG.duplicateSlots(slots.filter((x) => x.row && x.row.image_id).map((x) => ({ slot_key: x.key, image_id: x.row.image_id })));
+    const dupN = Object.keys(d._dups).length;
+    if (dupN) kids.push(h('p', { class: 'notice' }, `같은 이미지를 여러 자리에 넣은 곳이 ${dupN}군데 있어. 자리마다 다른 이미지를 넣어줘 (아래 자리에 표시).`));
     slots.forEach((s, i) => kids.push(slotCard(p, d, s, imgs, slots[i - 1], slots[i + 1])));
     const ex = det('img-extra:' + p.id, `블로그 대표·SNS용 이미지 (${extraLinked.length}/${extra.length})`, extraLinked.length > 0, '');
     ex.append(h('div', { class: 'stack', style: 'margin-top:8px' }, extra.map((s) => slotCard(p, d, s, imgs))));
@@ -438,6 +446,22 @@ export function createStudio(ui) {
     } else chips.append(h('span', { class: 'chip' }, running ? '만드는 중' : '이미지 없음'));
     card.append(h('div', { class: 'split' }, h('b', null, slotName(s)), chips));
     if (s.n) card.append(h('p', { class: 'slot-t' }, s.text || '(설명 없음)'));
+    // 1.5.2 자리 정보 (지시서 10번): 왜 필요한지·상품 사진이 필요한지·AI로 대신할 수 있는지·직접 찍어야 하는지·추천 프리셋·상태
+    if (s.n) {
+      const info = IMG.slotInfo(s, { post: p });
+      const scene = img ? IMG.productSceneMode(img) : '';
+      const reviewOk = img && img.review_status === '사용 가능' && (!scene || IMG.productApproved(img));
+      const dupKeys = img && d._dups ? d._dups[img.id] : null;
+      const ready = img && reviewOk && !dupKeys && !(info.ai === 'no' && img.kind !== 'upload');
+      card.append(h('div', { class: 'slotinfo' },
+        h('small', null, `왜: ${info.why} · 보여줄 것: ${info.explains}`),
+        h('small', null, info.ai === 'no' ? '직접 찍은 사진만 (AI·합성 안 됨)' : info.ai === 'real' ? '실제 상품이 보여야 해 — 직접 찍은 사진·공식 사진·원본 보존 합성 권장 (AI 실사 장면은 원본과 비교해서)' : `AI 장면으로 대신해도 돼 · 추천 종류: ${info.preset_label} (${info.preset_why})`),
+        h('small', null, `상태: ${running ? '만드는 중' : img ? '이미지 있음' : '이미지 없음'}${img ? ` · 검수 ${scene && !IMG.productApproved(img) ? '상품 검수 전' : img.review_status}` : ''} · 게시 준비 ${ready ? '됨 ✓' : '아직'}`)));
+      if (dupKeys) {
+        const others = dupKeys.filter((k) => k !== s.key).map((k) => (d.slots || []).find((x) => x.key === k)).filter(Boolean).map((x) => slotName(x));
+        card.append(h('p', { class: 'notice' }, `이 이미지가 ${others.join('·')}에도 들어 있어. 자리마다 다른 이미지를 넣어줘.`));
+      }
+    }
     const risk = s.n ? IMG.slotRisk(s.text) : { real: false };
     // 진짜 제품 사진을 참고한 AI 합성은 '실제 사진을 권해' 대신 원본과 비교하라고 (1.5.0)
     // 1.5.1: 상품 장면 이미지는 상품 디테일 검수를 승인해야 '사용 가능'·발행 준비 완료
@@ -543,8 +567,26 @@ export function createStudio(ui) {
   // ── 연결·빼기·순서·사용 완료 ──
   // extra: { purpose } — AI로 만든 바로 그 이미지를 연결할 때는 만들 때 고른 용도로 (내려받을 때 고른 비율로 자르게)
   async function linkTo(p, s, img, button, extra) {
-    const j = await run(button, () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, ...(extra || {}) } }), `${slotName(s)}에 연결했어`);
-    if (j) await refresh(p.id);
+    let moveFrom = '';
+    const j = await run(button, async () => {
+      try { return await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, ...(extra || {}) } }); } catch (e) {
+        // 1.5.2: 같은 이미지가 이 글의 다른 사진 자리에 이미 있으면 → 옮겨 올지 물어봄 (반복해서 쓰지 않게)
+        if (e && e.code === 'image_in_other_slot') { moveFrom = String(e.slot_key || ''); return null; }
+        throw e;
+      }
+    }, undefined);
+    if (moveFrom) {
+      const other = ((dataOf(p.id) || {}).slots || []).find((x) => x.key === moveFrom);
+      openSheet('같은 이미지가 다른 자리에 있어',
+        thumb(img, null),
+        h('p', null, `이 이미지는 ${other ? slotName(other) : '이 글의 다른 사진 자리'}에 이미 들어 있어. 자리마다 다른 이미지를 넣는 게 좋아.`),
+        h('div', { class: 'go' }, btn(`${other ? slotName(other) : '그 자리'}에서 ${slotName(s)}로 옮기기`, 'sm', async (ev) => {
+          const r = await run(ev.currentTarget, () => api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, move: true, ...(extra || {}) } }), `${slotName(s)}로 옮겼어`);
+          if (r) { closeSheet(); await refresh(p.id); }
+        }), btn('그대로 두기', 'sm ghost', closeSheet)));
+      return null;
+    }
+    if (j) { toast(`${slotName(s)}에 연결했어`); await refresh(p.id); }
     return j;
   }
   async function unlink(p, s, button) {
@@ -579,7 +621,7 @@ export function createStudio(ui) {
       h('p', { class: 'hint' }, '이 이미지를 넣을 자리를 골라줘. 그 자리에 있던 이미지는 보관함에 그대로 남아.'),
       h('div', { class: 'stack' }, slots.map((s) => btn(`${slotName(s)} · ${s.text}`, 'wide ghost', async (ev) => {
         const ok = await run(ev.currentTarget, async () => {
-          await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id } });
+          await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: s.key, image_id: img.id, move: true } });
           await api(`/posts/${p.id}/images/link`, { method: 'POST', body: { slot_key: o.slot_key, image_id: null } });
           return true;
         }, `${slotName(s)}에 연결했어`);
