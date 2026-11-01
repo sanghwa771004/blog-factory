@@ -3363,6 +3363,54 @@ def main():
             no_overflow('1.5.2 간단 모드')
         check('1.5.2 처리 중 페이지가 꺼졌던 기기는 간단 모드로 열고 이유를 알림·보통으로 되돌리기 (기기에는 모드 표시만)', t_product_152_device)
 
+        # 1.5.2 실서비스 시험(2026-11-02) 뒤 고침: 상품 사진·참고 사진을 올릴 때 출처는 처음에 '잘 모르겠어 (출처 확인 필요)'
+        # (예전엔 '내가 직접 찍은 사진'이 미리 골라져 있어서 제조사 광고 이미지가 직접 촬영으로 올라갔음 — 올렸다고 직접 찍은 사진으로 보지 않음)
+        def t_upload_source_default():
+            close_sheet()
+            goto_hash('content/images')
+            page.get_by_role('button', name='이 상품으로 장면 만들기').first.click()
+            view = page.locator('.view.product')
+            expect(view.get_by_role('heading', name='이 상품으로 장면 만들기')).to_be_visible()
+            page.wait_for_timeout(600)
+            if view.get_by_role('button', name='새로 시작하기').count():
+                view.get_by_role('button', name='새로 시작하기').click()
+            view.get_by_role('button', name='사진 올리기', exact=True).click()
+            src = sheet.get_by_label('이 사진은 어디서 났어?')
+            expect(src).to_have_value('')
+            expect(sheet).to_contain_text("안 고르면 '출처 확인 필요'로 남아")
+            sheet.locator('input[type=file]').set_input_files(str(FIX / 'img' / 'exif.jpg'))
+            expect(sheet).to_contain_text('80×60')
+            sheet.get_by_label('내가 찍었거나 쓸 권한이 있는 사진이야').check()
+            n0 = len([c for c in mock.calls if c['path'] == 'images/upload'])
+            sheet.get_by_role('button', name='올리기', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('올렸어')
+            ups = [c for c in mock.calls if c['path'] == 'images/upload']
+            assert len(ups) == n0 + 1 and ups[-1]['body']['meta']['source_type'] == '', ('출처를 안 고르면 빈칸 (직접 촬영으로 보내지 않음)', ups[-1]['body']['meta'])
+            expect(view).to_contain_text('출처 확인 필요')
+            expect(view).to_contain_text('직접 찍은 사진이 아니면 그 사진의 이용 조건을 꼭 확인해줘')
+            view.get_by_role('button', name='새 사진 올리기').click()
+            src = sheet.get_by_label('이 사진은 어디서 났어?')
+            expect(src).to_have_value('')
+            src.select_option('own')  # 직접 찍었으면 골라서 올림
+            sheet.locator('input[type=file]').set_input_files(str(FIX / 'img' / 'exif.jpg'))
+            expect(sheet).to_contain_text('80×60')
+            sheet.get_by_label('내가 찍었거나 쓸 권한이 있는 사진이야').check()
+            sheet.get_by_role('button', name='올리기', exact=True).click()
+            expect(page.locator('#toast')).to_contain_text('올렸어')
+            assert [c for c in mock.calls if c['path'] == 'images/upload'][-1]['body']['meta']['source_type'] == 'own', '고른 출처는 그대로'
+            # 참고 사진 올리기 (AI 만들기 창)도 처음엔 '출처 확인 필요'
+            open_p8()
+            open_ai(1)
+            up_btn = sheet.get_by_role('button', name='참고 사진 올리기')
+            if not up_btn.is_visible():
+                sheet.locator('summary', has_text='참고 사진').click()
+            up_btn.click()
+            expect(sheet.get_by_label('이 사진은 어디서 났어?')).to_have_value('')
+            expect(sheet).to_contain_text("안 고르면 '출처 확인 필요'로 남아")
+            sheet.get_by_role('button', name='돌아가기').click()
+            close_sheet()
+        check("1.5.2 고침: 상품 사진·참고 사진을 올릴 때 출처는 처음에 '출처 확인 필요' (직접 촬영은 골라야), 고르면 그대로", t_upload_source_default)
+
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
             close_sheet()  # 앞 시험이 연 창이 남아 있으면 닫고 (창이 새로고침 버튼을 가리지 않게)

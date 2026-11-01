@@ -1171,7 +1171,7 @@ export function createStudio(ui) {
     const picker = h('label', { class: 'btn sm filebtn' }, pickLabel, input);
     const preview = h('div', { class: 'stack' });
     const rights = h('input', { type: 'checkbox' });
-    const srcSel = sourceSelect('own');
+    const srcSel = sourceSelect(''); // 처음엔 '출처 확인 필요' — 직접 찍었으면 사용자가 골라야 '직접 촬영' (상품 사진 올리기와 같게)
     const desc = h('input', { type: 'text', value: '', maxlength: '300', placeholder: '예: 우리 집 제습기 정면' });
     let ready = null, prevUrl = null;
     const goBtn = btn('올리고 참고 사진으로 쓰기', 'wide', () => send(), { disabled: true });
@@ -1199,7 +1199,7 @@ export function createStudio(ui) {
     openSheet('참고 사진 올리기',
       h('p', { class: 'hint' }, '진짜 제품 사진(직접 찍은 사진이 제일 좋아)을 올리면 AI가 그 모양을 유지하려고 해. 보관함에도 남아 (이 사진 자체는 원고 자리에 연결하지 않아).'),
       h('div', { class: 'go' }, picker), preview,
-      field('이 사진은 어디서 났어?', srcSel, '공식·외부 사진을 참고하면 그 사진의 이용 조건을 따라야 해.'),
+      field('이 사진은 어디서 났어?', srcSel, "네가 직접 찍은 사진이면 '내가 직접 찍은 사진'을 골라줘. 안 고르면 '출처 확인 필요'로 남아. 공식·외부 사진을 참고하면 그 사진의 이용 조건을 따라야 해."),
       h('label', { class: 'chk' }, rights, '내가 찍었거나 쓸 권한이 있는 사진이야'),
       field('사진 설명', desc), goBtn, h('div', { class: 'go' }, btn('돌아가기', 'sm ghost', () => { dropUrl(); back(); })));
     ui.setSheetOnClose(dropUrl);

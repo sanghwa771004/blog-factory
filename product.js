@@ -1382,7 +1382,8 @@ export function createProduct(ui, kit) {
     const picker = h('label', { class: 'btn sm filebtn' }, pickLabel, input);
     const preview = h('div', { class: 'stack' });
     const rights = h('input', { type: 'checkbox' });
-    const srcSel = sourceSelect('own');
+    // 처음엔 '잘 모르겠어 (출처 확인 필요)' — 올렸다고 직접 찍은 사진으로 보지 않음. 직접 찍었으면 사용자가 골라야 '직접 촬영' (1.5.2 실제 시험에서 광고 이미지가 직접 촬영으로 올라가서 고침)
+    const srcSel = sourceSelect('');
     const desc = h('input', { type: 'text', value: '', maxlength: '300', placeholder: '예: 우리 집 전기요 정면' });
     let ready = null, prevUrl = null;
     const goBtn = btn('올리기', 'wide', () => send(), { disabled: true });
@@ -1410,7 +1411,7 @@ export function createProduct(ui, kit) {
     openSheet('상품 사진 올리기',
       h('p', { class: 'hint' }, '상품이 잘 보이게 찍은 사진. 원본은 보관함에 그대로 남고, 합성은 새 이미지로 따로 저장돼.'),
       h('div', { class: 'go' }, picker), preview,
-      field('이 사진은 어디서 났어?', srcSel, '공식·외부 사진은 그 사진의 이용 조건을 따라야 해.'),
+      field('이 사진은 어디서 났어?', srcSel, "네가 직접 찍은 사진이면 '내가 직접 찍은 사진'을 골라줘. 안 고르면 '출처 확인 필요'로 남아 (직접 찍은 사진으로 세지 않아). 공식·외부 사진은 그 사진의 이용 조건을 따라야 해."),
       h('label', { class: 'chk' }, rights, '내가 찍었거나 쓸 권한이 있는 사진이야'),
       field('사진 설명', desc), goBtn);
     ui.setSheetOnClose(dropUrl);
