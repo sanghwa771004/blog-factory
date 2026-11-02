@@ -1,9 +1,9 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.5.2';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.5.2';
-import { createProduct, PRODUCT_ERR } from './product.js?v=1.5.2';
+import * as IMG from './images.js?v=1.6.0';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.6.0';
+import { createProduct, PRODUCT_ERR } from './product.js?v=1.6.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -448,6 +448,8 @@ export function createStudio(ui) {
     } else chips.append(h('span', { class: 'chip' }, running ? '만드는 중' : '이미지 없음'));
     card.append(h('div', { class: 'split' }, h('b', null, slotName(s)), chips));
     if (s.n) card.append(h('p', { class: 'slot-t' }, s.text || '(설명 없음)'));
+    // 1.6.0: 원고에 적힌 제미나이 프롬프트 (제미나이에서 직접 만들 때 복사)
+    if (s.n && s.prompt) card.append(h('div', { class: 'go' }, h('span', { class: 'hint' }, '제미나이 프롬프트 있음'), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(s.prompt, ev.currentTarget) }, '프롬프트 복사')));
     // 1.5.2 자리 정보 (지시서 10번): 왜 필요한지·상품 사진이 필요한지·AI로 대신할 수 있는지·직접 찍어야 하는지·추천 프리셋·상태
     if (s.n) {
       const info = IMG.slotInfo(s, { post: p });

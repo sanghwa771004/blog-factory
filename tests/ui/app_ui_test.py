@@ -117,6 +117,8 @@ class Mock:
         self.post_channels, self.search_terms = [], []  # 1.4.0 다른 채널 기록·유입 검색어
         self.unavailable = []      # 서버가 못 읽은 표처럼 (DB 016 전·오류) → 화면은 데이터 없음
         self.fail_stats_from = set()  # 이 시작일의 통계 요청은 서버 오류로 답함 (홈이 '불러오는 중'에 멈추지 않는지)
+        self.plan_today = None     # 1.6.0 서버의 오늘 계획 (020 전 서버면 None)
+        self.expired = None        # 1.6.0 서버가 이번 조회에서 휴지통으로 옮긴 자동 원고 (한 번만 알려줌)
         self.seq = 100
         P1, P2, P3, P4, P5, P6, P7 = (uid(i) for i in range(1, 8))
         self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, P6=P6, P7=P7, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
@@ -358,7 +360,8 @@ class Mock:
 
     def state(self):
         live = [p for p in self.posts if not p['deleted_at']]
-        return {'version': json.loads((ROOT / 'version.json').read_text(encoding='utf-8'))['version'], 'now': NOW, 'today': TODAY.isoformat(), 'auth': 'session', 'posts': live, 'trash': [], 'jobs': self.jobs,
+        return {'version': json.loads((ROOT / 'version.json').read_text(encoding='utf-8'))['version'], 'now': NOW, 'today': TODAY.isoformat(), 'auth': 'session', 'posts': live,
+                'trash': [{k: p.get(k) for k in ('id', 'titles', 'keyword', 'deleted_at')} for p in self.posts if p['deleted_at']], 'jobs': self.jobs,
                 'settings': self.settings, 'runs': self.runs, 'channels': self.channels, 'programs': self.programs, 'compat': self.compat,
                 'topics': self.topics, 'products': self.products, 'post_products': self.post_products, 'links': self.links,
                 'imports': self.imports, 'image_slots': self.image_slots_state(),
@@ -366,7 +369,12 @@ class Mock:
                 'search_terms': [] if 'search_terms' in self.unavailable else self.search_terms,
                 'metric_post_ids': [] if 'metric_post_ids' in self.unavailable else sorted({m['post_id'] for m in self.metrics if m.get('post_id')}),
                 'unavailable': list(self.unavailable),
-                'runs_auto_7d': sum(1 for r in self.runs if r.get('kind') == 'auto' and str(r.get('ran_at', ''))[:10] >= D(-6))}
+                'runs_auto_7d': sum(1 for r in self.runs if r.get('kind') == 'auto' and str(r.get('ran_at', ''))[:10] >= D(-6)),
+                'plan_today': self.plan_today, 'expired': self._take_expired()}
+
+    def _take_expired(self):
+        e, self.expired = self.expired, None  # 서버처럼: 옮긴 건 그 조회 한 번에만 알려줌
+        return e
 
     def verdict(self, prog, ch):
         row = next((c for c in self.compat if c['program_id'] == prog and c['channel_id'] == ch), None)
@@ -432,7 +440,25 @@ class Mock:
                                'content_type': body.get('content_type') or ''})
             self.jobs.append({**deepcopy(self.jobs[0]), 'id': jid, 'post_id': pid, 'keyword': body['keyword']})
             return 200, {'post_id': pid, 'job_id': jid}
+        m = re.fullmatch(r'posts/([0-9a-f-]{36})/restore', path)
+        if m and method == 'POST':  # 서버처럼: 되살리고, 보관일이 지난 자동 원고면 보관으로 (다시 자동 정리되지 않게)
+            p = next((x for x in self.posts if x['id'] == m.group(1) and x['deleted_at']), None)
+            if not p:
+                return 404, {'error': 'not_found'}
+            p['deleted_at'] = None
+            days = int(self.settings.get('keep_days') or 3)
+            made = datetime.fromisoformat(str(p.get('created_at') or NOW)).astimezone(KST).date()
+            kept = p.get('source') == 'auto' and p.get('keep') is False and made < TODAY - timedelta(days=days - 1)
+            if kept:
+                p['keep'] = True
+            return 200, {'post': p, 'demoted': False, 'kept': kept}
         m = re.fullmatch(r'posts/([0-9a-f-]{36})', path)
+        if m and method == 'DELETE':  # 서버처럼 휴지통으로 (deleted_at)
+            p = next((x for x in self.posts if x['id'] == m.group(1) and not x['deleted_at']), None)
+            if not p:
+                return 404, {'error': 'not_found'}
+            p['deleted_at'] = NOW
+            return 200, {'ok': True}
         if m and method == 'POST':
             p = next(x for x in self.posts if x['id'] == m.group(1))
             stage = body.get('stage')
@@ -3410,6 +3436,141 @@ def main():
             sheet.get_by_role('button', name='돌아가기').click()
             close_sheet()
         check("1.5.2 고침: 상품 사진·참고 사진을 올릴 때 출처는 처음에 '출처 확인 필요' (직접 촬영은 골라야), 고르면 그대로", t_upload_source_default)
+
+        # ═════════ 1.6.0 하루 계획 운영 ═════════
+        def clip_text():
+            return page.evaluate("navigator.clipboard.readText()")
+
+        def clip_html():
+            return page.evaluate("""async () => { const items = await navigator.clipboard.read(); for (const it of items) if (it.types.includes('text/html')) return await (await it.getType('text/html')).text(); return ''; }""")
+
+        def t_plan_160():
+            close_sheet()
+            ctx.grant_permissions(['clipboard-read', 'clipboard-write'])
+            saved = {k: mock.settings.get(k) for k in ('daily_plan', 'keep_days')}
+            P, OLD, OLD2 = mock.new_id(), mock.new_id(), mock.new_id()
+            body = ('[이미지: 거실 창가에 놓인 흰색 가습기]\n[프롬프트: 햇살 드는 거실 창가 선반 위 상표 없는 흰 가습기, 정면 45도, 1:1 정사각형, 이미지 안에 글자 없이]\n'
+                    '## 가습기 고르기 전에 볼 것\n' + ('겨울엔 실내 습도를 먼저 봐요. ' * 15) + '\n==습도 40~60%==를 맞추는 게 먼저예요.\n> 핵심: 세척 편한지부터 봐\n'
+                    '[이미지: 물통을 씻는 손]\n[프롬프트: 주방 개수대에서 분리한 물통을 씻는 손, 위에서 본 구도, 4:3, 글자 없이]\n'
+                    '## 정리\n- 세척 쉬운 구조\n[이미지: 침실 협탁 위 작은 가습기]\n[프롬프트: 침실 협탁 위 작은 가습기, 밤 조명, 4:3, 글자 없이]')
+            base = dict(mock.posts[0])
+            mock.posts.append({**base, 'id': P, 'keyword': '겨울 가습기 세척 쉬운 제품', 'titles': ['겨울 가습기 세척 쉬운 제품 고르기'], 'stage': 'review', 'program_ids': ['naver_adpost'],
+                               'content_type': 'checklist', 'publish_date': D(0), 'created_at': NOW, 'source': 'auto', 'plan_kind': 'adpost', 'keep': False, 'body': body})
+            mock.posts.append({**base, 'id': OLD, 'keyword': '코스피 마감 외국인 순매도 이유', 'titles': ['오늘 코스피 마감 정리'], 'stage': 'review', 'program_ids': ['naver_adpost'],
+                               'content_type': 'market_summary', 'publish_date': D(0), 'created_at': NOW, 'source': 'auto', 'plan_kind': 'market', 'keep': False, 'body': long_body('')})
+            ago = lambda d: (datetime.now(timezone.utc) - timedelta(days=d)).isoformat()
+            mock.posts.append({**base, 'id': OLD2, 'keyword': '전기요 화재 예방 안전 사용법', 'titles': ['작년 겨울 전기요 정리'], 'stage': 'review', 'program_ids': ['naver_adpost'],
+                               'content_type': 'checklist', 'publish_date': D(-9), 'created_at': ago(10), 'deleted_at': ago(1), 'source': 'auto', 'plan_kind': '', 'keep': False, 'body': long_body('')})
+            mock.settings['daily_plan'] = {'affiliate': 2, 'adpost': 2, 'trending': 2, 'market': 2, 'stock': 2}
+            mock.settings['keep_days'] = 3
+            mock.plan_today = {'date': D(0), 'plan': mock.settings['daily_plan'], 'keep_days': 3, 'done': {'affiliate': 2, 'adpost': 1, 'market': 1}}
+            mock.expired = {'expired': 5, 'keep_days': 3, 'kept_from': D(-2)}
+            try:
+                reload_keys()
+                expect(page.locator('#toast')).to_contain_text('만든 지 3일 지난 자동 원고 5개를 휴지통으로 옮겼어')
+                # 홈: 오늘 하루 계획 (실행별), 오늘 올릴 원고
+                goto_hash('home')
+                writer = page.locator('section.panel', has=page.locator('h2', has_text='자동 작가'))
+                expect(writer).to_contain_text('오늘 하루 계획 4/10편')
+                expect(writer).to_contain_text('아침 · 오전 8:51')
+                expect(writer).to_contain_text('쿠팡·토스 2/2 · 애드포스트 1/2')
+                expect(writer).to_contain_text('점심 · 오후 1:21')
+                expect(writer).to_contain_text('저녁 · 저녁 6:51')
+                expect(writer).not_to_contain_text('앞으로 7일(내일부터)')
+                today_box = page.locator('section.panel', has=page.locator('h2', has_text='오늘 올릴 원고'))
+                expect(today_box).to_contain_text('겨울 가습기 세척 쉬운 제품 고르기')
+                no_overflow('1.6.0 홈 하루 계획')
+                # 원고 목록: 계획 종류·정리 날짜·지우기(두 번 눌러야)
+                goto_hash('content')
+                item = page.locator('#view .list .item', has_text='오늘 코스피 마감 정리')
+                expect(item).to_contain_text('증시 정리')
+                expect(item).to_contain_text('정리')
+                expect(page.locator('#view')).to_contain_text('자동 원고는 만든 날부터 3일이 지나면 휴지통으로 가')
+                del_btn = item.locator('button.del')  # 누르면 글자가 바뀌어서 이름 대신 클래스로
+                del_btn.click()
+                expect(del_btn).to_contain_text('휴지통으로? 한 번 더 눌러줘')
+                assert not [c for c in mock.calls if c['method'] == 'DELETE' and c['path'] == f'posts/{OLD}'], '한 번 누르면 안 지움'
+                del_btn.click()
+                expect(page.locator('#toast')).to_contain_text('휴지통으로 보냈어')
+                assert [c for c in mock.calls if c['method'] == 'DELETE' and c['path'] == f'posts/{OLD}']
+                expect(page.locator('#view .list .item', has_text='오늘 코스피 마감 정리')).to_have_count(0)
+                shot('60-plan160-list')
+                # 원고 화면: 다 올렸어·지우기 / 보관
+                goto_hash('content/post/' + P)
+                head = page.locator('section.panel.hi')
+                expect(head).to_contain_text('애드포스트 유입 글')
+                expect(head.get_by_role('button', name='다 올렸어 · 지우기')).to_be_visible()
+                expect(head).to_contain_text('자동 원고라')
+                head.get_by_role('button', name='보관 (자동 정리 안 함)').click()
+                expect(page.locator('#toast')).to_contain_text('보관했어')
+                last = [c for c in mock.calls if c['method'] == 'POST' and c['path'] == f'posts/{P}'][-1]['body']
+                assert last == {'keep': True}, last
+                expect(page.locator('section.panel.hi').get_by_role('button', name='보관 풀기')).to_be_visible()
+                expect(page.locator('section.panel.hi')).to_contain_text('보관한 원고라 자동 정리되지 않아')
+                # 미리보기: 사진 자리 아래 제미나이 프롬프트와 복사
+                pv = page.locator(f'#pv-{P}')
+                expect(pv.locator('.gprompt')).to_have_count(3)
+                expect(pv.locator('mark')).to_have_text('습도 40~60%')
+                expect(pv.locator('p.note')).to_contain_text('핵심: 세척 편한지부터 봐')
+                pv.locator('button[data-prompt="1"]').click()
+                expect(pv.locator('button[data-prompt="1"]')).to_have_text('복사됨')
+                assert clip_text() == '햇살 드는 거실 창가 선반 위 상표 없는 흰 가습기, 정면 45도, 1:1 정사각형, 이미지 안에 글자 없이', clip_text()
+                expect(page.locator('#view')).to_contain_text('본문 ')
+                expect(page.locator('#view')).not_to_contain_text('[프롬프트')
+                # 블로그에 올리기: 프롬프트 모두 복사, 서식 그대로 복사(소제목 24px·바탕색, 프롬프트 없음)
+                cp = page.locator('section.panel', has=page.locator('h2', has_text='블로그에 올리기'))
+                cp.get_by_role('button', name='사진 프롬프트 3개 모두 복사').click()
+                t = clip_text()
+                assert t.startswith('[사진 1] 거실 창가에 놓인 흰색 가습기\n햇살 드는') and '[사진 3] 침실 협탁 위 작은 가습기' in t, t
+                cp.get_by_role('button', name='서식 그대로 복사').click()
+                page.wait_for_timeout(300)
+                html = clip_html()
+                assert 'font-size:24px' in html and 'background-color:#fff0a0' in html and 'background-color:#e3f4ea' in html, html[:300]
+                assert '햇살 드는' not in html and '[프롬프트' not in html and '==' not in html, '붙여넣는 글에는 프롬프트·강조 기호가 없음'
+                expect(cp).to_contain_text('사진 자리마다 제미나이 프롬프트가 있어')
+                no_overflow('1.6.0 원고 화면')
+                shot('61-plan160-post')
+                # 다 올렸어 · 지우기 → 목록으로
+                page.locator('section.panel.hi').get_by_role('button', name='다 올렸어 · 지우기').click()
+                page.locator('section.panel.hi').get_by_role('button', name='휴지통으로? 한 번 더 눌러줘').click()
+                expect(page.locator('#toast')).to_contain_text('휴지통으로 보냈어')
+                assert [c for c in mock.calls if c['method'] == 'DELETE' and c['path'] == f'posts/{P}']
+                # 설정: 하루 계획·보관일 저장
+                goto_hash('settings/auto')
+                sec = page.locator('#sec-auto')
+                expect(sec).to_contain_text('하루 10편 · 자동 원고는 만든 날부터 3일 지나면 휴지통으로 (최대 30개 쌓임')
+                sec.locator('label', has_text='오늘 뜬 주제 (홈판)').locator('select').select_option('1')
+                sec.locator('label', has_text='자동 원고 보관일').locator('select').select_option('5')
+                expect(sec).to_contain_text('하루 9편 · 자동 원고는 만든 날부터 5일 지나면 휴지통으로 (최대 45개 쌓임')
+                sec.get_by_role('button', name='저장', exact=True).click()
+                expect(page.locator('#toast')).to_contain_text('저장했어')
+                b = [c for c in mock.calls if c['path'] == 'settings' and c['method'] == 'POST'][-1]['body']
+                assert b['daily_plan'] == {'affiliate': 2, 'adpost': 2, 'trending': 1, 'market': 2, 'stock': 2} and b['keep_days'] == 5, b
+                no_overflow('1.6.0 설정 하루 계획')
+                # 휴지통: 보관일이 지난 자동 원고를 되살리면 '보관'으로 (다음에 열 때 다시 자동 정리되지 않게), 아직 안 지난 글은 되살리기만
+                goto_hash('settings/trash')
+                trash = page.locator('#sec-trash')
+                trash.locator('.item', has_text='작년 겨울 전기요 정리').get_by_role('button', name='되살리기').click()
+                expect(page.locator('#toast')).to_contain_text("보관일이 지난 자동 원고라 '보관'으로 바꿨어")
+                assert [c for c in mock.calls if c['method'] == 'POST' and c['path'] == f'posts/{OLD2}/restore']
+                assert next(x for x in mock.posts if x['id'] == OLD2)['keep'] is True
+                expect(trash.locator('.item', has_text='작년 겨울 전기요 정리')).to_have_count(0)
+                trash.locator('.item', has_text='오늘 코스피 마감 정리').get_by_role('button', name='되살리기').click()
+                expect(page.locator('#toast')).to_contain_text('되살렸어')
+                expect(page.locator('#toast')).not_to_contain_text('보관')
+                assert next(x for x in mock.posts if x['id'] == OLD)['keep'] is False
+                no_overflow('1.6.0 휴지통')
+            finally:
+                mock.posts = [x for x in mock.posts if x['id'] not in (P, OLD, OLD2)]
+                for k, v in saved.items():
+                    if v is None:
+                        mock.settings.pop(k, None)
+                    else:
+                        mock.settings[k] = v
+                mock.plan_today = None
+                mock.expired = None
+                reload_keys()
+        check('1.6.0 하루 계획: 자동 정리 알림·홈의 오늘 계획·목록에서 지우기(두 번)·보관·사진 자리 아래 제미나이 프롬프트 복사·프롬프트 모두 복사·서식 복사(소제목 24px·바탕색, 프롬프트 없음)·하루 계획 설정 저장·휴지통에서 되살린 지난 자동 원고는 보관', t_plan_160)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():

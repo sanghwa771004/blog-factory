@@ -197,8 +197,9 @@ describe('본문 형식', () => {
     assert.equal(compatOf('x', 'y', COMPAT).verdict, '확인 필요');
     assert.equal(compatOf('google_adsense', 'threads', COMPAT).verdict, '불가');
   });
-  test('글 유형 11가지', () => {
-    assert.equal(Object.keys(CONTENT_TYPES).length, 11);
+  test('글 유형 13가지 (1.6.0: 증시 정리·종목 설명 — 출처 필수·투자 글)', () => {
+    assert.equal(Object.keys(CONTENT_TYPES).length, 13);
+    for (const k of ['market_summary', 'stock_analysis']) assert.ok(CONTENT_TYPES[k].needsSources && CONTENT_TYPES[k].invest, k);
   });
 });
 

@@ -168,7 +168,9 @@ test('DB 오류 문구와 기타 도우미', () => {
   assert.equal(P.dbMsg({ code: 'tool_error', message: '{"error":{"message":"Failed to run sql query: ERROR:  P0001: job is not pending (already started or finished)"}}' }), '다른 곳에서 이미 처리 중이거나 끝난 요청이야.');
   assert.ok(P.dbMsg({ code: 'tool_error', message: 'ERROR: incompatible: Google 애드센스 × 쓰레드 (이유)' }).includes('Google 애드센스 × 쓰레드'));
   assert.equal(P.nextRunText({ h: 7, m: 0 }), '오늘 오전 8:51');
-  assert.equal(P.nextRunText({ h: 12, m: 51 }), '오늘 오후 6:51');
+  // 1.6.0: 점심 실행이 오후 1:21 (예약 작업 두 개 — 8:51·18:51 + 13:21)
+  assert.equal(P.nextRunText({ h: 12, m: 51 }), '오늘 오후 1:21');
+  assert.equal(P.nextRunText({ h: 13, m: 21 }), '오늘 오후 6:51');
   assert.equal(P.nextRunText({ h: 19, m: 0 }), '내일 오전 8:51');
   assert.equal(P.firstChars('😀가나다', 2), '😀가');
   assert.ok(!P.typeOkHere('comparison', { products: [] }) && !P.typeOkHere('news_summary', {}));

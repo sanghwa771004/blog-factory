@@ -1,14 +1,15 @@
-// 글공장 앱 1.5.1 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.6.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
-} from './checks.js?v=1.5.2';
-import * as L from './lib.js?v=1.5.2';
-import * as IMG from './images.js?v=1.5.2';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.5.2';
+  PLAN_KINDS, PLAN_RUNS, PLAN_MAX_PER_KIND, KEEP_DAYS, cleanPlan, planTotal, promptsOf, bodyChars,
+} from './checks.js?v=1.6.0';
+import * as L from './lib.js?v=1.6.0';
+import * as IMG from './images.js?v=1.6.0';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.6.0';
 
-const APP_VER = '1.5.2';
+const APP_VER = '1.6.0';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
-const RUN_TIMES = [[8, 51], [12, 51], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함
+const RUN_TIMES = [[8, 51], [13, 21], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함 (1.6.0: 점심은 오후 1:21 — 오늘 뜬 주제)
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
 const LIVE = ['published', 'collecting', 'analyzed'];
 const WORK = ['queued', 'researching', 'writing'];
@@ -235,9 +236,9 @@ const S = {
   post_channels: [], search_terms: [], metric_post_ids: [], unavailable: [], runs_auto_7d: null,
 };
 let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {}, slotsBy: {}, pcBy: {}, terms: new Map() };
-const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids', 'unavailable', 'runs_auto_7d'];
+const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids', 'unavailable', 'runs_auto_7d', 'plan_today'];
 // 서버가 null 로 보낼 수 있는 값 (null = 모름 — 예전 값을 그대로 두지 않음)
-const NULLABLE_KEYS = new Set(['runs_auto_7d']);
+const NULLABLE_KEYS = new Set(['runs_auto_7d', 'plan_today']);
 // 서버가 못 읽은 것(DB 016 전이거나 오류)은 null — 계산에서 0이 아니라 '데이터 없음'으로
 const known = (k) => ((S.unavailable || []).includes(k) ? null : S[k]);
 function index() {
@@ -295,6 +296,13 @@ async function load() {
     for (const k of STATE_KEYS) S[k] = NULLABLE_KEYS.has(k) && k in j ? j[k] : (j[k] ?? S[k]);
     S.serverVersion = j.version || '';
     S.loaded = true; lastLoad = Date.now(); index();
+    // 1.6.0: 서버가 보관일 지난 자동 원고를 휴지통으로 옮겼으면 알려줌 (지운 게 아니라 30일 동안 되살릴 수 있음)
+    // 토스트는 다른 알림(새로고침 등)에 덮일 수 있어서 홈·원고 목록 위에도 10분 동안 한 줄로 남김
+    const ex = j.expired && Number(j.expired.expired);
+    if (ex > 0) {
+      S.expiredNote = { text: `만든 지 ${j.expired.keep_days || 3}일 지난 자동 원고 ${ex}개를 휴지통으로 옮겼어 (설정 > 휴지통에서 30일 동안 되살릴 수 있어)`, at: Date.now() };
+      toast(S.expiredNote.text, 6000);
+    }
     $('#errLine').hidden = true;
     if (!changed) return; // 바뀐 게 없으면 화면을 다시 그리지 않음
     saveCache();
@@ -388,7 +396,7 @@ window.addEventListener('hashchange', () => { route = parseHash(); dirty = false
 document.querySelectorAll('#tabbar button').forEach((b) => b.addEventListener('click', () => go(b.dataset.tab)));
 $('#refreshBtn').addEventListener('click', async () => {
   const b = $('#refreshBtn'); b.disabled = true; dirty = false; S.stats = {}; S.postMetrics = {}; S.manualMetrics = null; ST.invalidate();
-  await load(); render(true); b.disabled = false; toast('최신으로 불러왔어');
+  await load(); render(true); b.disabled = false; if (!expiredNoteNow()) toast('최신으로 불러왔어');
 });
 $('#newDataBtn').addEventListener('click', () => { dirty = false; $('#newData').hidden = true; pendingRender = false; render(true); });
 
@@ -450,6 +458,8 @@ function viewHome() {
   // 운영 흐름 (1.4.0): 주제 → 원고 → 게시 → 다른 채널 → 실적 → 개선, 지금 막힌 곳
   const syncRecs = homeRecs(t, null); // 실적을 불러오기 전 (불러오면 아래에서 바꿈)
   let ops = opsPanel(t, syncRecs.filter((r) => r.group === 'fix').length);
+  const exLine = expiredLine(); // viewHome 안에는 '오늘 할 일'용 add 가 따로 있어서 직접 붙임
+  if (exLine) box.append(exLine);
   box.append(ops);
 
   // 오늘 할 일
@@ -473,25 +483,36 @@ function viewHome() {
   const pend = pendingJobs();
   const lr = S.runs[0];
   const plan = L.autoPlan({ posts: S.posts, settings: S.settings || {}, today: t, pendingWrites: pend.filter((j) => j.kind === 'write').length }); // 요청 원고가 채워지면 쌓인 원고가 그만큼 늘어 (프롬프트 3단계와 같음)
+  const pp = L.planProgress({ settings: S.settings || {}, planToday: S.plan_today, posts: S.posts, today: t });
   const writer = panel('자동 작가',
     h('p', { class: 'hint' }, `다음 실행 ${nextRunText()} · 기다리는 작업 ${pend.length}개 (원고 ${pend.filter((j) => j.kind === 'write').length} · 주제 ${pend.filter((j) => j.kind === 'topics').length} · 변환 ${pend.filter((j) => j.kind === 'reformat').length} · 개선안 ${pend.filter((j) => j.kind === 'refresh').length})`),
-    h('p', { class: 'hint' }, `앞으로 7일(내일부터) 발행일이 잡힌 원고 ${plan.scheduled}편 / 목표 ${plan.goal}편 (하루 ${plan.perDay}편 × 7일)`),
-    h('p', { class: plan.backlogFull ? 'notice' : 'hint' }, plan.backlogFull
-      ? `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개 — 한도가 차서 자동 작가가 새 자동 글을 멈췄어 (요청한 원고는 써). 검수·게시해서 ${plan.backlogLimit}개 아래로 줄이면 다시 써.`
-      : `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개`),
-    h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편${plan.roomNext < AUTO_MAX ? `, 쌓아둘 한도까지 ${plan.roomNext}편` : ''}). 쓴 원고는 '검수 필요'로 들어와.` : plan.backlogFull || plan.gap ? `쌓인 원고가 한도라서${plan.jobs && !plan.backlogFull ? ' (기다리는 요청 원고를 채우면 한도가 차서)' : ''} 다음 실행에 새 자동 글은 없어.` : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.'),
+    ...(pp.active ? [planBox(pp), h('p', { class: 'hint' }, `지금 목록의 원고 ${plan.backlog}개 (자동 원고는 ${pp.keepDays}일 지나면 휴지통으로 — 하루 ${pp.total}편이면 최대 ${pp.total * pp.keepDays}개)`), S.settings && S.settings.auto_enabled === false ? h('p', { class: 'notice' }, '자동 글 쓰기가 꺼져 있어서 하루 계획 글은 안 써 (설정 > 자동 글쓰기).') : null] : [
+      h('p', { class: 'hint' }, `앞으로 7일(내일부터) 발행일이 잡힌 원고 ${plan.scheduled}편 / 목표 ${plan.goal}편 (하루 ${plan.perDay}편 × 7일)`),
+      h('p', { class: plan.backlogFull ? 'notice' : 'hint' }, plan.backlogFull
+        ? `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개 — 한도가 차서 자동 작가가 새 자동 글을 멈췄어 (요청한 원고는 써). 검수·게시해서 ${plan.backlogLimit}개 아래로 줄이면 다시 써.`
+        : `검수·게시 안 한 원고 ${plan.backlog}개 / 쌓아둘 한도 ${plan.backlogLimit}개`),
+      h('p', { class: 'hint' }, !plan.enabled ? '자동 채우기가 꺼져 있거나 주제가 없어서 자동 글은 안 만들어.' : plan.autoNext ? `다음 실행에 자동 작가가 새로 쓸 예정: 최대 ${plan.autoNext}편 (요청한 원고를 먼저 쓰고, 한 번에 최대 4편${plan.roomNext < AUTO_MAX ? `, 쌓아둘 한도까지 ${plan.roomNext}편` : ''}). 쓴 원고는 '검수 필요'로 들어와.` : plan.backlogFull || plan.gap ? `쌓인 원고가 한도라서${plan.jobs && !plan.backlogFull ? ' (기다리는 요청 원고를 채우면 한도가 차서)' : ''} 다음 실행에 새 자동 글은 없어.` : '발행표가 차 있어서 다음 실행에 새 자동 글은 없어.')]),
     lr ? h('p', { class: lr.status === '성공' ? 'hint' : 'notice' }, `마지막 실행: ${L.fmtTime(lr.ran_at)} · ${lr.status} · ${lr.note || `${lr.written}개 저장`}${lr.error ? ' · ' + lr.error : ''}`) : h('p', { class: 'hint' }, '아직 실행 기록이 없어.'),
     h('p', { class: 'hint' }, '하루 세 번 네 Claude 구독으로 실행돼. 지금 바로 쓰고 싶으면 Claude 안 글공장에서 써도 돼.'),
     h('div', { class: 'go' }, h('a', { class: 'btn sm ghost', href: ARTIFACT_URL, target: '_blank', rel: 'noopener noreferrer' }, 'Claude 안 글공장 열기 ↗'), btn('작업 기록', 'sm ghost', () => go('settings/jobs'))));
   box.append(writer);
 
-  // 발행 예정
-  const week = notLive.filter((p) => p.publish_date && p.publish_date >= t && p.publish_date <= L.addDays(t, 7)).sort(byDate);
-  const up = panel('발행 예정 (7일)');
-  if (!week.length) up.append(h('p', { class: 'hint' }, '7일 안에 발행일이 잡힌 원고가 없어.'));
-  else up.append(postList(week, { showDate: true }));
-  up.append(h('p', { class: 'hint' }, '앱이 블로그에 대신 올리지는 않아. 그날 직접 올리고 "게시 완료 기록"을 눌러줘.'));
-  box.append(up);
+  // 발행 예정 — 1.6.0 하루 계획이면 '오늘 올릴 원고' (계획 글은 쓴 날이 발행일)
+  if (pp.active) {
+    const todays = notLive.filter((p) => p.publish_date === t || (p.source === 'auto' && L.kstDate(p.created_at) === t)).sort(byDate);
+    const up = panel(`오늘 올릴 원고 (${todays.length})`);
+    if (!todays.length) up.append(h('p', { class: 'hint' }, '오늘 올릴 원고가 아직 없어.'));
+    else up.append(postList(todays, { flags: true, actions: true }));
+    up.append(h('p', { class: 'hint' }, "앱이 블로그에 대신 올리지는 않아. 블로그에 올린 다음 '지우기'를 누르면 목록에서 빠져 (휴지통에 30일)."));
+    box.append(up);
+  } else {
+    const week = notLive.filter((p) => p.publish_date && p.publish_date >= t && p.publish_date <= L.addDays(t, 7)).sort(byDate);
+    const up = panel('발행 예정 (7일)');
+    if (!week.length) up.append(h('p', { class: 'hint' }, '7일 안에 발행일이 잡힌 원고가 없어.'));
+    else up.append(postList(week, { showDate: true }));
+    up.append(h('p', { class: 'hint' }, '앱이 블로그에 대신 올리지는 않아. 그날 직접 올리고 "게시 완료 기록"을 눌러줘.'));
+    box.append(up);
+  }
 
   // 수익·실적 (서버 통계)
   const money = panel('이번 달 수익', h('p', { class: 'hint' }, '불러오는 중…'));
@@ -517,6 +538,15 @@ function viewHome() {
   return box;
 }
 const AUTO_MAX = L.AUTO_RULES.maxAutoPerRun;
+// 1.6.0 오늘 계획: 실행(아침·점심·저녁)마다 종류별로 쓴 수 / 목표
+function planBox(pp) {
+  return h('div', { class: 'stack' },
+    h('p', { class: 'hint' }, `오늘 하루 계획 ${pp.done}/${pp.total}편 (올리고 지운 원고도 셈)`),
+    h('div', { class: 'list' }, pp.runs.filter((r) => r.target).map((r) => h('div', { class: 'item' },
+      h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${r.label} · ${r.time}`),
+        h('small', null, r.kinds.filter((k) => k.target).map((k) => `${k.short} ${Math.min(k.done, k.target)}/${k.target}`).join(' · '))),
+      h('div', { class: 'side' }, h('span', { class: 'flag ' + (r.done >= r.target ? 'ok' : 'i') }, `${r.done}/${r.target}`))))));
+}
 // 실적(stats)을 불러오기 전에는 실적이 필요 없는 추천만 (실적이 있는 글을 '실적 없음'으로 잠깐 잘못 보여주지 않게)
 const NO_STATS_KINDS = ['title_from_search', 'new_from_search', 'recheck'];
 const homeRecs = (t, byPost) => {
@@ -914,18 +944,31 @@ function viewList(f) {
     let ps = filterPosts(f).filter((p) => !q || `${titleOf(p)} ${p.keyword}`.toLowerCase().includes(q));
     const live = ps.filter((p) => LIVE.includes(p.stage)).sort((x, y) => String(y.published_on || '').localeCompare(String(x.published_on || '')));
     ps = ps.filter((p) => !LIVE.includes(p.stage)).sort(byDate).concat(live);
-    listBox.replaceChildren(ps.length ? postList(ps.slice(0, 200), { showDate: true, flags: true }) : h('p', { class: 'hint' }, '해당하는 원고가 없어.'));
+    listBox.replaceChildren(ps.length ? postList(ps.slice(0, 200), { showDate: true, flags: true, actions: true }) : h('p', { class: 'hint' }, '해당하는 원고가 없어.'));
   };
   search.addEventListener('input', () => { listQuery = search.value; draw(); });
   draw();
-  box.append(seg, search, listBox);
+  const st = S.settings || {};
+  const keepHint = L.planActive(st) ? h('p', { class: 'hint' }, `자동 원고는 만든 날부터 ${L.keepDaysOf(st)}일이 지나면 휴지통으로 가 (보관한 원고·직접 요청한 원고는 남아). 블로그에 올린 원고는 '지우기'로 바로 빼도 돼.`) : null;
+  add(box, expiredLine(), seg, search, keepHint, listBox);
   return box;
 }
-function postList(ps, { showDate, flags } = {}) {
+// 1.6.0: 방금(10분 안) 자동 정리로 휴지통에 간 원고 알림
+const expiredNoteNow = () => (S.expiredNote && Date.now() - S.expiredNote.at < 10 * 60e3 ? S.expiredNote.text : '');
+const expiredLine = () => { const t = expiredNoteNow(); return t ? h('p', { class: 'notice' }, t, ' ', h('button', { type: 'button', class: 'copy', onclick: () => go('settings/trash') }, '휴지통 보기')) : null; };
+// 1.6.0: 원고를 휴지통으로 (30일 동안 되살릴 수 있음) — 두 번 눌러야 지움
+async function trashPost(p, button, after) {
+  if (!confirmBox(button, '휴지통으로?')) return;
+  const j = await run(button, () => api('/posts/' + p.id, { method: 'DELETE' }), '휴지통으로 보냈어 (설정 > 휴지통에서 30일 동안 되살릴 수 있어)');
+  if (j) { await load(); if (after) after(); }
+}
+function postList(ps, { showDate, flags, actions } = {}) {
   return h('div', { class: 'list' }, ps.map((p) => {
     const meta = [chName(p.channel_id)];
+    if (PLAN_KINDS[p.plan_kind]) meta.unshift(PLAN_KINDS[p.plan_kind].short);
     if (showDate) meta.push(LIVE.includes(p.stage) ? (p.published_on ? '게시 ' + L.fmtDate(p.published_on) : '게시일 없음') : (p.publish_date ? L.fmtDate(p.publish_date) : '날짜 미정'));
     if (p.content_type && CONTENT_TYPES[p.content_type]) meta.push(CONTENT_TYPES[p.content_type].label);
+    if (actions) { const ex = L.expiresOn(p, S.settings); if (p.keep) meta.push('보관'); else if (ex) meta.push(`${L.fmtDate(ex)} 정리`); }
     let fl = null;
     if (flags && !WORK.includes(p.stage) && p.body) {
       const r = checksFor(p, false);
@@ -937,7 +980,8 @@ function postList(ps, { showDate, flags } = {}) {
     }
     return h('div', { class: 'item' },
       h('button', { type: 'button', class: 'main', onclick: () => go('content/post/' + p.id) }, h('b', null, titleOf(p)), h('small', null, meta.join(' · '))),
-      h('div', { class: 'side' }, fl, badge(p)));
+      h('div', { class: 'side' }, fl, badge(p),
+        actions && !WORK.includes(p.stage) ? h('button', { type: 'button', class: 'copy del', title: '휴지통으로 보내기 (30일 동안 되살릴 수 있어)', onclick: (ev) => trashPost(p, ev.currentTarget) }, '지우기') : null));
   }));
 }
 
@@ -1082,8 +1126,8 @@ function viewPost(id) {
   const head = h('section', { class: 'panel hi' },
     h('div', { class: 'split' }, badge(p), h('span', { class: 'hint' }, chName(p.channel_id))),
     h('h2', null, titleOf(p)),
-    h('p', { class: 'hint' }, [p.keyword && `키워드 ${p.keyword}`, (p.program_ids || []).map(progName).join(', ') || '수익 모델 없음', p.content_type && CONTENT_TYPES[p.content_type] ? CONTENT_TYPES[p.content_type].label : '글 유형 자동'].filter(Boolean).join(' · ')),
-    stepper(p), stageActions(p, r));
+    h('p', { class: 'hint' }, [PLAN_KINDS[p.plan_kind] && PLAN_KINDS[p.plan_kind].label, p.keyword && `키워드 ${p.keyword}`, (p.program_ids || []).map(progName).join(', ') || '수익 모델 없음', p.content_type && CONTENT_TYPES[p.content_type] ? CONTENT_TYPES[p.content_type].label : '글 유형 자동'].filter(Boolean).join(' · ')),
+    stepper(p), stageActions(p, r), quickActions(p));
   box.append(head);
   if (p.body) {
     box.append(panel(`발행 전 검사 (고칠 것 ${r.errors.length} · 확인 ${r.warnings.length})`, checkList(r)));
@@ -1105,6 +1149,16 @@ function viewPost(id) {
   if (p.body && (LIVE.includes(p.stage) || (p.refresh && Object.keys(p.refresh).length))) box.append(refreshPanel(p));
   box.append(jobsPanel(p));
   return box;
+}
+// 1.6.0: 발행은 사용자가 블로그에서 직접 → 올린 뒤 바로 지우기, 자동 원고는 보관해야 자동 정리에서 빠짐
+function quickActions(p) {
+  if (WORK.includes(p.stage)) return null;
+  const ex = L.expiresOn(p, S.settings);
+  return h('div', { class: 'stack' },
+    h('div', { class: 'go' },
+      btn('다 올렸어 · 지우기', 'sm danger', (ev) => trashPost(p, ev.currentTarget, () => go('content'))),
+      p.source === 'auto' ? btn(p.keep ? '보관 풀기' : '보관 (자동 정리 안 함)', 'sm ghost', (ev) => patchPost(p, { keep: !p.keep }, ev.currentTarget, p.keep ? '보관을 풀었어' : '보관했어 — 날짜가 지나도 휴지통으로 안 가')) : null),
+    p.source === 'auto' ? h('p', { class: 'hint' }, p.keep ? '보관한 원고라 자동 정리되지 않아.' : ex ? `자동 원고라 ${L.fmtDate(ex)}에 휴지통으로 가 (보관하면 남아). 지운 원고는 30일 동안 되살릴 수 있어.` : '') : null);
 }
 async function setStage(p, stage, extra, button, okMsg) {
   const j = await run(button, () => api('/posts/' + p.id, { method: 'POST', body: { stage, ...(extra || {}) } }), okMsg);
@@ -1238,7 +1292,12 @@ function copyPanel(p, r, links) {
     btn('서식 그대로 복사', 'sm', (ev) => copyRich(L.exportHtml(p, ctx), L.exportPlain(p, ctx), ev.currentTarget)),
     btn('HTML 코드', 'sm ghost', (ev) => copyPlain(L.exportHtml(p, ctx), ev.currentTarget)),
     btn('텍스트만', 'sm ghost', (ev) => copyPlain(L.exportPlain(p, ctx), ev.currentTarget))));
-  if (countImg(p.body)) box.append(h('p', { class: 'hint' }, "📷 사진은 앱이 블로그에 대신 올리지 않아. 복사한 글의 사진 자리마다 내려받을 파일 이름이 적혀 있으니, 원고 아래 '이미지'에서 '모두 내려받기'로 받은 파일을 그 자리에 넣어줘."));
+  const gps = promptsOf(p.body).filter((x) => x.prompt);
+  if (gps.length) {
+    box.append(h('div', { class: 'go' }, btn(`사진 프롬프트 ${gps.length}개 모두 복사`, 'sm ghost', (ev) => copyPlain(L.promptsText(p), ev.currentTarget))),
+      h('p', { class: 'hint' }, "📷 사진 자리마다 제미나이 프롬프트가 있어 — 미리보기의 '프롬프트 복사'로 하나씩 제미나이에 붙여 넣어 만들고, 받은 사진을 블로그의 '📷 사진 n' 자리에 넣어줘. 복사한 글에는 프롬프트가 안 들어가."));
+  } else if (countImg(p.body)) box.append(h('p', { class: 'hint' }, "📷 사진은 앱이 블로그에 대신 올리지 않아. 복사한 글의 사진 자리마다 내려받을 파일 이름이 적혀 있으니, 원고 아래 '이미지'에서 '모두 내려받기'로 받은 파일을 그 자리에 넣어줘."));
+  box.append(h('p', { class: 'hint' }, "'서식 그대로 복사'는 소제목을 크게, ==강조==와 핵심 상자는 바탕색을 칠해서 붙여 넣어 (네이버 편집기가 일부 서식을 버리면 그 부분만 직접 고쳐줘)."));
   if (disc.text) box.append(h('p', { class: 'hint' }, '맨 위에 이 고지문이 자동으로 들어가:'), h('p', { class: 'sns' }, disc.text));
   else if ((p.program_ids || []).length) box.append(h('p', { class: 'hint' }, '이 글의 수익 모델에는 넣을 고지문이 없어 (설정 > 수익 모델에서 확인).'));
   const tags = p.hashtags || [];
@@ -1274,7 +1333,10 @@ function bodyPanel(p) {
   const img = countImg(p.body);
   if (img) {
     const c = ST.slotCount(p);
-    box.append(h('p', { class: 'notice' }, `📷 사진 자리 ${img}곳 · 이미지 연결 ${c ? c.linked : 0}곳 — 아래 '이미지'에서 만들거나 찾거나 올려서 연결하고, 블로그에는 내려받아서 직접 넣어줘.`));
+    const np = promptsOf(p.body).filter((x) => x.prompt).length;
+    box.append(h('p', { class: 'notice' }, np
+      ? `📷 사진 자리 ${img}곳 · 제미나이 프롬프트 ${np}개 — 미리보기의 '프롬프트 복사'로 제미나이에서 만들어 블로그의 그 자리에 넣어줘 (아래 '이미지'에서 만들어 연결해도 돼).`
+      : `📷 사진 자리 ${img}곳 · 이미지 연결 ${c ? c.linked : 0}곳 — 아래 '이미지'에서 만들거나 찾거나 올려서 연결하고, 블로그에는 내려받아서 직접 넣어줘.`));
   }
   const prev = h('div', { class: 'post', id: 'pv-' + p.id });
   fillPreview(prev, p);
@@ -1282,13 +1344,13 @@ function bodyPanel(p) {
   const startEdit = () => {
     const ta = h('textarea', { class: 'body-edit', value: p.body, oninput: markDirty });
     const tt = h('textarea', { value: (p.titles || []).join('\n'), style: 'min-height:90px', oninput: markDirty });
-    editBox.replaceChildren(field('제목 (한 줄에 하나)', tt), field('본문', ta, '"## " 소제목, "- " 목록, "[링크: 문구]" 링크 자리, "[이미지: 설명]" 사진 자리'),
+    editBox.replaceChildren(field('제목 (한 줄에 하나)', tt), field('본문', ta, '"## " 소제목, "- " 목록, "==문장==" 바탕색 강조, "> 문장" 핵심 상자, "[링크: 문구]" 링크 자리, "[이미지: 설명]" 사진 자리, 그 바로 아래 "[프롬프트: …]" 제미나이 프롬프트'),
       h('div', { class: 'go' },
         btn('저장', 'sm', (ev) => patchPost(p, { body: ta.value, titles: tt.value.split('\n').map((s) => s.trim()).filter(Boolean) }, ev.currentTarget, '저장했어')),
         btn('취소', 'sm ghost', () => { dirty = false; render(true); })));
     prev.hidden = true; ta.focus();
   };
-  editBox.append(h('div', { class: 'go' }, btn('본문 고치기', 'sm ghost', startEdit, { disabled: WORK.includes(p.stage) }), h('span', { class: 'hint num' }, `${p.body.length.toLocaleString()}자`)));
+  editBox.append(h('div', { class: 'go' }, btn('본문 고치기', 'sm ghost', startEdit, { disabled: WORK.includes(p.stage) }), h('span', { class: 'hint num', title: '독자가 읽는 글자 수 (공백 포함 — 사진 자리·프롬프트·링크 자리는 빼고)' }, `본문 ${bodyChars(p.body).toLocaleString()}자`)));
   box.append(h('h3', null, '미리보기'), editBox, prev);
   if (p.summary) box.append(h('h3', null, '요약'), h('p', { class: 'sns' }, p.summary));
   const fc = p.ai_notes && Array.isArray(p.ai_notes.needs_fact_check) ? p.ai_notes.needs_fact_check.filter(Boolean) : [];
@@ -1302,6 +1364,12 @@ function fillPreview(el, p) {
   const disc = disclosureFor(p.program_ids, M.prog).text;
   if (disc) el.append(h('p', { class: 'disc' }, disc));
   el.insertAdjacentHTML('beforeend', L.viewHtml(p, linksOf(p.id), ST.previewImages(p)));
+  // 1.6.0: 사진 자리 아래 '프롬프트 복사' (제미나이에 붙여 넣을 글)
+  const ps = promptsOf(p.body);
+  el.querySelectorAll('button[data-prompt]').forEach((b) => {
+    const x = ps[Number(b.dataset.prompt) - 1];
+    if (x && x.prompt) b.addEventListener('click', () => copyPlain(x.prompt, b));
+  });
 }
 function refreshPreview(id) {
   const el = document.getElementById('pv-' + id);
@@ -1958,25 +2026,40 @@ function secAuto() {
   const drawPP = () => pp.replaceChildren(programPicker(ch.value, progs, (ids) => { progs = ids; markDirty(); drawPP(); }));
   ch.addEventListener('change', () => { markDirty(); progs = progs.filter((id) => compatOf(id, ch.value, S.compat).verdict !== '불가'); drawPP(); });
   drawPP();
+  // 1.6.0 하루 계획: 종류마다 0~4편, 자동 원고 보관일
+  const planNow = cleanPlan(s.daily_plan);
+  const planSel = {};
+  const planHint = h('span', { class: 'hint' });
+  const keepSel = h('select', { value: String(L.keepDaysOf(s)), onchange: () => { markDirty(); drawPlan(); } }, ...[1, 2, 3, 4, 5, 7, 10, 14].map((n) => opt(String(n), `${n}일`)));
+  const drawPlan = () => { const pl = {}; for (const k of Object.keys(PLAN_KINDS)) pl[k] = Number(planSel[k].value) || 0; const tot = planTotal(pl); planHint.textContent = tot ? `하루 ${tot}편 · 자동 원고는 만든 날부터 ${keepSel.value}일 지나면 휴지통으로 (최대 ${tot * Number(keepSel.value)}개 쌓임, 보관한 원고는 남아). 발행은 네가 블로그에서 직접 해.` : '모두 0이면 하루 계획을 끄고 예전 방식(하루 발행 개수 × 7 발행표)으로 써.'; };
+  const planRows = Object.entries(PLAN_RUNS).map(([run, r]) => h('div', { class: 'stack' },
+    h('p', { class: 'legend' }, `${r.label} · ${r.time}`),
+    h('div', { class: 'row' }, Object.entries(PLAN_KINDS).filter(([, k]) => k.run === run).map(([kind, k]) => {
+      planSel[kind] = h('select', { value: String(planNow[kind]), onchange: () => { markDirty(); drawPlan(); } }, ...Array.from({ length: PLAN_MAX_PER_KIND + 1 }, (_, n) => opt(String(n), `${n}편`)));
+      return field(k.label, planSel[kind]);
+    }))));
+  drawPlan();
   return [
-    h('label', { class: 'chk' }, auto, '발행표가 비면 자동 주제로 채우기'),
+    h('h3', null, '하루 계획'), ...planRows, field('자동 원고 보관일', keepSel), planHint,
+    h('label', { class: 'chk' }, auto, '자동 글 쓰기 (하루 계획 · 하루 계획을 끄면 발행표 채우기)'),
     field('자동 주제 카테고리 (쉼표로 구분)', topics),
     field('주력 주제 (블로그의 큰 주제 하나)', focus, '정해 두면 자동 작가가 이 주제 안에서만 자동 글을 쓰고, 검사에서 글마다 주제와 맞는지 근거를 보여줘. 비우면 안 씀.'),
     field('주력 주제 낱말 (선택, 쉼표로)', fterms, "글의 키워드나 제목에 이 낱말 중 하나가 있으면 주력 주제 글로 봐. 안 적으면 주력 주제 이름 전체나 그 낱말 두 개 이상이 있어야 해 ('겨울'처럼 하나만 있으면 넓은 낱말일 수 있어서 '판단 어려움'). 카테고리만 같으면 주제 글로 보지 않아."),
     h('datalist', { id: 'focuslist' }, String(s.auto_topics || '').split(',').map((x) => x.trim()).filter(Boolean).map((c) => opt(c, c))),
-    h('div', { class: 'row' }, field('하루 발행 개수', per), field('기본 길이', len)), perHint,
-    field('쌓아둘 원고 한도', blim), blHint,
+    h('div', { class: 'row' }, field('하루 발행 개수 (하루 계획을 끄면 씀)', per), field('기본 길이', len)), perHint,
+    field('쌓아둘 원고 한도 (하루 계획을 끄면 씀)', blim), blHint,
     field('기본 채널', ch), h('p', { class: 'legend' }, '기본 수익 모델'), pp,
     btn('저장', 'sm', async (ev) => {
-      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), focus_terms: fterms.value.trim(), per_day: Number(per.value), backlog_limit: Number(blim.value) || 0, len: len.value, default_channel: ch.value, default_programs: progs } }), '저장했어');
+      const daily = {}; for (const k of Object.keys(PLAN_KINDS)) daily[k] = Number(planSel[k].value) || 0;
+      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { auto_enabled: auto.checked, auto_topics: topics.value.trim(), focus_topic: focus.value.trim(), focus_terms: fterms.value.trim(), per_day: Number(per.value), backlog_limit: Number(blim.value) || 0, len: len.value, default_channel: ch.value, default_programs: progs, daily_plan: daily, keep_days: Number(keepSel.value) } }), '저장했어');
       if (j) {
         dirty = false;
-        const sk = (j.skipped || []).map((k) => ({ focus_terms: '주력 주제 낱말은 DB 업데이트(015)', backlog_limit: '쌓아둘 원고 한도는 DB 업데이트(016)' }[k])).filter(Boolean);
+        const sk = (j.skipped || []).map((k) => ({ focus_terms: '주력 주제 낱말은 DB 업데이트(015)', backlog_limit: '쌓아둘 원고 한도는 DB 업데이트(016)', daily_plan: '하루 계획은 DB 업데이트(020)', keep_days: '보관일은 DB 업데이트(020)' }[k])).filter(Boolean);
         if (sk.length) toast(`나머지는 저장했어. ${sk.join(', ')} 뒤에 저장돼.`, 5000);
         await load();
       }
     }),
-    h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 12:51, 오후 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 앞으로 7일 발행표가 비어 있으면 자동 주제로 채워 (주력 주제를 정하면 그 안에서만). 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어와.`),
+    h('p', { class: 'hint' }, `자동 작가는 하루 세 번(오전 8:51, 오후 1:21, 저녁 6:51쯤) 네 Claude 구독으로 실행돼. 다음 실행 ${nextRunText()}. 요청한 원고·주제·변환을 먼저 하고, 하루 계획이 있으면 그 시각의 글을 써 (아침: 쿠팡·토스 링크 글·애드포스트 유입 글, 점심: 오늘 뜬 주제, 저녁: 증시 정리·종목 설명). 하루 계획을 끄면 7일 발행표를 채워. 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어오고, 발행은 네가 직접 해.`),
   ];
 }
 function secJobs() {
@@ -2151,7 +2234,7 @@ function secTrash() {
   if (!S.trash.length) return [h('p', { class: 'hint' }, '휴지통이 비어 있어. 지운 원고는 30일 동안 여기에 있어.')];
   return [h('div', { class: 'list' }, S.trash.map((p) => h('div', { class: 'item' },
     h('div', { class: 'main', style: 'cursor:default' }, h('b', null, titleOf(p)), h('small', null, '지운 날 ' + L.fmtTime(p.deleted_at))),
-    h('div', { class: 'side' }, h('button', { type: 'button', class: 'copy', onclick: async (ev) => { const r = await run(ev.currentTarget, () => api(`/posts/${p.id}/restore`, { method: 'POST', body: {} }), '되살렸어'); if (r) { if (r.demoted) toast("되살렸어 — 그사이 승인을 푼 상품 이미지가 있어서 '검수 필요'로 바꿨어", 5000); await load(); } } }, '되살리기')))))];
+    h('div', { class: 'side' }, h('button', { type: 'button', class: 'copy', onclick: async (ev) => { const r = await run(ev.currentTarget, () => api(`/posts/${p.id}/restore`, { method: 'POST', body: {} }), '되살렸어'); if (r) { const m = [r.demoted ? "그사이 승인을 푼 상품 이미지가 있어서 '검수 필요'로 바꿨어" : '', r.kept ? "보관일이 지난 자동 원고라 '보관'으로 바꿨어 (자동 정리 안 함 — 원고 화면에서 풀 수 있어)" : ''].filter(Boolean); if (m.length) toast('되살렸어 — ' + m.join(' · '), 5000); await load(); } } }, '되살리기')))))];
 }
 function secGuide() {
   const g = (title, ...kids) => h('div', { class: 'gsec' }, h('h3', null, title), ...kids);

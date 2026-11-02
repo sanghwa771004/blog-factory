@@ -1,11 +1,11 @@
-// 블로그 글공장 서버 API (1.5.2)
+// 블로그 글공장 서버 API (1.6.0)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
 // - 이미지 스튜디오: OpenAI·Pexels 키는 이 함수의 환경변수(Secrets)에만 있고 화면으로는 '있음/없음'만 보냄.
 //   이미지 파일은 비공개 버킷(post-images)에, 정보는 post_images 표에. 화면은 1시간짜리 서명 주소로만 봄
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE } from "./checks.js";
+import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE, cleanPlan, KEEP_DAYS } from "./checks.js";
 import {
   parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, QUALITIES, ratioOf, sizeFor,
   validApiSize, promptRisk, blocksOf, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
@@ -23,7 +23,7 @@ import {
   reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub, storagePath, sha256Hex,
 } from "./image_service.js";
 
-const VERSION = "1.5.2";
+const VERSION = "1.6.0";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -375,9 +375,15 @@ type Ctx = { req: Request; auth: Auth; params: string[]; url: URL };
 
 async function getState(c: Ctx) {
   const since30 = new Date(Date.now() - 30 * 86400e3).toISOString();
+  // 1.6.0: 만든 날부터 보관일(기본 3일)이 지난 자동 원고를 휴지통으로 (보관·요청 글은 그대로, 30일 동안 되살릴 수 있음).
+  // 자동 작가도 실행마다 부르지만, 자동 작가가 멈춘 날에도 목록이 30개를 넘지 않게 화면을 열 때마다 한 번 더. 020 전 DB면 건너뜀
+  const expired = await Promise.resolve(sb.rpc("expire_auto_posts")).then(({ data, error }) => {
+    if (error) { if (!/expire_auto_posts|PGRST202|42883/.test(`${error.code ?? ""} ${error.message ?? ""}`)) console.error("expire_auto_posts:", error.message); return null; }
+    return data as J;
+  }).catch(() => null);
   const [posts, trash, jobs, settings, runs, channels, programs, compat, topics, imports] = await Promise.all([
     sb.from("posts").select("*").is("deleted_at", null).order("created_at", { ascending: false }).limit(500),
-    sb.from("posts").select("id, titles, keyword, deleted_at").not("deleted_at", "is", null).gte("deleted_at", since30).order("deleted_at", { ascending: false }).limit(50),
+    sb.from("posts").select("id, titles, keyword, deleted_at").not("deleted_at", "is", null).gte("deleted_at", since30).order("deleted_at", { ascending: false }).limit(150), // 1.6.0: 자동 정리로 하루 10편씩 들어와서 넉넉히
     sb.from("requests").select("*").order("created_at", { ascending: false }).limit(100),
     sb.from("settings").select("*").eq("id", 1).maybeSingle(),
     sb.from("runs").select("*").order("ran_at", { ascending: false }).limit(40), // 하루 3번 × 약 2주 — 홈 '최근 7일 정리'의 실행 횟수가 잘리지 않게
@@ -401,7 +407,7 @@ async function getState(c: Ctx) {
   const rpcData = (p: PromiseLike<{ data: unknown; error: unknown }>) => Promise.resolve(p).then(({ data, error }) => { if (error) throw error; return data; });
   // 홈 '최근 7일 정리'의 자동 작가 실행 수: 한국 날짜로 6일 전 0시부터 (실행 기록 목록이 잘려도 정확하게)
   const week0 = new Date(Date.parse(`${kstToday()}T00:00:00+09:00`) - 6 * 86400e3).toISOString();
-  const [postChannels, searchTerms, metricPosts, runsAuto7d] = await Promise.all([
+  const [postChannels, searchTerms, metricPosts, runsAuto7d, planToday] = await Promise.all([
     soft(fetchAll("post_channels", [["posted_on", false], ["id", true]]), "post_channels", [] as J[]),
     soft(fetchAll("search_terms", [["period_end", false], ["id", true]], (q) => q.gte("period_end", since400),
       "id, post_id, term, views, period_start, period_end, channel_id, source_label, created_at"), "search_terms", [] as J[]),
@@ -410,6 +416,8 @@ async function getState(c: Ctx) {
     Promise.resolve(sb.from("runs").select("id", { count: "exact", head: true }).eq("kind", "auto").gte("ran_at", week0))
       .then((r) => { if (r.error) throw r.error; return typeof r.count === "number" ? r.count : null; })
       .catch((e) => { console.error("state runs_auto_7d:", String((e as Error)?.message ?? e)); return null; }),
+    // 1.6.0 오늘 계획: 종류별로 오늘 자동으로 쓴 원고 수 (올리고 지운 것도 셈). 020 전 DB면 null
+    Promise.resolve(sb.rpc("plan_today")).then(({ data, error }) => (error ? null : data as J)).catch(() => null),
   ]);
   const [products, pp, links, imageSlots] = await Promise.all([
     fetchAll("products", [["updated_at", false], ["id", true]]),
@@ -440,6 +448,7 @@ async function getState(c: Ctx) {
     channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products,
     post_products: pp, links, imports: imports.data, image_slots: imageSlots.error ? [] : imageSlots.data,
     post_channels: postChannels, search_terms: searchTerms, metric_post_ids: metricPosts, unavailable, runs_auto_7d: runsAuto7d,
+    plan_today: planToday, expired,
     requests: jobs.data, lastRun: runs.data?.[0] ?? null, // 예전 화면 호환
   });
 }
@@ -628,6 +637,8 @@ async function patchPost(c: Ctx) {
   if ("publish_date" in b) patch.publish_date = optDate(b.publish_date, "publish_date");
   if ("blog_url" in b) patch.blog_url = optUrl(b.blog_url, "blog_url");
   if ("published_on" in b) patch.published_on = optDate(b.published_on, "published_on");
+  // 1.6.0 보관: 자동 원고를 보관일이 지나도 휴지통으로 보내지 않음
+  if ("keep" in b) patch.keep = b.keep === true;
   if ("refresh" in b) {
     // 개선안은 자동 작가만 쓰고, 화면에서는 지우기만 (다 고쳤거나 필요 없을 때)
     if (b.refresh !== null) fail(400, "bad_field", { field: "refresh" });
@@ -699,6 +710,7 @@ async function patchPost(c: Ctx) {
   // DB도 같은 규칙으로 막음 (그사이 다른 기기에서 승인 안 한 상품 이미지를 넣은 경우 등)
   if (error && /product_check_needed/.test(String(error.message ?? ""))) fail(409, "check_failed", { errors: await productGateFor(merged) });
   if (error && "refresh" in patch && missingColumn(error, "refresh")) fail(409, "db_update_needed", { migration: "016" }); // 016 전 DB
+  if (error && "keep" in patch && missingColumn(error, "keep")) fail(409, "db_update_needed", { migration: "020" }); // 020 전 DB
   if (error) throw error;
   // 본문이 바뀌면 사진 자리 연결을 새 본문에 맞춤 (설명을 조금 고친 자리는 옮기고, 사라진 자리의 이미지는 보관함에 그대로)
   let image_sync: unknown = null;
@@ -730,7 +742,23 @@ async function restorePost(c: Ctx) {
   if (!data) fail(404, "not_found");
   // 1.5.1: 휴지통에 있는 사이 상품 이미지 승인을 풀었으면 DB가 '검수 필요'로 되살림 → 화면에 알려줌
   const demoted = !!before && ["ready", "scheduled"].includes(String((before as J).stage)) && (data as J).stage === "review";
-  return json({ post: data, demoted });
+  const kept = await keepIfExpired(data as J);
+  return json({ post: kept ?? data, demoted, kept: !!kept });
+}
+// 1.6.0: 보관일이 지난 자동 원고를 되살리면 '보관'으로 바꿈 — 안 그러면 다음에 화면을 열 때 자동 정리(expire_auto_posts)가 다시 휴지통으로 보냄.
+// 기준은 DB expire_auto_posts 와 같음: 만든 한국 날짜 < 오늘 − 보관일 + 1. 020 전 DB(keep 없음)·실패하면 그냥 되살리기만
+const kstDay = (t: number) => new Date(t + 9 * 3600e3).toISOString().slice(0, 10);
+async function keepIfExpired(p: J): Promise<J | null> {
+  if (!p || p.source !== "auto" || p.keep !== false || !p.created_at) return null;
+  const { data: st, error: se } = await sb.from("settings").select("keep_days").eq("id", 1).maybeSingle();
+  if (se) return null;
+  const days = Math.min(14, Math.max(1, Math.trunc(Number((st as J | null)?.keep_days)) || 3));
+  const keptFrom = kstDay(Date.now() - (days - 1) * 86400e3);
+  const made = new Date(String(p.created_at)).getTime();
+  if (!Number.isFinite(made) || kstDay(made) >= keptFrom) return null;
+  const { data, error } = await sb.from("posts").update({ keep: true }).eq("id", p.id).select().maybeSingle();
+  if (error || !data) { if (error) console.error("restore keep:", String(error.message ?? error).slice(0, 200)); return null; }
+  return data as J;
 }
 async function retryPost(c: Ctx) {
   await jobLimits(1);
@@ -1102,6 +1130,13 @@ async function patchSettings(c: Ctx) {
   if ("backlog_limit" in b) s.backlog_limit = optInt(b.backlog_limit, "backlog_limit", 0, 60) ?? 0;
   if ("auto_enabled" in b) s.auto_enabled = b.auto_enabled === true;
   if ("len" in b) s.len = oneOf(String(b.len), ["1500", "2500", "3500"] as const, "len");
+  // 1.6.0 하루 계획: 종류마다 0~4편 (모르는 종류는 버림), 자동 원고 보관일 1~14일
+  if ("daily_plan" in b) {
+    if (!b.daily_plan || typeof b.daily_plan !== "object" || Array.isArray(b.daily_plan)) fail(400, "bad_field", { field: "daily_plan" });
+    for (const v of Object.values(b.daily_plan as J)) if (!(Number.isInteger(v) && (v as number) >= 0 && (v as number) <= 4)) fail(400, "bad_field", { field: "daily_plan" });
+    s.daily_plan = cleanPlan(b.daily_plan);
+  }
+  if ("keep_days" in b) s.keep_days = optInt(b.keep_days, "keep_days", KEEP_DAYS.min, KEEP_DAYS.max) ?? KEEP_DAYS.def;
   if ("score_weights" in b) {
     const w: J = {};
     for (const f of Object.keys(SCORE_FACTORS)) {
@@ -1198,7 +1233,7 @@ async function patchSettings(c: Ctx) {
   // DB에 015(주력 주제 낱말 열)가 아직 없으면 그 칸만 빼고 저장 — 서버를 DB보다 먼저 올려도 다른 설정 저장이 막히지 않게
   const skipped: string[] = [];
   // DB에 그 열이 아직 없으면(015 전: 주력 주제 낱말, 016 전: 쌓아둘 원고 한도) 그 칸만 빼고 저장
-  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs"]) {
+  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs", "daily_plan", "keep_days"]) {
     if (!(error && col in s && missingColumn(error, col))) continue;
     delete s[col];
     skipped.push(col);
@@ -1565,7 +1600,7 @@ async function getPostImages(c: Ctx) {
   const extraRows = sy.rows.filter((r) => isExtraKey(String(r.slot_key)));
   return json({
     post_id: post.id,
-    slots: sy.m.slots.map((s: J) => ({ index: s.index, n: s.n, text: s.text, key: s.key, heading: s.heading, before: s.before, after: s.after, row: s.link })),
+    slots: sy.m.slots.map((s: J) => ({ index: s.index, n: s.n, text: s.text, key: s.key, heading: s.heading, before: s.before, after: s.after, prompt: s.prompt ?? "", row: s.link })), // 1.6.0: prompt = 제미나이 프롬프트
     extra: EXTRA_SLOTS.map((x) => ({ ...x, row: extraRows.find((r) => r.slot_key === x.key) ?? null })),
     orphans: sy.m.orphans, rekeyed: sy.rekeyed,
     images: await withUrls([...imgs.values()]),

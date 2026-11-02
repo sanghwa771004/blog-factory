@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES } from './checks.js?v=1.5.2';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES, PLAN_KINDS, PLAN_RUNS, cleanPlan, planTotal, KEEP_DAYS, promptsOf } from './checks.js?v=1.6.0';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -89,10 +89,19 @@ export function makeZip(files, date = new Date()) {
 }
 
 // ───────── 원고 내보내기 ─────────
-const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1');
+// **굵게**, ==바탕색 강조== (1.6.0)
+const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/==(.+?)==/g, '$1');
+// 1.6.0 네이버 붙여넣기용 서식: 소제목은 크게(24px·굵게), 강조·핵심 상자는 바탕색. 스마트에디터가 h2 를 버려도 남게 글자 크기는 안쪽 span 에도 줌
+export const EXPORT_STYLE = {
+  headPx: 24,
+  mark: '#fff0a0',   // ==강조== 바탕색 (노랑)
+  note: '#e3f4ea',   // > 핵심 상자 바탕색 (연두)
+  me: '#fff1a8',     // 빈 [내 경험] 칸 (채우라는 표시)
+};
 function inlineHtml(s, mode) {
-  const h = esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-  return h.replace(/\[(내 경험[^\]]*)\]/g, mode === 'export' ? '<span style="background:#fff1a8;">[$1]</span>' : '<span class="me">[$1]</span>');
+  const h = esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/==(.+?)==/g, mode === 'export' ? `<span style="background-color:${EXPORT_STYLE.mark};"><b>$1</b></span>` : '<mark>$1</mark>');
+  return h.replace(/\[(내 경험[^\]]*)\]/g, mode === 'export' ? `<span style="background:${EXPORT_STYLE.me};">[$1]</span>` : '<span class="me">[$1]</span>');
 }
 export const sortedLinks = (links) => [...(links || [])].sort((a, b) => (a.sort || 0) - (b.sort || 0) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
 // 본문의 n번째 [링크] 자리에 들어갈 링크 (링크가 모자라면 마지막 링크)
@@ -109,13 +118,16 @@ export function viewHtml(post, links, imgs) {
   return parseBody(post.body).map((b) => {
     if (b.t === 'h') return `<h2>${inlineHtml(b.text, 'view')}</h2>`;
     if (b.t === 'p') return `<p>${inlineHtml(b.text, 'view')}</p>`;
+    if (b.t === 'note') return `<p class="note">${inlineHtml(b.text, 'view')}</p>`;
     if (b.t === 'ul') return `<ul>${b.items.map((i) => `<li>${inlineHtml(i, 'view')}</li>`).join('')}</ul>`;
     if (b.t === 'table') return `<div class="tblwrap"><table>${b.rows.map((r, ri) => `<tr>${r.map((c) => (ri ? `<td>${inlineHtml(c, 'view')}</td>` : `<th>${inlineHtml(c, 'view')}</th>`)).join('')}</tr>`).join('')}</table></div>`;
     if (b.t === 'img') {
       if (!b.full) return `<div class="img">📷 ${esc(b.text)}</div>`;
       const n = ++pic, im = imgs && imgs[n - 1];
-      if (im && safeImgUrl(im.url)) return `<figure class="img has"><img src="${esc(im.url)}" alt="${esc(im.alt || b.text)}" loading="lazy" decoding="async"><figcaption>${esc(imgLabel(n, b))}${im.label ? ' · ' + esc(im.label) : ''}</figcaption></figure>`;
-      return `<div class="img">📷 ${esc(imgLabel(n, b))}${im ? ' · 이미지 연결됨' : ''}</div>`;
+      // 1.6.0: 사진 자리 아래에 제미나이 프롬프트 + 복사 버튼 (버튼은 화면이 data-prompt 번호로 연결)
+      const gp = b.prompt ? `<div class="gprompt"><div class="gp-h"><b>제미나이 프롬프트 · 사진 ${n}</b><button type="button" class="copy" data-prompt="${n}">프롬프트 복사</button></div><p>${esc(b.prompt)}</p></div>` : '';
+      if (im && safeImgUrl(im.url)) return `<figure class="img has"><img src="${esc(im.url)}" alt="${esc(im.alt || b.text)}" loading="lazy" decoding="async"><figcaption>${esc(imgLabel(n, b))}${im.label ? ' · ' + esc(im.label) : ''}</figcaption></figure>${gp}`;
+      return `<div class="img">📷 ${esc(imgLabel(n, b))}${im ? ' · 이미지 연결됨' : ''}</div>${gp}`;
     }
     if (b.t === 'cta') {
       const l = linkForSlot(links, slot++);
@@ -130,15 +142,18 @@ export function exportHtml(post, { links, programs, images } = {}) {
   const out = [];
   const S = {
     p: 'line-height:1.8;margin:0 0 1em;',
-    h: 'font-size:1.3em;font-weight:bold;line-height:1.4;margin:1.6em 0 .6em;',
+    h: `font-size:${EXPORT_STYLE.headPx}px;font-weight:bold;line-height:1.45;margin:1.8em 0 .7em;`,
+    note: `line-height:1.8;margin:0 0 1.2em;padding:12px 14px;background-color:${EXPORT_STYLE.note};`,
     th: 'border:1px solid #d9d9d9;padding:8px 10px;text-align:left;background:#f4f6f4;font-weight:bold;',
     td: 'border:1px solid #d9d9d9;padding:8px 10px;text-align:left;',
   };
   if (disc) out.push(`<p style="font-size:.9em;color:#555;background:#f4f4f4;padding:10px 12px;border-radius:6px;margin:0 0 1.4em;">${esc(disc).replace(/\n/g, '<br>')}</p>`);
   let slot = 0, pic = 0;
   for (const b of parseBody(post.body)) {
-    if (b.t === 'h') out.push(`<h2 style="${S.h}">${inlineHtml(b.text, 'export')}</h2>`);
+    if (b.t === 'h') out.push(`<h2 style="${S.h}"><span style="font-size:${EXPORT_STYLE.headPx}px;"><b>${inlineHtml(b.text, 'export')}</b></span></h2>`);
     else if (b.t === 'p') out.push(`<p style="${S.p}">${inlineHtml(b.text, 'export')}</p>`);
+    // 핵심 상자: 문단 바탕색 + 글자 바탕색 (스마트에디터가 문단 바탕색을 버려도 글자 바탕색은 남게)
+    else if (b.t === 'note') out.push(`<p style="${S.note}"><span style="background-color:${EXPORT_STYLE.note};">${inlineHtml(b.text, 'export')}</span></p>`);
     else if (b.t === 'ul') out.push(`<ul style="margin:0 0 1em;padding-left:1.4em;line-height:1.8;">${b.items.map((i) => `<li>${inlineHtml(i, 'export')}</li>`).join('')}</ul>`);
     else if (b.t === 'table') out.push(`<table style="border-collapse:collapse;width:100%;margin:0 0 1.2em;font-size:.95em;">${b.rows.map((r, ri) => `<tr>${r.map((c) => `<${ri ? 'td' : 'th'} style="${ri ? S.td : S.th}">${inlineHtml(c, 'export')}</${ri ? 'td' : 'th'}>`).join('')}</tr>`).join('')}</table>`);
     else if (b.t === 'img') {
@@ -169,6 +184,7 @@ export function exportPlain(post, { links, programs, images } = {}) {
   for (const b of parseBody(post.body)) {
     if (b.t === 'h') lines.push('', '■ ' + stripMd(b.text));
     else if (b.t === 'p') lines.push(stripMd(b.text));
+    else if (b.t === 'note') lines.push('▶ ' + stripMd(b.text));
     else if (b.t === 'ul') b.items.forEach((i) => lines.push('· ' + stripMd(i)));
     else if (b.t === 'table') b.rows.forEach((r) => lines.push(r.map(stripMd).join(' | ')));
     else if (b.t === 'img') {
@@ -620,7 +636,8 @@ export function crowdedDays(posts, today = todayStr(), perDay = 1) {
 // 목표 = 하루 발행 수 × 7, 잡힌 원고 = 내일~7일 뒤 발행일이 잡힌 원고(지운 것·실패·대기 빼고 — DB writer_context 'upcoming'과 같음)
 // 한 번 실행에 자동 글은 최대 4편, 요청 원고까지 합쳐 최대 6편. 자동 작가가 쓴 원고는 항상 '검수 필요'로 들어옴
 // 1.4.0: 검수·게시 안 한 원고(쌓인 원고)가 한도 이상이면 자동 글을 안 씀 — DB add_post 도 같은 규칙으로 막음 (backlog_state)
-export const AUTO_RULES = { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 };
+// 1.6.0 하루 계획: 계획 글은 한 번 실행에 최대 6편, 2단계(요청 원고) 포함 최대 8편
+export const AUTO_RULES = { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5, maxPlanPerRun: 6, maxPlanTotalPerRun: 8 };
 export const BACKLOG_STAGES = ['review', 'verify', 'ready', 'scheduled'];
 // 쌓인 원고: 사람이 검수·게시해야 하는 원고. 한도는 설정(backlog_limit, 1~60), 0이면 하루 발행 수 × 7 (DB backlog_state 와 같음)
 // overdue = 예정일이 지난 원고 중 날짜를 다시 잡을 수 있는 것(검수 필요·정보 필요·발행 준비),
@@ -630,13 +647,47 @@ export function backlogInfo(posts, settings, today = todayStr()) {
   const st = settings || {};
   const perDay = Math.min(3, Math.max(1, Number(st.per_day) || 1));
   const own = Math.round(Number(st.backlog_limit) || 0);
-  const limit = own > 0 ? Math.min(60, own) : perDay * AUTO_RULES.days;
+  // 1.6.0: 하루 계획이 있으면 계획 합계 × 보관일 (10편 × 3일 = 30) — DB backlog_state 와 같음
+  const pt = planTotal(st.daily_plan);
+  const limit = pt > 0 ? pt * keepDaysOf(st) : own > 0 ? Math.min(60, own) : perDay * AUTO_RULES.days;
   const list = (posts || []).filter((p) => p && !p.deleted_at && BACKLOG_STAGES.includes(p.stage));
   const late = list.filter((p) => p.publish_date && p.publish_date < today);
   const overdue = late.filter((p) => RESCHEDULE_STAGES.includes(p.stage)).length;
   const review = list.filter((p) => p.stage === 'review' || p.stage === 'verify').length;
   return { backlog: list.length, limit, auto: !(own > 0), full: list.length >= limit, room: Math.max(0, limit - list.length), overdue, overdueScheduled: late.length - overdue, review, ready: list.length - review };
 }
+// ───────── 하루 계획 (1.6.0) ─────────
+export const keepDaysOf = (st) => { const n = Math.round(Number((st || {}).keep_days)); return n >= KEEP_DAYS.min && n <= KEEP_DAYS.max ? n : KEEP_DAYS.def; };
+export const planActive = (st) => planTotal((st || {}).daily_plan) > 0;
+// 오늘 계획 진행: 실행(아침·점심·저녁)마다 종류별 목표·쓴 수. done 은 서버 plan_today.done (올리고 지운 글도 셈),
+// 없으면(020 전 서버) 목록에 있는 오늘 자동 원고로 셈
+export function planProgress({ settings, planToday, posts, today = todayStr() } = {}) {
+  const plan = cleanPlan((planToday && planToday.plan) || (settings || {}).daily_plan);
+  let done = planToday && planToday.done && typeof planToday.done === 'object' ? planToday.done : null;
+  if (!done) {
+    done = {};
+    for (const p of posts || []) if (p && p.source === 'auto' && PLAN_KINDS[p.plan_kind] && String(p.created_at || '').length >= 10 && kstDate(p.created_at) === today) done[p.plan_kind] = (done[p.plan_kind] || 0) + 1;
+  }
+  const runs = Object.entries(PLAN_RUNS).map(([run, r]) => {
+    const kinds = Object.entries(PLAN_KINDS).filter(([, k]) => k.run === run).map(([kind, k]) => ({ kind, label: k.label, short: k.short, target: plan[kind], done: Math.min(Number(done[kind]) || 0, 99) }));
+    return { run, label: r.label, time: r.time, kinds, target: kinds.reduce((a, k) => a + k.target, 0), done: kinds.reduce((a, k) => a + Math.min(k.done, k.target), 0) };
+  });
+  return { plan, total: planTotal(plan), done: runs.reduce((a, r) => a + r.done, 0), runs, keepDays: keepDaysOf(settings), active: planTotal(plan) > 0 };
+}
+// 한국 날짜 (created_at 같은 UTC 시각 → YYYY-MM-DD)
+export const kstDate = (iso) => { const t = Date.parse(iso); return Number.isFinite(t) ? new Date(t + 9 * 3600e3).toISOString().slice(0, 10) : ''; };
+// 자동 원고가 휴지통으로 가는 날 (만든 한국 날짜 + 보관일). 보관·요청 글은 null
+export function expiresOn(post, settings) {
+  if (!post || post.source !== 'auto' || post.keep || !post.created_at) return null;
+  const d = kstDate(post.created_at);
+  return d ? addDays(d, keepDaysOf(settings)) : null;
+}
+// 사진 자리의 제미나이 프롬프트를 한 번에 복사할 글 (사진 번호 · 설명 · 프롬프트)
+export function promptsText(post) {
+  const ps = promptsOf(post && post.body).filter((x) => x.prompt);
+  return ps.map((x) => `[사진 ${x.n}] ${x.text}\n${x.prompt}`).join('\n\n');
+}
+
 // pendingWrites: 기다리는 원고 작업 수 — 2단계에서 채우면 '검수 필요'가 돼서 쌓인 원고가 그만큼 늘어 (프롬프트 3단계: 한도 − 쌓인 원고 − 2단계에서 저장한 원고)
 export function autoPlan({ posts, settings, today = todayStr(), pendingWrites = 0 } = {}) {
   const st = settings || {};

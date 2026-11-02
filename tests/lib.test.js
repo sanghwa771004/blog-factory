@@ -383,7 +383,7 @@ describe('검색 노출 도우미 (1.3.0)', () => {
     assert.equal(L.autoPlan({ posts, settings: { per_day: 3, auto_topics: 'x', auto_enabled: false }, today: t }).autoNext, 0, '자동 채우기 꺼짐');
     assert.equal(L.autoPlan({ posts, settings: { per_day: 1 }, today: t }).enabled, false, '주제가 없으면 자동 글 없음');
     assert.equal(L.autoPlan({ posts: [], settings: {}, today: t }).perDay, 1, '기본은 하루 1편');
-    assert.deepEqual(L.AUTO_RULES, { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5 });
+    assert.deepEqual(L.AUTO_RULES, { days: 7, maxAutoPerRun: 4, maxPerRun: 6, maxJobsPerRun: 5, maxPlanPerRun: 6, maxPlanTotalPerRun: 8 });
   });
 });
 

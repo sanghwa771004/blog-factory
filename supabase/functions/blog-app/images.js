@@ -44,13 +44,21 @@ export function parseSlots(body) {
     const near = (from, step) => {
       for (let j = from; j >= 0 && j < lines.length && Math.abs(j - i) <= 6; j += step) {
         const t = lines[j].trim();
-        if (!t || IMG_LINE.test(lines[j]) || /^\[(링크|내 경험)/.test(t) || /^\|/.test(t)) continue;
+        if (!t || IMG_LINE.test(lines[j]) || /^\[(링크|내 경험|프롬프트)/.test(t) || /^\|/.test(t)) continue;
         if (/^#{1,4}\s/.test(t)) return ''; // 다른 소제목을 넘어가지 않음
         return stripMd(t);
       }
       return '';
     };
-    out.push({ index: out.length, n: out.length + 1, text, key: slotKey(text, occ), heading, before: near(i - 1, -1), after: near(i + 1, 1), line: i });
+    // 1.6.0: 바로 아래(빈 줄 건너뜀) "[프롬프트: …]" 줄 = 이 사진을 만들 제미나이 프롬프트 (자리 열쇠에는 안 들어감 — 프롬프트를 고쳐도 연결 그대로)
+    let prompt = '';
+    for (let j = i + 1; j < lines.length && j <= i + 3; j++) {
+      const t = lines[j].trim();
+      if (!t) continue;
+      if (/^\[프롬프트/.test(t)) prompt = t.replace(/^\[프롬프트\s*\d*\s*:?\s*/, '').replace(/\]\s*$/, '').trim();
+      break;
+    }
+    out.push({ index: out.length, n: out.length + 1, text, key: slotKey(text, occ), heading, before: near(i - 1, -1), after: near(i + 1, 1), line: i, prompt });
   }
   return out;
 }

@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SEO_RULES, countMe } from '../checks.js';
+import { SEO_RULES, countMe, PLAN_KINDS, PLAN_RUNS, DEFAULT_PLAN, KEEP_DAYS, PLAN_MAX_PER_KIND, promptsOf, parseBody } from '../checks.js';
 import { AUTO_RULES, BACKLOG_STAGES, RESCHEDULE_STAGES, backlogInfo, autoPlan } from '../lib.js';
 import { isOwnPhotoSlot } from '../images.js';
 
@@ -78,7 +78,7 @@ test('1.4.0 운영: 쌓인 원고 한도·개선안·유입 검색어 규칙이 
   const APP = read('app.js');
   const SRV = read('supabase/functions/blog-app/index.ts');
   // 쓰기 함수 목록에 개선안 저장(set_refresh)이 있음
-  assert.match(PROMPT, /쓰기는 아래에 적힌 함수 호출만 써: writer_context, job_start, fill_post, job_fail, add_topics, set_variants, set_refresh, add_post, log_run\./);
+  assert.match(PROMPT, /쓰기는 아래에 적힌 함수 호출만 써: expire_auto_posts, writer_context, job_start, fill_post, job_fail, add_topics, set_variants, set_refresh, add_post, log_run\./);
   // 쌓인 원고: 같은 단계(검수 필요·정보 필요·발행 준비·예약)와 같은 기본 한도(하루 발행 수 × 7)
   assert.deepEqual(BACKLOG_STAGES, ['review', 'verify', 'ready', 'scheduled']);
   assert.ok(M016.includes("p.stage in ('review', 'verify', 'ready', 'scheduled')"), 'DB backlog_state 가 같은 단계를 셈');
@@ -123,4 +123,43 @@ test('1.4.0 운영: 쌓인 원고 한도·개선안·유입 검색어 규칙이 
   assert.match(PROMPT, /search_terms_top: 최근 90일 실제 유입 검색어/);
   assert.match(PROMPT, /숫자는 그대로, 부풀리지 마/);
   assert.ok(M016.includes("'search_terms_top'"), 'DB writer_context 에 유입 검색어');
+});
+
+test('1.6.0 하루 계획: 종류·편수·시각·보관일·사진 프롬프트 규칙이 프롬프트·앱·DB(020)에서 같음', () => {
+  const M020 = read('supabase/migrations/020_daily_plan_1_6_0.sql');
+  const APP = read('app.js');
+  const kinds = Object.keys(PLAN_KINDS);
+  assert.deepEqual(kinds, ['affiliate', 'adpost', 'trending', 'market', 'stock']);
+  // DB 검사·계획 합계·add_post 가 같은 종류만 받음
+  const list = kinds.map((k) => `'${k}'`).join(', ');
+  assert.ok(M020.includes(`check (plan_kind in ('', ${list}))`), 'posts_plan_kind_check');
+  assert.ok(M020.includes(`e.key in (${list})`), 'plan_total 종류');
+  assert.ok(M020.includes(`if pk not in ('', ${list}) then`), 'add_post 종류');
+  // 기본 계획·종류별 최대·보관일
+  assert.ok(M020.includes(`default '${JSON.stringify(DEFAULT_PLAN).replace(/:/g, ': ').replace(/,/g, ', ')}'::jsonb`), 'DB 기본 계획 = 앱 DEFAULT_PLAN');
+  assert.ok(M020.includes(`least(greatest(e.value::int, 0), ${PLAN_MAX_PER_KIND})`) && M020.includes(`least((s.daily_plan->>pk)::int, ${PLAN_MAX_PER_KIND})`), '종류마다 최대 4편');
+  assert.ok(M020.includes(`keep_days int not null default ${KEEP_DAYS.def}`) && M020.includes(`check (keep_days between ${KEEP_DAYS.min} and ${KEEP_DAYS.max})`));
+  // 프롬프트: 종류 id 와 실행 시각, 저장 방법, 한 번 실행 최대 편수
+  for (const k of kinds) assert.ok(PROMPT.includes(`${k}(`) || PROMPT.includes(`- ${k} —`), `프롬프트 종류 ${k}`);
+  assert.match(PROMPT, /"plan_kind":"<종류>"/);
+  assert.ok(PROMPT.includes(`계획 글은 한 번 실행에 최대 ${AUTO_RULES.maxPlanPerRun}편, 2단계에서 쓴 원고까지 합쳐 최대 ${AUTO_RULES.maxPlanTotalPerRun}편`));
+  assert.ok(PROMPT.includes('select public.expire_auto_posts();'), '실행마다 먼저 정리');
+  assert.ok(PROMPT.includes(`affiliate 는 ${JSON.stringify(PLAN_KINDS.affiliate.programs)}`) && PROMPT.includes(`나머지는 ${JSON.stringify(PLAN_KINDS.adpost.programs)}`), '종류별 수익 모델');
+  // 실행 시각: 앱(RUN_TIMES)·PLAN_RUNS·문서의 예약 작업 cron 이 같음
+  const rt = APP.match(/const RUN_TIMES = (\[\[[^;]+\]\]);/)[1];
+  assert.equal(rt, '[[8, 51], [13, 21], [18, 51]]');
+  assert.deepEqual(Object.values(PLAN_RUNS).map((r) => r.time), ['오전 8:51', '오후 1:21', '저녁 6:51']);
+  assert.ok(DOC.includes('`CRON_TZ=Asia/Seoul 51 8,18 * * *`') && DOC.includes('`CRON_TZ=Asia/Seoul 21 13 * * *`'));
+  assert.match(PROMPT, /아침 실행 \(11시 전\)[\s\S]*점심 실행 \(11시~16시 전\)[\s\S]*저녁 실행 \(16시부터\)/);
+  // 사진: 3~6곳, 자리마다 [프롬프트: …] — 앱이 그 줄을 사진의 프롬프트로 읽음
+  assert.ok(PROMPT.includes(`한 줄로 ${SEO_RULES.imagesMin}~${SEO_RULES.imagesMax}곳`));
+  assert.ok(PROMPT.includes('"[프롬프트: …]"'));
+  const sample = '[이미지: 창가 제습기]\n[프롬프트: 창가 책상 위 흰색 제습기, 오전 자연광, 4:3, 글자 없이]';
+  assert.deepEqual(promptsOf(sample), [{ n: 1, text: '창가 제습기', prompt: '창가 책상 위 흰색 제습기, 오전 자연광, 4:3, 글자 없이' }]);
+  // 강조: ==문장== 과 "> " 핵심 상자를 앱이 알아봄
+  assert.ok(PROMPT.includes('"==문장=="') && PROMPT.includes('"> " 로 시작하는 한 줄 상자'));
+  assert.deepEqual(parseBody('> 핵심: 소음부터 봐').map((b) => b.t), ['note']);
+  // 투자 글 안내 문구는 앱 검사가 알아봄
+  const disc = PROMPT.match(/글 끝에 꼭: "([^"]+)"/)[1];
+  assert.match(disc, /투자 권유가 아니에요/);
 });

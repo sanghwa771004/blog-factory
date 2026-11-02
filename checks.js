@@ -39,7 +39,40 @@ export const CONTENT_TYPES = {
   faq: { label: '자주 묻는 질문' },
   tutorial: { label: '튜토리얼' },
   sns_short: { label: 'SNS용 짧은 글', short: true },
+  // 1.6.0 하루 계획의 저녁 글 — 숫자는 확인한 출처로만, 투자 권유 아님 안내 필수 (checkPost 의 invest_* 검사)
+  market_summary: { label: '증시 정리', needsSources: true, invest: true },
+  stock_analysis: { label: '종목 설명', needsSources: true, invest: true },
 };
+
+// ───────── 하루 계획 (1.6.0) ─────────
+// 자동 작가가 하루에 쓰는 종류와 실행 시각. 편수는 설정(settings.daily_plan, 종류마다 0~4), 시각은 예약 작업 (docs/auto-writer-prompt.md)
+// DB 020 의 posts.plan_kind 검사·plan_total() 과 같은 종류 — tests/sync.test.js 가 서로 맞는지 확인
+export const PLAN_RUNS = {
+  morning: { label: '아침', time: '오전 8:51' },
+  midday: { label: '점심', time: '오후 1:21' },
+  evening: { label: '저녁', time: '저녁 6:51' },
+};
+export const PLAN_KINDS = {
+  affiliate: { label: '쿠팡·토스 링크 글', short: '쿠팡·토스', run: 'morning', programs: ['coupang_partners', 'toss_sharelink'] },
+  adpost: { label: '애드포스트 유입 글', short: '애드포스트', run: 'morning', programs: ['naver_adpost'] },
+  trending: { label: '오늘 뜬 주제 (홈판)', short: '오늘 이슈', run: 'midday', programs: ['naver_adpost'] },
+  market: { label: '미국·한국 증시 정리', short: '증시 정리', run: 'evening', programs: ['naver_adpost'], invest: true },
+  stock: { label: '미국·한국 종목 설명', short: '종목 설명', run: 'evening', programs: ['naver_adpost'], invest: true },
+};
+export const DEFAULT_PLAN = { affiliate: 2, adpost: 2, trending: 2, market: 2, stock: 2 };
+export const PLAN_MAX_PER_KIND = 4;
+export const KEEP_DAYS = { def: 3, min: 1, max: 14 };
+// 설정값 → 알려진 종류만, 0~4 정수로 (이상한 값은 0)
+export function cleanPlan(plan) {
+  const o = plan && typeof plan === 'object' && !Array.isArray(plan) ? plan : {};
+  const out = {};
+  for (const k of Object.keys(PLAN_KINDS)) {
+    const n = Number(o[k]);
+    out[k] = Number.isInteger(n) && n >= 0 ? Math.min(n, PLAN_MAX_PER_KIND) : 0;
+  }
+  return out;
+}
+export const planTotal = (plan) => Object.values(cleanPlan(plan)).reduce((a, n) => a + n, 0);
 
 export const SCORE_FACTORS = {
   demand: '검색 수요',
@@ -69,14 +102,39 @@ export function parseBody(md) {
     if (/^[-•*]\s+/.test(l)) { flushTbl(); (list = list || []).push(l.replace(/^[-•*]\s+/, '')); continue; }
     flushList(); flushTbl();
     if (!l) continue;
+    // 1.6.0: 사진 자리 바로 아래 "[프롬프트: …]" 줄은 그 사진을 만들 제미나이 프롬프트 — 본문 글이 아니라서 따로 들고 다님 (내보낼 때 빠짐)
+    if (PROMPT_LINE.test(l)) {
+      const last = blocks[blocks.length - 1];
+      if (last && last.t === 'img' && last.prompt == null) last.prompt = promptTextOf(l);
+      continue;
+    }
     if (/^#{1,4}\s/.test(l)) blocks.push({ t: 'h', text: l.replace(/^#+\s/, '') });
     // full: 줄 전체가 [이미지: …] 인 '사진 자리' (images.js 의 parseSlots·countImg 와 같은 기준 → 이미지 연결 순서가 맞음)
     else if (/^\[이미지/.test(l)) blocks.push({ t: 'img', text: l.replace(/^\[이미지:?\s*|\]$/g, ''), full: /^\[이미지[^\]]*\]$/.test(l) });
     else if (/^\[링크/.test(l)) blocks.push({ t: 'cta', text: l.replace(/^\[링크\s*\d*\s*:?\s*|\]$/g, '') });
-    else blocks.push({ t: 'p', text: l.replace(/^>\s?/, '') });
+    // 1.6.0: "> " 줄은 눈에 띄게 바탕색을 칠하는 핵심 상자 (예전엔 그냥 문단)
+    else if (/^>\s?/.test(l)) blocks.push({ t: 'note', text: l.replace(/^>\s?/, '') });
+    else blocks.push({ t: 'p', text: l });
   }
   flushList(); flushTbl();
   return blocks;
+}
+export const PROMPT_LINE = /^\s*\[프롬프트/;
+const promptTextOf = (l) => l.trim().replace(/^\[프롬프트\s*\d*\s*:?\s*/, '').replace(/\]\s*$/, '').trim();
+// 사진 자리(줄 전체가 [이미지: …])마다 순서대로 { n, text: 사진 설명, prompt: 제미나이 프롬프트('' = 없음) }
+export function promptsOf(body) {
+  const out = [];
+  for (const b of parseBody(body)) if (b.t === 'img' && b.full) out.push({ n: out.length + 1, text: b.text, prompt: b.prompt || '' });
+  return out;
+}
+// 본문 글자 수 (공백 포함) — 독자가 읽는 글만: 소제목·문단·목록·표 칸·핵심 상자. 사진 자리·프롬프트·링크 자리·강조 표시(**, ==)는 빼고 셈
+export function bodyChars(body) {
+  let n = 0;
+  for (const b of parseBody(body)) {
+    const parts = b.t === 'ul' ? b.items : b.t === 'table' ? b.rows.flat() : (b.t === 'img' || b.t === 'cta') ? [] : [b.text || ''];
+    for (const s of parts) n += stripMd(s).replace(ME_RE, '').trim().length;
+  }
+  return n;
 }
 
 export const ME_RE = /\[내 경험[^\]]*\]/g;
@@ -107,7 +165,8 @@ export function compatOf(programId, channelId, compat) {
 }
 
 // ───────── 문장 도우미 ─────────
-const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1');
+// **굵게** 와 ==바탕색 강조== (1.6.0) 표시를 뺀 글
+const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/==(.+?)==/g, '$1');
 export function sentences(body) {
   const out = [];
   for (const b of parseBody(body)) {
@@ -165,7 +224,10 @@ export function similarity(a, b) {
 // ───────── 검색 노출 점검 (앱의 권장 기준 — 검색 순위 공식이 아님) ─────────
 // 아래 숫자는 네이버가 밝힌 기준이 아니라 앱이 정한 권장 기준이야. 검색량·경쟁도는 조회하지 않아.
 // 자동 작가 프롬프트(docs/auto-writer-prompt.md)도 같은 값을 써 — tests/sync.test.js 가 서로 맞는지 확인
-export const SEO_RULES = { minKeywordWords: 3, maxLinks: 2, earlyLinkShare: 0.15, focusShareGoal: 0.7, perDayRecommended: 1 };
+export const SEO_RULES = { minKeywordWords: 3, maxLinks: 2, earlyLinkShare: 0.15, focusShareGoal: 0.7, perDayRecommended: 1, imagesMin: 3, imagesMax: 6 };
+// 투자 글 (1.6.0): '투자 권유 아님' 안내와, 권유로 읽히는 표현
+export const INVEST_DISCLAIMER = /투자\s*(를\s*)?(권유|권고|추천|조언)[^.!?\n]{0,12}(아니|아닙|아님|않)|투자\s*판단[^.!?\n]{0,20}(본인|스스로|책임)|투자의?\s*(책임|결과)[^.!?\n]{0,10}(본인|투자자)/;
+export const INVEST_ADVICE = /(지금|당장|꼭|무조건)\s*(사|매수|담|팔|매도)(세요|야|자|하세요|해야)|매수\s*(추천|하세요|타이밍)|매도\s*(추천|하세요|타이밍)|목표\s*(주가|가)\s*[0-9]|수익\s*보장|무조건\s*(오른|상승|수익)|강력\s*추천\s*종목|급등\s*예상/;
 
 // 낱말 나누기: 공백·가운뎃점·쉼표·빗금·괄호로 나누고 min 글자 이상만
 const topicWords = (s, min = 2) => [...new Set(String(s || '').toLowerCase().split(/[\s·,/|&+()]+/).map((w) => w.trim()).filter((w) => w.length >= min))];
@@ -234,7 +296,7 @@ export function focusFit(post, focus, extra = '') {
   const lines = String(p.body || '').split('\n');
   const isHead = (l) => /^\s*#{1,4}\s/.test(l);
   const heads = lines.filter(isHead).join(' ');
-  const rest = lines.filter((l) => !isHead(l) && !/^\s*\[(이미지|링크|내 경험)/.test(l)).join(' ');
+  const rest = lines.filter((l) => !isHead(l) && !/^\s*\[(이미지|링크|내 경험|프롬프트)/.test(l)).join(' ');
   const noBody = !String(p.body || '').trim();
   const kw = termsIn(p.keyword, main), ti = termsIn(title, main);
   const whole = phrase && (countIn(p.keyword, phrase) + countIn(title, phrase)) > 0;
@@ -319,7 +381,17 @@ export function checkPost(post, ctx = {}) {
   const tableUnknown = (body.match(/확인 필요/g) || []).length;
   if (tableUnknown) W('table_unfilled', `본문에 '확인 필요'가 ${tableUnknown}곳 있어. 독자에게는 미완성으로 보여.`, '상품 정보를 확인해서 채우거나 그 칸을 빼줘.');
   const img = countImg(body);
-  if (img) T('image_placeholders', `사진 자리 ${img}곳: 원고 아래 '이미지'에서 사진을 만들거나 찾거나 올려서 연결하고, 내려받아 블로그에 넣어줘.`);
+  const planKind = PLAN_KINDS[post.plan_kind] ? post.plan_kind : '';
+  const prompts = promptsOf(body);
+  const withPrompt = prompts.filter((x) => x.prompt).length;
+  if (img) T('image_placeholders', withPrompt
+    ? `사진 자리 ${img}곳 · 제미나이 프롬프트 ${withPrompt}개: 미리보기의 '프롬프트 복사'로 제미나이에서 만들고, 받은 사진을 블로그의 그 자리에 넣어줘.`
+    : `사진 자리 ${img}곳: 원고 아래 '이미지'에서 사진을 만들거나 찾거나 올려서 연결하고, 내려받아 블로그에 넣어줘.`);
+  // 1.6.0: 사진은 3~6장 (사용자 기준 — 네이버가 밝힌 기준이 아님). 블로그·사이트 글만
+  if (!isShort && channel && channel.kind !== 'sns' && (img < SEO_RULES.imagesMin || img > SEO_RULES.imagesMax)) {
+    T('image_count', `사진 자리가 ${img}곳이야 (정한 기준 ${SEO_RULES.imagesMin}~${SEO_RULES.imagesMax}곳).`, img < SEO_RULES.imagesMin ? "본문 고치기에서 '[이미지: 장면]' 줄과 그 아래 '[프롬프트: …]' 줄을 더해줘." : '비슷한 사진 자리를 합쳐줘.');
+  }
+  if (planKind && withPrompt < prompts.length) T('image_prompt_missing', `사진 자리 ${prompts.length - withPrompt}곳에 제미나이 프롬프트가 없어.`, "사진 자리 바로 아래 줄에 '[프롬프트: 무엇을 어떤 구도·빛·분위기로]'를 적어줘.");
 
   // 4) 경험
   if (ctype && ctype.needsExperience && !hasExperience) {
@@ -340,7 +412,13 @@ export function checkPost(post, ctx = {}) {
   if (ranges.length && !freshPrice) W('price_range', `가격대 표현이 ${ranges.length}곳 있어. 지금 가격과 맞는지 확인해줘.`, '', ranges.slice(0, 3));
   const claims = sents.filter((s) => NUM_CLAIM.test(s.text) && s.kind !== 'table').map((s) => clip(s.text));
   if (claims.length && !sources.length) W('sources_missing', `숫자가 들어간 문장이 ${claims.length}곳 있는데 출처가 하나도 없어.`, '근거 자료 주소를 출처에 넣거나 숫자를 일반적인 설명으로 바꿔줘.', claims.slice(0, 3));
-  if (ctype && ctype.needsSources && !sources.length) E('news_no_sources', '최신 정보 요약인데 출처가 없어.', '출처 주소와 확인 날짜를 넣어줘.');
+  if (ctype && ctype.needsSources && !sources.length) E('news_no_sources', `${ctype.label}인데 출처가 없어.`, '출처 주소와 확인 날짜를 넣어줘.');
+  // 1.6.0 투자 글(증시 정리·종목 설명): 정보 정리라는 안내가 있어야 하고, 사라·팔라·목표가 같은 투자 권유 표현은 빼야 함
+  if ((ctype && ctype.invest) || (planKind && PLAN_KINDS[planKind].invest)) {
+    if (!INVEST_DISCLAIMER.test(stripMd(body))) W('invest_disclaimer', '투자 글인데 "투자 권유가 아니다"는 안내가 없어.', '끝에 "이 글은 공개된 정보를 정리한 것이고 투자 권유가 아니에요. 투자 판단과 책임은 본인에게 있어요." 같은 문장을 넣어줘.');
+    const advice = sents.filter((s) => INVEST_ADVICE.test(s.text) && !INVEST_DISCLAIMER.test(s.text) && !/(아니|아닙|아님|않|말고|마세요)/.test(s.text)).map((s) => clip(s.text));
+    if (advice.length) W('invest_advice', `사라·팔라·목표가처럼 투자를 권하는 문장이 ${advice.length}곳 있어.`, '사실(무슨 일이 있었고 숫자가 어땠는지)과 지켜볼 점으로 바꿔줘.', advice.slice(0, 3));
+  }
   const oldSources = sources.filter((s) => s.checked_at && daysBetween(s.checked_at, today) > 180);
   if (oldSources.length) T('sources_old', `확인한 지 6개월이 넘은 출처가 ${oldSources.length}개 있어.`, '내용이 바뀌지 않았는지 다시 봐줘.');
   const factCheck = (post.ai_notes && Array.isArray(post.ai_notes.needs_fact_check)) ? post.ai_notes.needs_fact_check.filter(Boolean) : [];
@@ -423,7 +501,8 @@ export function checkPost(post, ctx = {}) {
   if (searchCh) {
     const kwN = keywordWords(post.keyword);
     if (kwN > 0 && kwN < SEO_RULES.minKeywordWords) T('short_keyword', `키워드가 ${kwN}단어야. 짧은 키워드는 같은 낱말로 쓴 글이 많을 수 있어 (검색량·경쟁도는 조회하지 않았어 · 앱 권장 ${SEO_RULES.minKeywordWords}단어 이상).`, '찾는 사람이 분명해지게 좁혀줘. 예: "제습기" → "원룸 겨울 결로 제습기 용량"');
-    if (ctx.focus) {
+    // 1.6.0: 하루 계획의 유입 글·오늘 이슈·증시·종목 글은 주력 주제 밖이 정상이라 주제 검사를 안 함 (쿠팡·토스 링크 글만)
+    if (ctx.focus && (!planKind || planKind === 'affiliate')) {
       const f = focusFit(post, ctx.focus, ctx.focusTerms);
       const name = clip(String(ctx.focus), 30);
       const ev = f.evidence.join(' · ');
@@ -434,7 +513,7 @@ export function checkPost(post, ctx = {}) {
     const nLinks = Math.max(cta, links.length);
     if (nLinks > SEO_RULES.maxLinks) W('too_many_links', `링크가 ${nLinks}개야. 링크가 많으면 광고 글로 보이기 쉬워 (앱 권장 ${SEO_RULES.maxLinks}개까지).`, '본문 중간 1곳, 끝 1곳으로 줄여줘.');
     if (cta && linkTooEarly(body)) W('link_too_early', '글 첫 부분에 링크가 있어 (앱 권장: 정보 먼저, 링크는 중간·끝).', '첫 소제목 앞에서는 링크 자리를 빼줘.');
-    if (!hasExperience && !me) W('no_own_experience', '직접 겪은 내용이 한 줄도 없어 (발행은 막지 않아). 안 써봤어도 내 상황 한 줄(내 방·내 물건·재 본 숫자·매장에서 본 것)이 있으면 다른 글과 달라져.', "원고 정보의 '내 경험' 칸에 적거나, 본문에 [내 경험] 자리를 넣고 '내 경험 채우기'로 채워줘.");
+    if (!hasExperience && !me && !planKind) W('no_own_experience', '직접 겪은 내용이 한 줄도 없어 (발행은 막지 않아). 안 써봤어도 내 상황 한 줄(내 방·내 물건·재 본 숫자·매장에서 본 것)이 있으면 다른 글과 달라져.', "원고 정보의 '내 경험' 칸에 적거나, 본문에 [내 경험] 자리를 넣고 '내 경험 채우기'로 채워줘.");
   }
 
   return { errors, warnings, tips };

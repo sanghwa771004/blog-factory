@@ -169,6 +169,9 @@ button.main,label.main{cursor:pointer}
 .post ul{margin:0 0 12px;padding-left:20px}
 .post .img{border:1.5px dashed var(--line);border-radius:10px;padding:14px;color:var(--muted);font-size:14px;text-align:center;margin:0 0 12px}
 .post .me{background:var(--mark);color:var(--mark-ink);padding:1px 4px;border-radius:3px}
+.post mark{background:var(--mark);color:var(--mark-ink);padding:0 3px;border-radius:3px;font-weight:600}
+.post p.note{background:var(--accent-soft, rgba(31,93,76,.12));border-radius:10px;padding:10px 12px;font-weight:500}
+.post .gprompt{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:-4px 0 14px;font-size:13.5px;color:var(--muted);overflow-wrap:anywhere}
 .post .cta{border:1px solid var(--accent);border-radius:10px;padding:12px 14px;margin:0 0 12px;display:flex;flex-direction:column}
 .post .cta small{color:var(--muted);word-break:break-all}
 .post .disc{font-size:13px;color:var(--muted);background:var(--bg);border-radius:8px;padding:8px 10px;white-space:pre-line}
@@ -426,8 +429,8 @@ function kstNow(){
     return { date: ymd(d), h: d.getHours(), m: d.getMinutes() };
   }
 }
-// 자동 작가 예약 작업: 매일 오전 8:51 · 오후 12:51 · 오후 6:51 (한국 시각)
-const RUN_TIMES = [[8, 51], [12, 51], [18, 51]];
+// 자동 작가 예약 작업: 매일 오전 8:51 · 오후 1:21 · 오후 6:51 (한국 시각, 1.6.0 — 점심은 오늘 뜬 주제)
+const RUN_TIMES = [[8, 51], [13, 21], [18, 51]];
 function nextRunText(now){
   const n = now || kstNow();
   const cur = n.h * 60 + n.m;
@@ -437,7 +440,7 @@ function nextRunText(now){
 }
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const safeUrl = u => { u = String(u || "").trim(); return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : ""; };
-const stripMd = s => String(s || "").replace(/\*\*(.+?)\*\*/g, "$1");
+const stripMd = s => String(s || "").replace(/\*\*(.+?)\*\*/g, "$1").replace(/==(.+?)==/g, "$1");
 const clip = (s, n) => { s = String(s || ""); n = n || 60; return s.length > n ? s.slice(0, n - 1) + "…" : s; };
 const isUuid = s => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(s || ""));
 const str = (v, n) => (typeof v === "string" ? v.trim().slice(0, n || 20000) : "");
@@ -522,7 +525,7 @@ const BUILTIN_PROGRAMS = [
 const ARTIFACT_NOTE = "Claude 안 글공장에서 웹 확인 없이 쓴 원고야. 상품 스펙·가격·통계는 넣지 않았어.";
 const SNS_FALLBACK_DISCLOSURE = "#광고 이 글의 링크로 구매하면 수수료를 받아요";
 
-// ───────── 본문 형식 (앱 checks.js 1.1.2 와 같은 규칙) ─────────
+// ───────── 본문 형식 (앱 checks.js 1.6.0 과 같은 규칙: "[프롬프트: …]" 줄, "> " 핵심 상자, ==강조==) ─────────
 function parseBody(md){
   const blocks = [];
   let list = null, tbl = null;
@@ -539,10 +542,13 @@ function parseBody(md){
     if (/^[-•*]\s+/.test(l)){ flushTbl(); (list = list || []).push(l.replace(/^[-•*]\s+/, "")); continue; }
     flushList(); flushTbl();
     if (!l) continue;
+    // 1.6.0: 사진 자리 바로 아래 "[프롬프트: …]" 줄 = 그 사진의 제미나이 프롬프트 (내보낼 때 빠짐)
+    if (/^\[프롬프트/.test(l)){ const last = blocks[blocks.length - 1]; if (last && last.t === "img" && last.prompt == null) last.prompt = l.replace(/^\[프롬프트\s*\d*\s*:?\s*/, "").replace(/\]\s*$/, "").trim(); continue; }
     if (/^#{1,4}\s/.test(l)) blocks.push({ t: "h", text: l.replace(/^#+\s/, "") });
     else if (/^\[이미지/.test(l)) blocks.push({ t: "img", text: l.replace(/^\[이미지:?\s*|\]$/g, "") });
     else if (/^\[링크/.test(l)) blocks.push({ t: "cta", text: l.replace(/^\[링크\s*\d*\s*:?\s*|\]$/g, "") });
-    else blocks.push({ t: "p", text: l.replace(/^>\s?/, "") });
+    else if (/^>\s?/.test(l)) blocks.push({ t: "note", text: l.replace(/^>\s?/, "") });
+    else blocks.push({ t: "p", text: l });
   }
   flushList(); flushTbl();
   return blocks;
@@ -646,13 +652,14 @@ function quickCheck(d, C){
   if (cta && !link) todos.push(needsLink ? `링크 자리 ${cta}곳 — 제휴 링크를 넣어야 수익이 생겨.` : `링크 자리 ${cta}곳 — 링크를 넣거나 그 자리를 지워줘.`);
   if (!cta && !link && needsLink && !(ch && ch.kind === "sns")) todos.push("제휴 글인데 링크 자리가 없어. 링크를 넣어줘.");
   const img = countImg(body);
-  if (img) todos.push(`사진 자리 ${img}곳 — 붙여넣은 뒤 직접 찍은 사진을 넣어줘.`);
+  if (img) todos.push(`사진 자리 ${img}곳 — 자리마다 적힌 제미나이 프롬프트로 사진을 만들거나 직접 찍어서, 붙여넣은 뒤 그 자리에 넣어줘.`);
   return { errors, warns, todos };
 }
 
 // ───────── 내보내기 (앱 lib.js 와 같은 모양, 링크는 원고에 넣은 링크 하나) ─────────
 function inlineHtml(s, mode){
-  const h = esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  const h = esc(s).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/==(.+?)==/g, mode === "export" ? '<span style="background-color:#fff0a0;"><b>$1</b></span>' : "<mark>$1</mark>");
   return h.replace(/\[(내 경험[^\]]*)\]/g, mode === "export" ? '<span style="background:#fff1a8;">[$1]</span>' : '<span class="me">[$1]</span>');
 }
 function viewHtml(d){
@@ -660,9 +667,10 @@ function viewHtml(d){
   return parseBody(d.body).map(b => {
     if (b.t === "h") return `<h2>${inlineHtml(b.text, "view")}</h2>`;
     if (b.t === "p") return `<p>${inlineHtml(b.text, "view")}</p>`;
+    if (b.t === "note") return `<p class="note">${inlineHtml(b.text, "view")}</p>`;
     if (b.t === "ul") return `<ul>${b.items.map(i => `<li>${inlineHtml(i, "view")}</li>`).join("")}</ul>`;
     if (b.t === "table") return `<div class="tblwrap"><table>${b.rows.map((r, ri) => `<tr>${r.map(c => (ri ? `<td>${inlineHtml(c, "view")}</td>` : `<th>${inlineHtml(c, "view")}</th>`)).join("")}</tr>`).join("")}</table></div>`;
-    if (b.t === "img") return `<div class="img">📷 ${esc(b.text)}</div>`;
+    if (b.t === "img") return `<div class="img">📷 ${esc(b.text)}</div>` + (b.prompt ? `<p class="gprompt"><b>제미나이 프롬프트</b><br>${esc(b.prompt)}</p>` : "");
     if (b.t === "cta") return `<div class="cta"><span>🔗 ${esc(b.text || "최저가 확인하기")}</span><small>${link ? esc(link) : "제휴 링크를 넣으면 여기에 걸려"}</small></div>`;
     return "";
   }).join("");
@@ -671,14 +679,16 @@ function exportHtml(d, P){
   const link = safeUrl(d.link), disc = disclosureFor(progIdsOf(d), P).text, out = [];
   const S = {
     p: "line-height:1.8;margin:0 0 1em;",
-    h: "font-size:1.3em;font-weight:bold;line-height:1.4;margin:1.6em 0 .6em;",
+    h: "font-size:24px;font-weight:bold;line-height:1.45;margin:1.8em 0 .7em;",
+    note: "line-height:1.8;margin:0 0 1.2em;padding:12px 14px;background-color:#e3f4ea;",
     th: "border:1px solid #d9d9d9;padding:8px 10px;text-align:left;background:#f4f6f4;font-weight:bold;",
     td: "border:1px solid #d9d9d9;padding:8px 10px;text-align:left;"
   };
   if (disc) out.push(`<p style="font-size:.9em;color:#555;background:#f4f4f4;padding:10px 12px;border-radius:6px;margin:0 0 1.4em;">${esc(disc).replace(/\n/g, "<br>")}</p>`);
   for (const b of parseBody(d.body)){
-    if (b.t === "h") out.push(`<h2 style="${S.h}">${inlineHtml(b.text, "export")}</h2>`);
+    if (b.t === "h") out.push(`<h2 style="${S.h}"><span style="font-size:24px;"><b>${inlineHtml(b.text, "export")}</b></span></h2>`);
     else if (b.t === "p") out.push(`<p style="${S.p}">${inlineHtml(b.text, "export")}</p>`);
+    else if (b.t === "note") out.push(`<p style="${S.note}"><span style="background-color:#e3f4ea;">${inlineHtml(b.text, "export")}</span></p>`);
     else if (b.t === "ul") out.push(`<ul style="margin:0 0 1em;padding-left:1.4em;line-height:1.8;">${b.items.map(i => `<li>${inlineHtml(i, "export")}</li>`).join("")}</ul>`);
     else if (b.t === "table") out.push(`<table style="border-collapse:collapse;width:100%;margin:0 0 1.2em;font-size:.95em;">${b.rows.map((r, ri) => `<tr>${r.map(c => `<${ri ? "td" : "th"} style="${ri ? S.td : S.th}">${inlineHtml(c, "export")}</${ri ? "td" : "th"}>`).join("")}</tr>`).join("")}</table>`);
     else if (b.t === "img") out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 ${esc(b.text)} (여기에 사진 넣기)</p>`);
@@ -694,6 +704,7 @@ function exportPlain(d, P){
   for (const b of parseBody(d.body)){
     if (b.t === "h") lines.push("", "■ " + stripMd(b.text));
     else if (b.t === "p") lines.push(stripMd(b.text));
+    else if (b.t === "note") lines.push("▶ " + stripMd(b.text));
     else if (b.t === "ul") b.items.forEach(i => lines.push("· " + stripMd(i)));
     else if (b.t === "table") b.rows.forEach(r => lines.push(r.map(stripMd).join(" | ")));
     else if (b.t === "img") lines.push("(사진: " + b.text + ")");
@@ -951,7 +962,7 @@ function buildWritePrompt(o){
     `- 게시 채널: ${ch.name}${sns ? ` (SNS — 본문 ${limit}자 이내)` : ""}`,
     `- 수익 모델: ${progLine}`,
     ct ? `- 글 유형: ${ct} (${CONTENT_TYPES[ct].label})` : `- 글 유형: 정해지지 않음 — 키워드의 검색 의도에 맞게 다음 중 하나를 골라 content_type 에 적어: ${allowed.join(", ")}`,
-    sns ? null : `- 분량: 본문 약 ${o.len || "2500"}자`,
+    sns ? null : `- 분량: 본문 약 ${o.len || "2500"}자 (소제목·문단·목록·표 글자, 공백 포함 — 사진 자리·프롬프트·링크 자리 줄은 빼고 셈)`,
     `- 카테고리: ${o.category || "글 내용에 맞는 세부 분류로 정해서 category 에 적어 (블로그 주력 주제 이름을 그대로 쓰지 마)"}`,
     o.focus ? `- 블로그 주력 주제: ${o.focus}${o.focusTerms ? ` (주제 낱말: ${o.focusTerms})` : ""} — 키워드나 제목에 주력 주제 낱말이 자연스럽게 드러나게 써 (앱은 키워드·제목으로 주제 글인지 확인해${o.focusTerms ? "" : ". 주제 낱말이 없으면 주력 주제 이름 전체나 그 낱말 두 개 이상이 있어야 확인돼 — 억지로 넣지는 마"})` : null,
     o.experience ? `- 작성자의 실제 경험 (이 내용만 1인칭 경험으로 써도 돼):\n${o.experience.slice(0, 3000)}` : "- 작성자의 실제 경험: 없음",
@@ -976,8 +987,8 @@ function buildWritePrompt(o){
     "5. 과장 금지: 무조건, 역대급, 100%, 최저가 보장, 인생템, 부작용 없음, 1등, 완벽한, 절대 후회, 최고의 선택 같은 표현을 쓰지 마.",
     "6. 광고 고지문(\"수수료를 제공받습니다\", \"#광고\" 같은 문구)은 본문·SNS 글 어디에도 쓰지 마. 앱이 복사할 때 수익 모델별 공식 문구를 맨 앞에 붙여.",
     linkSlots ? "7. 링크 자리: \"[링크: 버튼 문구]\" 한 줄을 본문 중간 1곳, 마지막 1곳에만 넣어 (첫 소제목 앞에는 넣지 마, 모두 합쳐 2곳까지)." : "7. 링크 자리(\"[링크: …]\")는 넣지 마. 정보만으로 끝까지 읽히게 써.",
-    sns ? "8. 사진 자리·소제목·표 없이 짧은 줄로 써." : "8. 사진 자리: \"[이미지: 무엇을 찍을지]\" 한 줄로 2~4곳. 설명은 눈에 보이는 장면으로 써 (무엇이·어디에·어떤 모습인지). 계절·날씨·장소는 글 내용과 맞을 때만 넣어. 특정 제품의 실제 모양(구성품·버튼·라벨·화면)이 꼭 보여야 하는 자리는 설명 끝에 \"(제품 사진)\"을 붙여. 그중 1곳은 작성자가 휴대폰으로 직접 찍을 수 있는 장면(내 방·내 물건·매장 진열대 같은 것)으로 \"[이미지: (직접 찍기) 무엇을 찍을지]\"처럼 표시해.",
-    sns ? `9. 형식: 반말 구어체, 줄바꿈으로 리듬을 만들어. 본문 ${limit}자 이내.` : "9. 형식: 소제목은 \"## \", 목록은 \"- \", 표는 \"| 항목 | A | B |\" 다음 줄 \"|---|---|---|\". 문장은 짧게, 모바일에서 읽기 편하게.",
+    sns ? "8. 사진 자리·소제목·표 없이 짧은 줄로 써." : "8. 사진 자리: \"[이미지: 무엇을 찍을지]\" 한 줄로 3~6곳 (첫 사진은 첫 소제목 앞 대표 이미지). 설명은 눈에 보이는 장면으로 써 (무엇이·어디에·어떤 모습인지). 계절·날씨·장소는 글 내용과 맞을 때만 넣어. 특정 제품의 실제 모양(구성품·버튼·라벨·화면)이 꼭 보여야 하는 자리는 설명 끝에 \"(제품 사진)\"을 붙여. 그중 1곳은 작성자가 휴대폰으로 직접 찍을 수 있는 장면(내 방·내 물건·매장 진열대 같은 것)으로 \"[이미지: (직접 찍기) 무엇을 찍을지]\"처럼 표시해. 사진 자리마다 바로 다음 줄에 그 사진을 제미나이로 만들 프롬프트를 \"[프롬프트: …]\" 한 줄로 꼭 적어 — 한국어 2~4문장으로 무엇이·어디서·구도·빛·분위기·스타일·비율(첫 사진 1:1, 나머지 4:3), 기본은 '이미지 안에 글자·로고·워터마크 없이'. 실제 브랜드 제품을 진짜처럼 그리게 하지 말고, 사람은 손이나 뒷모습만. \"(제품 사진)\" 자리는 \"[프롬프트: 실제 제품 사진 자리 — 제미나이로 만들지 말고 직접 찍은 사진이나 판매처가 허락한 이미지를 넣어줘]\", \"(직접 찍기)\" 자리는 촬영 안내 한 문장. 프롬프트 안에 대괄호를 쓰지 마.",
+    sns ? `9. 형식: 반말 구어체, 줄바꿈으로 리듬을 만들어. 본문 ${limit}자 이내.` : "9. 형식: 소제목은 \"## \" (4~6개 — 붙여넣을 때 크게 키워), 목록은 \"- \", 표는 \"| 항목 | A | B |\" 다음 줄 \"|---|---|---|\". 문장은 짧게, 모바일에서 읽기 편하게. 꼭 기억해야 할 문장 2~4곳은 \"==문장==\" 으로 감싸고(노란 바탕색), 핵심 정리 1~2곳은 \"> \" 로 시작하는 한 줄 상자로 써 (연두 바탕색). 강조를 남발하지 마.",
     sns ? "10. 마지막 줄은 자연스러운 다음 행동 안내로 끝내." : "10. 마지막은 3줄 요약과 자연스러운 다음 행동 안내로 끝내.",
     "11. 가상의 인물(예: \"30대 직장인 A씨\", \"제 친구\")을 만들어 추천하거나 후기를 말하게 하지 마.",
     "12. 다른 글을 베끼지 말고 직접 정리해서 써.",
@@ -1081,11 +1092,11 @@ function flash(btn, msg){
   btn._t = setTimeout(() => { btn.textContent = btn.dataset.label; }, 1600);
 }
 
-const APP_VER = "10";
-const APP_DATE = "2026.10.27";
+const APP_VER = "11";
+const APP_DATE = "2026.11.02";
 const APP_PROJECT = "oxewhsqmdkiasckvnyua";
 const SERVER = "Supabase";
-const WHATS_NEW = "앱 1.5.0(이미지 스튜디오 고품질화)에 맞췄어. 여기서 쓰는 원고의 사진 자리 설명을 눈에 보이는 장면으로 쓰고, 특정 제품 모양이 꼭 보여야 하는 자리는 '(제품 사진)'으로 표시해 — 홈 화면 앱이 그 자리에는 진짜 제품 사진을 쓰게 안내해. 나머지 규칙은 그대로야.";
+const WHATS_NEW = "앱 1.6.0(하루 계획 운영)에 맞췄어. 여기서 쓰는 원고도 사진 자리를 3~6곳 두고, 자리마다 바로 아래 줄에 제미나이 프롬프트(\"[프롬프트: …]\")를 적어. 꼭 기억할 문장은 ==강조==, 핵심 정리는 \"> \" 상자로 쓰고, 복사할 때 소제목은 크게·강조와 상자는 바탕색으로 붙여 넣어.";
 const ERR = {
   not_granted: "Claude 사용을 허용해야 쓸 수 있어.",
   rate_limited: "너무 자주 돌렸거나 사용량이 다 찼어. 잠깐 쉬었다가 다시 해줘.",
@@ -2299,7 +2310,7 @@ function onCatalog(){
 }
 
 /* ---------- 시작 ---------- */
-$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.5.2 기준`;
+$("#ver").textContent = `버전 ${APP_VER} · ${APP_DATE} 업데이트 · 홈 화면 앱 1.6.0 기준`;
 (() => {
   const seen = LS.get("bgf-ver", null);
   const returning = seen || LS.get("bgf-tab", null) || LS.get("bgf-settings", null);

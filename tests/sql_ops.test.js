@@ -49,7 +49,8 @@ describe('016 적용: 더하기만 하고 예전 데이터는 그대로', () => 
 
 describe('쌓인 원고 한도 (backlog_state · add_post)', () => {
   let db;
-  before(async () => { db = await freshDb(); });
+  // 1.6.0(020)부터 하루 계획이 있으면 한도 = 계획 합계 × 보관일 → 여기서는 계획을 비운 예전 방식(하루 발행 수 × 7)을 확인 (020 은 tests/sql_plan_160.test.js)
+  before(async () => { db = await freshDb(); await db.query(`update public.settings set daily_plan = '{}'::jsonb where id = 1`); });
 
   test('검수 필요·정보 필요·발행 준비·예약만 셈 (게시·실패·대기·휴지통은 안 셈), 한도 0이면 하루 발행 수 × 7', async () => {
     const t = kstToday();
@@ -190,6 +191,7 @@ describe('다른 채널 기록 · 유입 검색어 표', () => {
 describe('자동 작가 상황판 (writer_context 1.4.0)', () => {
   test('쌓인 원고·최근 90일 유입 검색어(많은 순)·개선안 작업에 필요한 글 정보가 들어가고, 예전 항목은 그대로', async () => {
     const db = await freshDb();
+    await db.query(`update public.settings set daily_plan = '{}'::jsonb where id = 1`); // 예전 방식 한도(하루 발행 수 × 7)로 확인
     const t = kstToday();
     const a = await draft(db, '원룸 전기요 고르는 법', { stage: 'published' });
     const b = await draft(db, '온수매트 소음', { stage: 'published' });

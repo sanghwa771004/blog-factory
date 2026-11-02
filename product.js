@@ -8,10 +8,10 @@
 // 1.5.2: 첫 화면에서 세 방식(원본 보존 합성·AI 실사 장면·배경만) 고르기 · 작업 이어 하기(이 기기 IndexedDB — 이미지 ID와 설정만)
 //        배경 지우기는 일꾼에서(진행률·취소·간단 모드) · 마스크 품질 점수·확대·다시 하기·가장자리 다듬기 · 빛·원근·그림자 자동 추천(추정 — 적용은 사용자가)
 //        합성 저장 전 크기 확인·올리는 진행률·실패 이유·같은 요청으로 다시 저장 · 검수 화면 밀어서 비교·상품 부분 확대·원본 픽셀 비교 · 공급자 비교(유료는 따로 승인)
-import * as IMG from './images.js?v=1.5.2';
-import * as CUT from './cutout.js?v=1.5.2';
-import * as FIT from './scenefit.js?v=1.5.2';
-import { createJobStore, stepLabel, storageLeft } from './jobstore.js?v=1.5.2';
+import * as IMG from './images.js?v=1.6.0';
+import * as CUT from './cutout.js?v=1.6.0';
+import * as FIT from './scenefit.js?v=1.6.0';
+import { createJobStore, stepLabel, storageLeft } from './jobstore.js?v=1.6.0';
 
 export const PRODUCT_ERR = {
   layer_no_refs: '원본 보존 합성은 상품 사진을 AI에 보내지 않아 (배경만 만들어). 추가 사진은 AI 실사 장면에서만 써.',
