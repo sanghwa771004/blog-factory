@@ -3,6 +3,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { HAS_DENO, SKIP as skip, startServer, pg } from './harness.mjs';
+import { readFileSync } from 'node:fs';
 
 const POST = '77777777-7777-4777-8777-777777777777';
 const body = '[이미지: 창가 가습기]\n[프롬프트: 창가 선반 위 흰 가습기, 1:1, 글자 없이]\n## 소제목\n' + '원룸에서 쓰기 좋은 기준을 정리했어요. '.repeat(20);
@@ -45,7 +46,7 @@ test('020 전 DB: 화면은 그대로 열리고(정리·오늘 계획은 건너�
   db.pre020 = true;
   const st = await srv.call('GET', 'state');
   assert.equal(st.status, 200, JSON.stringify(st.j).slice(0, 300));
-  assert.equal(st.j.version, '1.6.0');
+  assert.equal(st.j.version, JSON.parse(readFileSync(new URL('../../version.json', import.meta.url), 'utf8')).version);
   assert.equal(st.j.expired, null);
   assert.equal(st.j.plan_today, null);
   const k = await srv.call('POST', `posts/${POST}`, { keep: true });

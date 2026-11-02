@@ -117,7 +117,7 @@ describe('키 없는 서버', () => {
   test('설정 조회: 공급자마다 키 있음/없음·연결 확인 전 — 모델 이름만으로 연결됐다고 하지 않음', { skip }, async () => {
     const r = await srv.call('GET', 'images/config');
     assert.equal(r.status, 200);
-    assert.deepEqual(r.j.keys, { openai: false, gemini: false, pexels: false, cloudflare: false });
+    assert.deepEqual(r.j.keys, { openai: false, gemini: false, pexels: false, cloudflare: false, pixabay: false, unsplash: false, ecos: false });
     for (const p of ['cloudflare', 'openai', 'gemini']) assert.deepEqual(r.j.provider_status[p], { key: false, check: null, last_success: null, last_failure: null }, p);
   });
   test('백업: 1.5.0 새 표 image_reviews(AI 검수·내 평가)도 담음 — 017 전 DB면 빈 목록과 missing_tables, 연결 확인 기록은 운영 기록이라 안 담음', { skip }, async () => {
@@ -259,7 +259,7 @@ describe('키 있는 서버 (시험용 가짜 키 — 서버는 바깥에 연결
 
   test('설정 조회: 키는 있음/없음만, 키 값은 어디에도 없음', { skip }, async () => {
     const r = await call('GET', 'images/config');
-    assert.deepEqual(r.j.keys, { openai: true, gemini: true, pexels: false, cloudflare: true });
+    assert.deepEqual(r.j.keys, { openai: true, gemini: true, pexels: false, cloudflare: true, pixabay: false, unsplash: false, ecos: false });
     assert.deepEqual([r.j.provider_status.gemini.key, r.j.provider_status.gemini.check], [true, null], '키가 있어도 연결 확인 전');
   });
   test('참고 사진 검사: 모델이 받는 장수까지만, 고르는 모델이 못 받으면 거절, 없는 사진·권한 확인 안 한 사진은 거절', { skip }, async () => {

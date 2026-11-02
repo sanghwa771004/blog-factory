@@ -4,6 +4,9 @@
   const log = window.__log = { queries: [], samples: [], errors: [] };
   const uuid = () => 'xxxxxxxx-xxxx-4xxx-8xxx-xxxxxxxxxxxx'.replace(/x/g, () => (Math.random() * 16 | 0).toString(16));
   const P1 = uuid(), P2 = uuid(), P3 = uuid(), P4 = uuid();
+  const POLISH_OLD = '[이미지: (썸네일) 제목 카드]\n## 전기요 고를 때\n전기요를 고를 때는 소재가 중요합니다. 다양한 제품이 있습니다. 세탁 방법도 확인하는 것이 중요합니다.\n[링크: 가격 보기]\n[이미지: 접어서 보관한 전기요]';
+  const marks = b => String(b || '').split('\n').map(l => l.trim()).filter(l => /^\[(이미지|링크)/.test(l)).join('\n');
+  let polishCalls = 0;
   const now = new Date().toISOString();
   let jobs = [
     { id: uuid(), kind: 'write', keyword: '가습기 세척 방법', content_type: 'how_to', link: '', experience: '', ref: '', payload: { notes: '초보자용으로' }, attempts: 0, post_id: P1, created_at: now,
@@ -18,7 +21,10 @@
     // 1.4.0 개선안 작업: 여기서는 안 하고 자동 작가 몫 (건너뜀으로 보여야 함)
     { id: uuid(), kind: 'refresh', keyword: '전기요 고르는 법', content_type: '', link: '', experience: '', ref: '', payload: { focus: 'title' }, attempts: 0, post_id: P2, created_at: now,
       post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'buying_guide', category: '전기요', experience: '', title: '전기요 고르는 법', len: '2500', body: '## 전기요 고를 때\n소재와 온도 조절 방식을 먼저 봐요.', sources: [], products: [],
-        keyword: '전기요 고르는 법', titles: ['전기요 고르는 법'], metrics: { rows: 1, views: 300, clicks: 2 }, search_terms: [{ term: '전기요 전자파', views: 12 }], other_channels: [] } }
+        keyword: '전기요 고르는 법', titles: ['전기요 고르는 법'], metrics: { rows: 1, views: 300, clicks: 2 }, search_terms: [{ term: '전기요 전자파', views: 12 }], other_channels: [] } },
+    // 1.7.0 말투 다듬기 작업: 여기서 바로 처리 (사진·링크 자리 줄은 그대로여야 저장)
+    { id: uuid(), kind: 'polish', keyword: '전기요 고르는 법', content_type: '', link: '', experience: '', ref: '', payload: { voice: 'general', note: '' }, attempts: 0, post_id: P2, created_at: now,
+      post: { channel_id: 'naver_blog', program_ids: ['coupang_partners'], content_type: 'buying_guide', category: '전기요', experience: '', title: '전기요 고르는 법', len: '2500', body: POLISH_OLD, sources: [], products: [] } }
   ];
   const settings = Object.assign({}, FIX.settings); delete settings.id; delete settings.money; delete settings.platform;
   // 채택 주제는 실제 DB처럼 ID가 고정이고, 그 주제로 원고가 생기면 목록에서 빠짐
@@ -54,6 +60,11 @@
       if (q.includes('public.add_topics(')){ const items = JSON.parse(dqContent(q)); return wrap([{ n: items.length }]); }
       if (q.includes('from public.topics')){ const titles = JSON.parse(dqContent(q)); return wrap(titles.map(t => ({ id: uuid(), title: t }))); }
       if (q.includes('public.set_variants(')){ JSON.parse(dqContent(q)); return wrap([{ set_variants: '' }]); }
+      if (q.includes('public.set_polish(')){
+        const v = JSON.parse(dqContent(q));
+        if (marks(v.body) !== marks(POLISH_OLD)) throw { code: 'tool_error', message: '{"error":{"message":"Failed to run sql query: ERROR:  P0001: polish changed image or link lines"}}' };
+        return wrap([{ set_polish: '' }]);
+      }
       if (q.includes('public.job_fail(')) return wrap([{ job_fail: '' }]);
       if (q.includes('public.log_run(')) return wrap([{ log_run: '' }]);
       if (q.includes("from public.posts where source = 'artifact'")) return wrap([]);
@@ -74,6 +85,12 @@
       { title: '전기요 3종 비교', keyword: '전기요 비교', category: '겨울 가전', rec_content_type: 'comparison', scores: {}, basis: '비교 수요' }
     ];
     if (input.includes('채널별 버전으로 바꿔줘')) return { threads: '#광고\n전기요 고를 때 소재부터 봐', cards: [{ title: '1', text: '소재' }, { title: '2', text: '온도' }] };
+    // 말투 다듬기: 첫 답은 링크 자리 줄을 바꿔서(저장 거절 대상) → 앱이 한 번 더 요청 → 두 번째 답은 그대로
+    if (input.includes('말투만 다시 써줘')){
+      polishCalls++;
+      const good = '[이미지: (썸네일) 제목 카드]\n## 전기요 고를 때\n전기요는 소재부터 봐요. 종류가 생각보다 많거든요. 세탁이 되는지도 같이 확인해요.\n[링크: 가격 보기]\n[이미지: 접어서 보관한 전기요]';
+      return polishCalls === 1 ? { body: good.replace('[링크: 가격 보기]', '[링크: 최저가 보러 가기]'), titles: [] } : { body: good, titles: [] };
+    }
     const kw = (input.match(/- 키워드: (.+)/) || [])[1] || '키워드';
     return POST(kw);
   };

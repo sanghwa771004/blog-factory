@@ -586,10 +586,124 @@ export async function pexelsPhoto({ fetchImpl, key, id, timeoutMs = 15000 }) {
   const photo = normalizePexels(j);
   return photo ? { ok: true, status: res.status, photo, remaining: remainingOf(res) } : { ok: false, code: 'pexels_error', message: 'Pexels 사진 정보를 읽지 못했어.' };
 }
+// ───────── 1.7.0 Pixabay (키 무료로 안내됨 · 60초에 100번 · 사진은 내려받아서 써야 함(바로 링크 금지) · 표시 의무 없음) ─────────
+export const PIXABAY_URL = 'https://pixabay.com/api/';
+const PIXABAY_HOSTS = ['pixabay.com', 'cdn.pixabay.com'];
+export function normalizePixabay(h) {
+  if (!h || typeof h !== 'object') return null;
+  const pick = (u) => (okHost(u, PIXABAY_HOSTS) ? String(u) : '');
+  const id = Number(h.id);
+  const user = scrub(h.user || '', 120);
+  const out = {
+    id, width: Number(h.imageWidth) || 0, height: Number(h.imageHeight) || 0,
+    alt: scrub(String(h.tags || '').split(',').map((x) => x.trim()).filter(Boolean).slice(0, 5).join(', '), 300), photographer: user,
+    photographer_url: user && Number(h.user_id) ? `https://pixabay.com/users/${encodeURIComponent(user)}-${Number(h.user_id)}/` : '',
+    url: okHost(h.pageURL, ['pixabay.com']) ? String(h.pageURL) : '',
+    thumb: pick(h.webformatURL) || pick(h.previewURL), preview: pick(h.webformatURL) || pick(h.previewURL), download: pick(h.largeImageURL) || pick(h.webformatURL),
+  };
+  return Number.isInteger(out.id) && out.id > 0 && out.thumb && out.download && out.url ? out : null;
+}
+function pixabayError(status) {
+  if (status === 401 || status === 403) return { code: 'pixabay_key_invalid', message: 'Pixabay API 키가 맞지 않아. Supabase Secrets의 PIXABAY_API_KEY를 확인해줘.' };
+  if (status === 429) return { code: 'photo_rate_limited', message: 'Pixabay 요청 한도(60초에 100번)에 닿았어. 1분 뒤에 다시 해줘.' };
+  return { code: 'pixabay_error', message: 'Pixabay에서 문제가 생겼어. 조금 뒤에 다시 해줘.' };
+}
+// Pixabay 이용 조건: 같은 요청은 24시간 저장해서 다시 묻지 않기 → 이 서버 일꾼이 살아 있는 동안 같은 검색은 기억해 둠
+const PIXABAY_CACHE = new Map();
+export async function pixabaySearch({ fetchImpl, key, query, orientation, page = 1, perPage = 24, timeoutMs = 15000 }) {
+  if (!key) return { ok: false, code: 'photo_key_missing', message: 'Pixabay API 키가 설정되지 않았어.' };
+  const q = new URLSearchParams({ key, q: String(query).slice(0, 100), image_type: 'photo', safesearch: 'true', page: String(page), per_page: String(Math.max(3, Math.min(200, perPage))) });
+  q.set('orientation', orientation === 'landscape' ? 'horizontal' : orientation === 'portrait' ? 'vertical' : 'all');
+  q.set('lang', /[ㄱ-힝]/.test(String(query)) ? 'ko' : 'en');
+  const ck = q.toString().replace(/key=[^&]*/, '');
+  const hit = PIXABAY_CACHE.get(ck);
+  if (hit && Date.now() - hit.at < 24 * 3600e3) return { ...hit.r, cached: true };
+  let res, j = null;
+  try { ({ res, body: j } = await timed(fetchImpl, PIXABAY_URL + '?' + q, {}, timeoutMs, (r) => (r.ok ? jsonOrNull(r) : null))); } catch { return { ok: false, code: 'pixabay_network', message: 'Pixabay에 연결하지 못했어.' }; }
+  if (!res.ok) return { ok: false, status: res.status, ...pixabayError(res.status) };
+  const photos = (j && Array.isArray(j.hits) ? j.hits : []).map(normalizePixabay).filter(Boolean);
+  const total = Number(j && j.totalHits) || 0;
+  const r = { ok: true, status: res.status, photos, total, page, hasNext: page * perPage < total, remaining: remainingOf(res) };
+  PIXABAY_CACHE.set(ck, { at: Date.now(), r });
+  if (PIXABAY_CACHE.size > 200) PIXABAY_CACHE.delete(PIXABAY_CACHE.keys().next().value);
+  return r;
+}
+export async function pixabayPhoto({ fetchImpl, key, id, timeoutMs = 15000 }) {
+  if (!key) return { ok: false, code: 'photo_key_missing', message: 'Pixabay API 키가 설정되지 않았어.' };
+  let res, j = null;
+  try { ({ res, body: j } = await timed(fetchImpl, PIXABAY_URL + '?' + new URLSearchParams({ key, id: String(id) }), {}, timeoutMs, (r) => (r.ok ? jsonOrNull(r) : null))); } catch { return { ok: false, code: 'pixabay_network', message: 'Pixabay에 연결하지 못했어.' }; }
+  if (!res.ok) return { ok: false, status: res.status, ...pixabayError(res.status) };
+  const photo = normalizePixabay(j && Array.isArray(j.hits) ? j.hits[0] : null);
+  return photo ? { ok: true, status: res.status, photo, remaining: remainingOf(res) } : { ok: false, status: 404, code: 'not_found', message: '그 사진을 찾을 수 없어.' };
+}
+
+// ───────── 1.7.0 Unsplash (데모 키 무료 · 시간당 50번 · 앱에서는 Unsplash 주소로 보여주고 사진가·Unsplash 표기, 고르면 '내려받기' 알림을 보내야 함) ─────────
+export const UNSPLASH_URL = 'https://api.unsplash.com';
+const UTM = '?utm_source=blog_factory&utm_medium=referral';
+const unsplashHead = (key) => ({ Authorization: 'Client-ID ' + key, 'Accept-Version': 'v1' });
+export const isUnsplashId = (v) => /^[A-Za-z0-9_-]{6,20}$/.test(String(v || ''));
+export function normalizeUnsplash(p) {
+  if (!p || typeof p !== 'object' || !p.urls || !isUnsplashId(p.id)) return null;
+  const u = p.urls;
+  const pick = (k) => (okHost(u[k], ['images.unsplash.com']) ? String(u[k]) : '');
+  const user = p.user || {};
+  const prof = okHost(user.links && user.links.html, ['unsplash.com']) ? String(user.links.html) + UTM : '';
+  const page = okHost(p.links && p.links.html, ['unsplash.com']) ? String(p.links.html) + UTM : '';
+  const out = {
+    id: String(p.id), width: Number(p.width) || 0, height: Number(p.height) || 0,
+    alt: scrub(p.alt_description || p.description || '', 300), photographer: scrub(user.name || user.username || '', 120), photographer_url: prof, url: page,
+    thumb: pick('small') || pick('thumb'), preview: pick('regular') || pick('small'), download: pick('regular') || pick('full'),
+    download_location: okHost(p.links && p.links.download_location, ['api.unsplash.com']) ? String(p.links.download_location) : '',
+  };
+  return out.thumb && out.download && out.url ? out : null;
+}
+function unsplashError(status) {
+  if (status === 401) return { code: 'unsplash_key_invalid', message: 'Unsplash 키가 맞지 않아. Supabase Secrets의 UNSPLASH_ACCESS_KEY를 확인해줘.' };
+  if (status === 403 || status === 429) return { code: 'photo_rate_limited', message: 'Unsplash 요청 한도(데모 키는 시간당 50번)에 닿았어. 한 시간쯤 뒤에 다시 해줘.' };
+  if (status === 404) return { code: 'not_found', message: '그 사진을 찾을 수 없어.' };
+  return { code: 'unsplash_error', message: 'Unsplash에서 문제가 생겼어. 조금 뒤에 다시 해줘.' };
+}
+export async function unsplashSearch({ fetchImpl, key, query, orientation, page = 1, perPage = 24, timeoutMs = 15000 }) {
+  if (!key) return { ok: false, code: 'photo_key_missing', message: 'Unsplash 키가 설정되지 않았어.' };
+  const q = new URLSearchParams({ query: String(query).slice(0, 100), page: String(page), per_page: String(Math.max(1, Math.min(30, perPage))), content_filter: 'high' });
+  if (orientation === 'landscape' || orientation === 'portrait') q.set('orientation', orientation);
+  if (orientation === 'square') q.set('orientation', 'squarish');
+  let res, j = null;
+  try { ({ res, body: j } = await timed(fetchImpl, UNSPLASH_URL + '/search/photos?' + q, { headers: unsplashHead(key) }, timeoutMs, (r) => (r.ok ? jsonOrNull(r) : null))); } catch { return { ok: false, code: 'unsplash_network', message: 'Unsplash에 연결하지 못했어.' }; }
+  if (!res.ok) return { ok: false, status: res.status, ...unsplashError(res.status) };
+  const photos = (j && Array.isArray(j.results) ? j.results : []).map(normalizeUnsplash).filter(Boolean);
+  return { ok: true, status: res.status, photos, total: Number(j && j.total) || 0, page, hasNext: page < (Number(j && j.total_pages) || 0), remaining: remainingOf(res) };
+}
+export async function unsplashPhoto({ fetchImpl, key, id, timeoutMs = 15000 }) {
+  if (!key) return { ok: false, code: 'photo_key_missing', message: 'Unsplash 키가 설정되지 않았어.' };
+  if (!isUnsplashId(id)) return { ok: false, status: 400, code: 'not_found', message: '그 사진을 찾을 수 없어.' };
+  let res, j = null;
+  try { ({ res, body: j } = await timed(fetchImpl, UNSPLASH_URL + '/photos/' + encodeURIComponent(String(id)), { headers: unsplashHead(key) }, timeoutMs, (r) => (r.ok ? jsonOrNull(r) : null))); } catch { return { ok: false, code: 'unsplash_network', message: 'Unsplash에 연결하지 못했어.' }; }
+  if (!res.ok) return { ok: false, status: res.status, ...unsplashError(res.status) };
+  const photo = normalizeUnsplash(j);
+  if (!photo) return { ok: false, code: 'unsplash_error', message: 'Unsplash 사진 정보를 읽지 못했어.' };
+  // Unsplash 규칙: 사용자가 사진을 고르면(내려받기와 같은 동작) download_location 을 불러서 알려야 함. 실패해도 사진 쓰기는 계속
+  if (photo.download_location) { try { await timed(fetchImpl, photo.download_location, { headers: unsplashHead(key) }, timeoutMs, () => null); } catch { /* 알림 실패는 무시 */ } }
+  return { ok: true, status: res.status, photo, remaining: remainingOf(res) };
+}
+
+// 카드뉴스·정보 카드 배경으로 쓴 사진 사이트 이름 (라이선스 메모에 남김)
+const PHOTO_SITE_LABEL = { pexels: 'Pexels', pixabay: 'Pixabay', unsplash: 'Unsplash' };
 export const PHOTO_PROVIDERS = {
   pexels: {
     label: 'Pexels', envKey: 'PEXELS_API_KEY', site: 'https://www.pexels.com', license: 'Pexels 라이선스', licenseUrl: 'https://www.pexels.com/license/',
-    search: pexelsSearch, get: pexelsPhoto, hosts: ['images.pexels.com'], hourLimit: 150, monthLimit: 18000,
+    search: pexelsSearch, get: pexelsPhoto, hosts: ['images.pexels.com'], hourLimit: 150, monthLimit: 18000, idKind: 'int',
+  },
+  pixabay: {
+    label: 'Pixabay', envKey: 'PIXABAY_API_KEY', site: 'https://pixabay.com', license: 'Pixabay 콘텐츠 라이선스', licenseUrl: 'https://pixabay.com/service/license-summary/',
+    search: pixabaySearch, get: pixabayPhoto, hosts: PIXABAY_HOSTS, hourLimit: 600, monthLimit: 50000, idKind: 'int',
+  },
+  unsplash: {
+    label: 'Unsplash', envKey: 'UNSPLASH_ACCESS_KEY', site: 'https://unsplash.com' + UTM, license: 'Unsplash 라이선스', licenseUrl: 'https://unsplash.com/license',
+    search: unsplashSearch, get: unsplashPhoto, hosts: ['images.unsplash.com'], hourLimit: 45, monthLimit: 30000, idKind: 'str',
+    // Unsplash API 가이드라인: 사진은 어디에 쓰든 API가 준 주소(hotlink)로 보여줘야 함 → 서버가 복사해 두지 않음.
+    // 앱은 검색만 하고, 사진은 사용자가 Unsplash 사진 페이지에서 직접 받아 '파일 올리기'로 (출처 문구와 같이) 올림
+    hotlinkOnly: true,
   },
 };
 
@@ -754,12 +868,13 @@ export async function runGeneration(d, gen, opt = {}) {
 export async function saveStockPhoto(d, a) {
   const P = PHOTO_PROVIDERS[a.provider];
   if (!P) return { ok: false, status: 400, code: 'bad_field', field: 'provider' };
+  if (P.hotlinkOnly) return { ok: false, status: 409, code: 'unsplash_link_only', message: 'Unsplash 사진은 Unsplash에서 직접 받아서 올려줘.' };
   const link = a.link ? linkArg(a.post, a.slot, a.purpose) : null;
   const ex = await d.findImage({ provider: a.provider, source_id: String(a.photoId) });
   if (ex) return linkExisting(d, link, ex);
   const g = await P.get({ fetchImpl: d.fetchImpl, key: a.key, id: a.photoId });
   await d.logCall(a.provider, 'photo', g.status || 0);
-  if (!g.ok) return { ok: false, status: g.code === 'not_found' ? 404 : g.code === 'pexels_key_missing' ? 503 : 502, code: g.code, message: g.message };
+  if (!g.ok) return { ok: false, status: g.code === 'not_found' ? 404 : (g.code === 'pexels_key_missing' || g.code === 'photo_key_missing') ? 503 : g.code === 'photo_rate_limited' ? 429 : 502, code: g.code, message: g.message };
   const photo = g.photo;
   const dl = await downloadImage({ fetchImpl: d.fetchImpl, url: photo.download, hosts: P.hosts, maxBytes: MAX_STOCK_BYTES });
   if (!dl.ok) return { ok: false, status: 502, code: dl.code, message: dl.message };
@@ -802,15 +917,16 @@ export async function saveUploaded(d, a) {
   // 1.5.0: 실제 사진을 참고한 AI 합성 배경은 따로 밝힘. 1.5.1: 원본 보존 합성(상품 사진 + AI 배경)도 AI 표시를 잃지 않게
   const bgNote = bg ? (bg.kind === 'ai' ? (bg.composite ? 'AI 합성 이미지 (실제 사진 참고)' : 'AI 생성 이미지')
     : bg.kind === 'composite' ? '원본 보존 합성 (상품 사진 + AI 배경)'
-    : bg.provider === 'pexels' ? `Pexels 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
+    : PHOTO_SITE_LABEL[bg.provider] ? `${PHOTO_SITE_LABEL[bg.provider]} 사진 (${bg.author_name || '사진가'})` : bg.kind === 'upload' ? '직접 올린 사진' : '카드뉴스') : '';
+  const credit = kind === 'upload' && !a.kogl && a.credit ? String(a.credit).trim().slice(0, 200) : '';
   const img = {
     origin_post_id: a.post ? a.post.id : '', origin_slot_index: a.slot ? a.slot.index ?? '' : '', origin_slot_key: a.slot ? a.slot.key : '',
     kind, provider: kind === 'card' ? 'cardnews' : 'upload', purpose: a.purpose || '', description: desc, alt_text: altTextFor(desc),
     storage_path: path, mime: chk.mime, bytes: bytes.length, width: chk.width, height: chk.height, sha256: sha,
-    license: kind === 'card' ? '카드뉴스 (앱에서 직접 만듦)' + (bgNote ? ' · 배경: ' + bgNote : '') : '직접 올림 (사용 권한 확인함)',
+    license: kind === 'card' ? `${a.cardLabel || '카드뉴스'} (앱에서 직접 만듦)` + (bgNote ? ' · 배경: ' + bgNote : '') : a.kogl ? `공공누리 제1유형 (출처표시) — ${String(a.kogl).slice(0, 200)}` : '직접 올림 (사용 권한 확인함)',
     rights_confirmed: kind === 'card' ? !bg || !!bg.rights_confirmed || bg.kind !== 'upload' : true,
     source_url: bg ? bg.source_url || '' : '', author_name: bg ? bg.author_name || '' : '', author_url: bg ? bg.author_url || '' : '',
-    attribution_text: bg ? (bg.kind === 'composite' ? ['배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경', bg.attribution_text].filter(Boolean).join(' · ')
+    attribution_text: !bg && kind === 'upload' && a.kogl ? `출처: ${String(a.kogl).slice(0, 200)} (공공누리 제1유형)` : credit ? credit : bg ? (bg.kind === 'composite' ? ['배경: 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경', bg.attribution_text].filter(Boolean).join(' · ')
       : bg.attribution_text || (bg.kind === 'ai' ? (bg.composite ? '배경: 실제 사진을 참고해 AI로 만든 연출 이미지' : '배경: AI로 만든 예시 이미지') : '')) : '',
     // 카드를 그릴 때 쓴 배경 이미지 — 상품 장면이면 발행 막기가 그 승인을 따라감 (1.5.1 재검토. 018 전 DB는 이 칸을 무시)
     background_image_id: bg && bg.id ? String(bg.id) : '',

@@ -6,7 +6,7 @@
 // 순수 계산 함수(마스크 다듬기·품질 점수·합성)는 Node 시험에서도 돌아감. 브라우저 전용은 loadSegmenter·일꾼·decodeImage·toPngBlob·maskFromPng 뿐
 // 1.5.2: 배경 지우기는 따로 일꾼(seg-worker.js)에서 — 처리 중에도 화면이 안 멈추고, 취소·시간 제한·끝나면 메모리 풀기. 일꾼을 못 쓰는 브라우저는 예전처럼 화면 쪽에서
 //        기기 확인(WebAssembly SIMD·일꾼·메모리)으로 '간단 모드'(작게 처리), 마스크 품질 점수, 가장자리 다듬기, 2단계(정밀하게)
-import { cleanLayer, layerBox, RATIOS } from './images.js?v=1.6.0';
+import { cleanLayer, layerBox, RATIOS } from './images.js?v=1.7.0';
 
 export const SEG_SIZE = 320;                       // U²-Netp 입력 크기 (1×3×320×320)
 export const MAX_MASK_SIDE = 1600;                 // 마스크를 만드는 크기 (큰 사진은 같은 비율로 줄여서 — 서버도 같은 비율만 받음)
@@ -18,7 +18,7 @@ export const WASM_SHA256 = '3398c10d07d229bd91b364548e130e0e51a8e5704b88c7c083eb
 export const CACHE_NAME = 'gf-cutout-v1';
 export const MODEL_BYTES = 4574861;                // 받기 진행률 표시용 (압축돼서 오면 content-length 가 달라서)
 export const WASM_BYTES = 14239897;
-export const WORKER_URL = './seg-worker.js?v=1.6.0';
+export const WORKER_URL = './seg-worker.js?v=1.7.0';
 
 // ───────── 이 기기·브라우저 확인 (1.5.2) ─────────
 // WebAssembly SIMD: 배경 지우기 실행기(ONNX Runtime Web 1.30 의 SIMD 판)가 꼭 필요 (iOS Safari 16.4 이상). 없으면 모델 없이 간단히·직접 칠하기만

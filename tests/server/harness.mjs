@@ -50,7 +50,7 @@ export async function startServer(handle, opts = {}) {
   const dbPort = await new Promise((ok) => fake.listen(0, '127.0.0.1', () => ok(fake.address().port)));
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
-  const env = { ...process.env, DENO_SERVE_ADDRESS: `tcp:127.0.0.1:${port}`, SUPABASE_URL: `http://127.0.0.1:${dbPort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-only-not-a-key', SUPABASE_SECRET_KEYS: '', OPENAI_API_KEY: '', PEXELS_API_KEY: '', CF_ACCOUNT_ID: '', CF_API_TOKEN: '', GEMINI_API_KEY: '', ...(opts.env || {}) };
+  const env = { ...process.env, DENO_SERVE_ADDRESS: `tcp:127.0.0.1:${port}`, SUPABASE_URL: `http://127.0.0.1:${dbPort}`, SUPABASE_SERVICE_ROLE_KEY: 'test-only-not-a-key', SUPABASE_SECRET_KEYS: '', OPENAI_API_KEY: '', PEXELS_API_KEY: '', CF_ACCOUNT_ID: '', CF_API_TOKEN: '', GEMINI_API_KEY: '', PIXABAY_API_KEY: '', UNSPLASH_ACCESS_KEY: '', ECOS_API_KEY: '', ...(opts.env || {}) };
   const deno = spawn(DENO, ['run', '--allow-net=127.0.0.1', '--allow-env', '--allow-read', '--node-modules-dir=none', 'index.ts'], { cwd: FN_DIR, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = '';
   deno.stdout.on('data', (d) => { log += d; });

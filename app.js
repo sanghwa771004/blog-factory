@@ -1,13 +1,14 @@
-// 글공장 앱 1.6.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.7.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
   PLAN_KINDS, PLAN_RUNS, PLAN_MAX_PER_KIND, KEEP_DAYS, cleanPlan, planTotal, promptsOf, bodyChars,
-} from './checks.js?v=1.6.0';
-import * as L from './lib.js?v=1.6.0';
-import * as IMG from './images.js?v=1.6.0';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.6.0';
+  aiTone, AI_TONE_GOOD, AI_TONE_BAD, VOICE_PRESETS, VOICE_SCOPES, voiceCard, unlistedNumbers,
+} from './checks.js?v=1.7.0';
+import * as L from './lib.js?v=1.7.0';
+import * as IMG from './images.js?v=1.7.0';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.7.0';
 
-const APP_VER = '1.6.0';
+const APP_VER = '1.7.0';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [13, 21], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함 (1.6.0: 점심은 오후 1:21 — 오늘 뜬 주제)
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -15,7 +16,7 @@ const LIVE = ['published', 'collecting', 'analyzed'];
 const WORK = ['queued', 'researching', 'writing'];
 const KIND_LABEL = { affiliate: '제휴 링크', ads: '광고 수익', sponsor: '협찬', product: '내 상품 판매', cpa: 'CPA·리드', other: '기타' };
 const CH_KIND = { blog: '블로그', site: '웹사이트', sns: 'SNS', other: '기타' };
-const JOB_KIND = { write: '원고', topics: '주제 추천', reformat: '채널별 버전', refresh: '개선안' };
+const JOB_KIND = { write: '원고', topics: '주제 추천', reformat: '채널별 버전', refresh: '개선안', polish: '사람 말투로 다듬기' };
 const JOB_ST = { pending: '대기', done: '완료', failed: '실패', cancelled: '취소됨' };
 const SNS_VARIANTS = ['threads', 'instagram', 'cards', 'shortform']; // 복사할 때 고지문을 맨 앞에 붙이는 버전
 const VARIANT_LABEL = { threads: '쓰레드', instagram: '인스타그램', cards: '카드뉴스 문구', shortform: '숏폼 대본', summary: '요약', faq: '자주 묻는 질문', titles: '제목 후보', naver_blog: '네이버 블로그용', tistory: '티스토리용', website: '웹사이트용' };
@@ -52,6 +53,8 @@ const btn = (text, cls, onclick, props) => h('button', { type: 'button', class: 
 const field = (label, input, hint) => h('label', { class: 'f' }, label, input, hint ? h('span', { class: 'hint' }, hint) : null);
 const panel = (title, ...kids) => h('section', { class: 'panel' }, title ? h('h2', null, title) : null, ...kids);
 const opt = (v, t, dis) => h('option', { value: v, disabled: dis }, t);
+const optSel = (v, t, sel) => h('option', { value: v, selected: !!sel }, t);
+const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
 const todayS = () => L.todayStr();
 const groupBy = (arr, k) => { const m = {}; for (const x of arr || []) (m[x[k]] = m[x[k]] || []).push(x); return m; };
 const titleOf = (p) => (p.titles && p.titles[0]) || p.keyword || '제목 없음';
@@ -124,7 +127,13 @@ const ERR = {
   db_update_needed: 'DB 업데이트가 아직 안 돼서 이 기능은 쓸 수 없어. 배포를 마저 해줘.',
   not_published: '게시한 글만 개선안을 요청할 수 있어 (실적·검색어를 보고 고쳐).',
   period_overlap: '이 글에 기간이 겹치는 검색어 기록이 있어. 겹치면 같은 유입이 두 번 세져서, 겹치는 기간을 지우고 넣어줘.',
-  job_exists: '이 글은 이미 개선안을 기다리고 있어. 자동 작가가 쓴 뒤에 다시 요청해줘.',
+  job_exists: '이 글은 이미 같은 작업을 기다리고 있어. 자동 작가가 처리한 뒤에 다시 요청해줘.',
+  ecos_key_missing: '한국은행 ECOS 인증키가 아직 없어. Supabase Secrets 에 ECOS_API_KEY 로 넣으면 돼 (설정 > 말투·전문성에 방법).',
+  ecos_key_invalid: '한국은행 ECOS 인증키가 맞지 않아. Supabase Secrets 의 ECOS_API_KEY 를 확인해줘.',
+  photo_key_missing: '이 사진 사이트의 키가 아직 없어. 설정 > 이미지의 안내대로 키를 넣어줘.',
+  photo_rate_limited: '사진 사이트 요청 한도에 닿았어. 조금 뒤에 다시 해줘.',
+  unsplash_link_only: 'Unsplash 사진은 앱이 복사해 두지 않아 (Unsplash 규칙). Unsplash 사진 페이지에서 받아서 파일 올리기로 올려줘.',
+  too_many: '50개까지 저장할 수 있어. 안 쓰는 걸 지워줘.',
   too_many_jobs: '기다리는 작업이 30개라 더 넣을 수 없어. 자동 작가가 처리한 뒤에 넣어줘.',
   too_many_jobs_today: '오늘 넣을 수 있는 작업(60개)을 다 썼어. 내일 다시 넣어줘.',
   check_failed: '발행 전 검사에서 고칠 게 남았어.',
@@ -236,7 +245,7 @@ const S = {
   post_channels: [], search_terms: [], metric_post_ids: [], unavailable: [], runs_auto_7d: null,
 };
 let M = { prog: {}, ch: {}, prod: {}, post: {}, linksBy: {}, ppBy: {}, jobsBy: {}, slotsBy: {}, pcBy: {}, terms: new Map() };
-const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids', 'unavailable', 'runs_auto_7d', 'plan_today'];
+const STATE_KEYS = ['posts', 'trash', 'jobs', 'settings', 'runs', 'channels', 'programs', 'compat', 'topics', 'products', 'post_products', 'links', 'imports', 'image_slots', 'post_channels', 'search_terms', 'metric_post_ids', 'unavailable', 'runs_auto_7d', 'plan_today', 'templates'];
 // 서버가 null 로 보낼 수 있는 값 (null = 모름 — 예전 값을 그대로 두지 않음)
 const NULLABLE_KEYS = new Set(['runs_auto_7d', 'plan_today']);
 // 서버가 못 읽은 것(DB 016 전이거나 오류)은 null — 계산에서 0이 아니라 '데이터 없음'으로
@@ -264,6 +273,7 @@ function checksFor(p, withOthers) {
     programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(),
     focus: (S.settings || {}).focus_topic || '', focusTerms: (S.settings || {}).focus_terms || '',
     others: withOthers ? S.posts.filter((o) => o.id !== p.id && o.body).slice(0, 80).map((o) => ({ id: o.id, title: titleOf(o), body: o.body })) : [],
+    templates: (S.templates || []).filter((t) => t.active), // 1.7.0: 참고 글 문장을 그대로 가져왔는지
   });
   // 이미지 검사(검수 전·실제 사진이 필요한 자리의 AI 이미지 등)는 '확인할 것'으로만 더함 — 발행을 막지 않음
   const chKind = (M.ch[p.channel_id] || {}).kind;
@@ -1133,6 +1143,10 @@ function viewPost(id) {
     box.append(panel(`발행 전 검사 (고칠 것 ${r.errors.length} · 확인 ${r.warnings.length})`, checkList(r)));
     box.append(copyPanel(p, r, links));
     box.append(bodyPanel(p));
+    // 1.7.0: 사람 말투 점검·다듬기, 투자 글의 숫자 확인표
+    const kindOf = (M.ch[p.channel_id] || {}).kind;
+    if (kindOf === 'blog' || kindOf === 'site') box.append(tonePanel(p));
+    if ((p.figures && p.figures.length) || (PLAN_KINDS[p.plan_kind] && PLAN_KINDS[p.plan_kind].invest) || (CONTENT_TYPES[p.content_type] && CONTENT_TYPES[p.content_type].invest)) box.append(figuresPanel(p));
     if (!WORK.includes(p.stage)) box.append(ST.postPanel(p));
     box.append(linksPanel(p, links));
     box.append(productsPanel(p));
@@ -1149,6 +1163,173 @@ function viewPost(id) {
   if (p.body && (LIVE.includes(p.stage) || (p.refresh && Object.keys(p.refresh).length))) box.append(refreshPanel(p));
   box.append(jobsPanel(p));
   return box;
+}
+
+// ───────── 1.7.0 사람 말투 점검 · 숫자 확인표 ─────────
+const scopeOfPost = (p) => (PLAN_KINDS[p.plan_kind] && PLAN_KINDS[p.plan_kind].invest) || (CONTENT_TYPES[p.content_type] && CONTENT_TYPES[p.content_type].invest) ? 'invest' : 'general';
+function tonePanel(p) {
+  const t = aiTone(p.body);
+  const pending = (S.jobs || []).find((j) => j.kind === 'polish' && j.post_id === p.id && j.status === 'pending');
+  const scope = scopeOfPost(p);
+  const v = ((S.settings || {}).voice || {})[scope] || {};
+  const voiceName = v.source === 'mine' ? '내 글로 만든 말투' : (VOICE_PRESETS[v.preset] || VOICE_PRESETS[VOICE_SCOPES[scope].def]).label;
+  const revBox = h('div', { class: 'stack' });
+  return panel('사람 말투 점검',
+    h('p', { class: t.score >= AI_TONE_GOOD ? 'okbox' : t.score >= AI_TONE_BAD ? 'notice' : 'badbox' }, `AI 말투 점수 ${t.score}점 — ${t.verdict}`),
+    // 걸린 습관은 6가지까지만 (휴대폰 화면이 길어지지 않게), 나머지는 수만
+    t.hits.length ? h('ul', { class: 'hits' }, t.hits.slice(0, 6).map((x) => h('li', null, x.label + (x.examples && x.examples[0] ? ` — “${x.examples[0]}”` : ''))),
+      t.hits.length > 6 ? h('li', { class: 'more' }, `그 밖에 ${t.hits.length - 6}가지 더 — ${t.hits.slice(6).map((x) => x.label).join(', ')}`) : null)
+      : h('p', { class: 'hint' }, '틀에 박힌 말·같은 어미 반복·똑같은 문장 길이가 없어.'),
+    h('p', { class: 'hint' }, `다듬을 때 쓰는 말투: ${voiceName} · ${VOICE_SCOPES[scope].label} — 설정 > 말투·전문성에서 바꿔. 사진·링크 자리, 숫자·사실은 그대로 두고 문장만 고쳐 써.`),
+    h('div', { class: 'go' },
+      pending ? h('span', { class: 'chip' }, '다듬기 기다리는 중 — 다음 자동 작가 실행 때')
+        : btn('사람 말투로 다듬기', t.score < AI_TONE_GOOD ? 'sm' : 'sm ghost', async (ev) => {
+          const j = await run(ev.currentTarget, () => api('/jobs', { method: 'POST', body: { kind: 'polish', post_id: p.id } }), `다듬기를 요청했어 — ${nextRunText()} 자동 작가가 고쳐 써 (지금 본문은 보관돼서 되돌릴 수 있어)`);
+          if (j) await load();
+        }),
+      btn('이전 본문 보기', 'sm ghost', (ev) => loadRevisions(p, revBox, ev.currentTarget))),
+    revBox);
+}
+async function loadRevisions(p, box, button) {
+  const j = await run(button, () => api(`/posts/${p.id}/revisions`));
+  if (!j) return;
+  if (!j.revisions.length) { put(box, h('p', { class: 'hint' }, j.unavailable ? 'DB 업데이트(021) 전이라 이전 본문이 없어.' : '보관한 이전 본문이 없어 (다듬기·되돌리기를 하면 그 전 본문이 여기 남아).')); return; }
+  const why = { polish: '다듬기 전', revert: '되돌리기 전', '': '' };
+  put(box, ...j.revisions.map((r) => {
+    const d = det('rev:' + r.id, `${why[r.reason] || '이전'} 본문 · ${L.fmtTime(r.created_at)} · ${bodyChars(r.body).toLocaleString('ko-KR')}자`, false, 'revbox');
+    d.append(h('pre', { class: 'revbody' }, r.body),
+      h('div', { class: 'go' }, btn('이 본문으로 되돌리기', 'sm ghost', async (ev) => {
+        if (!confirmBox(ev.currentTarget, '되돌릴까?')) return;
+        const x = await run(ev.currentTarget, () => api(`/revisions/${r.id}/revert`, { method: 'POST', body: {} }), '되돌렸어 — 지금 본문은 보관해 뒀어');
+        if (x) await load();
+      }), btn('복사', 'sm ghost', (ev) => copyPlain(r.body, ev.currentTarget))));
+    return d;
+  }));
+}
+function figuresPanel(p) {
+  const figs = (Array.isArray(p.figures) ? p.figures : []).filter((f) => f && typeof f === 'object');
+  const res = h('div', { class: 'stack' });
+  if (!figs.length) return panel('숫자 확인표', h('p', { class: 'notice' }, '투자 글인데 숫자 확인표가 비어 있어. 본문의 숫자는 출처에서 직접 확인해줘 (다음 원고부터 자동 작가가 표를 채워).'));
+  const un = unlistedNumbers(p.body, figs);
+  return panel(`숫자 확인표 (${figs.length}줄)`,
+    h('p', { class: 'hint' }, '자동 작가가 출처에서 확인했다고 적은 숫자야. 올리기 전에 출처를 눌러 한 번씩 확인해줘.'),
+    h('div', { class: 'tblwrap' }, h('table', { class: 'figs' },
+      h('tr', null, h('th', null, '항목'), h('th', null, '값'), h('th', null, '기준'), h('th', null, '출처')),
+      figs.map((f) => h('tr', null, h('td', null, String(f.label || '')), h('td', null, `${f.value ?? ''}${f.unit ? ' ' + f.unit : ''}`), h('td', null, String(f.as_of || '—')),
+        h('td', null, L.safeUrl(f.source_url) ? h('a', { href: L.safeUrl(f.source_url), target: '_blank', rel: 'noopener noreferrer' }, f.source_title || '열기 ↗') : h('span', { class: 'bad' }, '없음')))))),
+    un.length ? h('p', { class: 'notice' }, `표에 없는 숫자 ${un.length}개: ${un.slice(0, 4).map((x) => x.value).join(', ')}${un.length > 4 ? ' …' : ''} — 출처에서 확인한 숫자인지 봐줘.`) : null,
+    h('div', { class: 'go' }, btn('한국은행 숫자와 맞춰보기', 'sm ghost', async (ev) => {
+      const j = await run(ev.currentTarget, () => api(`/posts/${p.id}/verify-figures`, { method: 'POST', body: {} }));
+      if (!j) return;
+      const cls = { 같음: 'v-ok', 다름: 'v-bad', '아직 없음': 'v-warn' };
+      // 휴대폰에서 칸이 좁아 숫자가 쪼개지지 않게 표 대신 줄 목록으로
+      put(res, h('ul', { class: 'figcheck' }, j.results.map((r) => h('li', null,
+        h('div', { class: 'split' }, h('b', null, r.label), h('span', { class: 'chip ' + (cls[r.status] || '') }, r.status)),
+        h('small', null, [`글 ${r.value ?? ''}`, r.official != null ? `한국은행 ${L.fmtNum(r.official)} ${r.unit || ''}`.trim() : '', r.date ? `${r.date} 기준` : '', r.note || ''].filter(Boolean).join(' · '))))),
+        h('p', { class: 'hint' }, `${j.source} · 코스피·코스닥 지수, 외국인 순매수, 원/달러 환율만 대조해. 한국은행 자료는 보통 다음 영업일에 올라와서 오늘 숫자는 '아직 없음'일 수 있어.`));
+    })), res);
+}
+
+// ───────── 1.7.0 설정: 말투·전문성 ─────────
+function secVoice() {
+  const st = S.settings || {};
+  const voice = JSON.parse(JSON.stringify(st.voice || {}));
+  const scopes = Object.keys(VOICE_SCOPES).map((scope) => {
+    const v = voice[scope] = voice[scope] || {};
+    const sel = h('select', { 'aria-label': VOICE_SCOPES[scope].label + ' 말투' },
+      ...Object.entries(VOICE_PRESETS).map(([k, x]) => optSel(k, x.label, v.source !== 'mine' && (v.preset || VOICE_SCOPES[scope].def) === k)),
+      v.source === 'mine' ? optSel('mine', '내 글로 만든 말투', true) : null);
+    const cardBox = h('pre', { class: 'voicecard' }, voiceCard(st, scope));
+    const sample = h('textarea', { rows: '5', maxlength: '20000', placeholder: '내가 쓴 글을 2~3개 붙여넣어줘 (블로그 글·메모 아무거나, 5문장 이상). 붙여넣은 글 전체는 저장하지 않아 — 말투 숫자와 짧은 예시 문장 3개만 말투 카드에 남겨.' });
+    let made = null;
+    const result = h('div', { class: 'stack' });
+    sel.addEventListener('change', () => {
+      if (sel.value === 'mine') return;
+      Object.assign(v, { preset: sel.value, source: 'preset', card: '', examples: [], stats: {} });
+      cardBox.textContent = VOICE_PRESETS[sel.value].card; markDirty();
+    });
+    const analyze = btn('내 말투 분석', 'sm ghost', () => {
+      const r = L.voiceProfile(sample.value);
+      if (!r.ok) { put(result, h('p', { class: 'notice' }, r.reason)); return; }
+      made = r;
+      put(result, h('p', { class: 'okbox' }, `${r.sentences}문장에서 뽑았어: ${r.stats.style} · 문장 평균 ${r.stats.avg}자`), h('pre', { class: 'voicecard' }, r.card),
+        btn('이 말투로 쓰기', 'sm', () => {
+          Object.assign(v, { preset: v.preset || VOICE_SCOPES[scope].def, source: 'mine', card: made.card, examples: made.examples, stats: { style: made.stats.style, avg: made.stats.avg, haeyo: made.stats.haeyo, hamnida: made.stats.hamnida } });
+          if (![...sel.options].some((o) => o.value === 'mine')) sel.append(optSel('mine', '내 글로 만든 말투', true));
+          sel.value = 'mine'; cardBox.textContent = made.card; sample.value = ''; put(result, h('p', { class: 'hint' }, "아래 '저장'을 눌러야 자동 작가가 이 말투로 써.")); markDirty();
+        }));
+    });
+    const mine = det('voice-mine:' + scope, '내 글로 말투 만들기', false, '');
+    mine.append(sample, h('div', { class: 'go' }, analyze), result);
+    return h('div', { class: 'stack voicebox' }, h('b', null, VOICE_SCOPES[scope].label), field('말투', sel), cardBox, mine);
+  });
+  const series = JSON.parse(JSON.stringify(st.series || {}));
+  const seriesRows = Object.entries(PLAN_KINDS).map(([k, x]) => {
+    const inp = h('input', { type: 'text', maxlength: '20', value: series[k] || '', placeholder: k === 'market' ? '예: 오늘의 증시' : k === 'stock' ? '예: 종목 한 장 정리' : '비우면 시리즈 없음' });
+    inp.addEventListener('input', () => { series[k] = inp.value.replace(/[[\]\n]/g, ''); markDirty(); });
+    return field(x.label, inp);
+  });
+  const brand = h('input', { type: 'text', maxlength: '30', value: st.brand_name || '', placeholder: '예: 상화의 생활 노트' });
+  brand.addEventListener('input', markDirty);
+  const blogs = (S.channels || []).filter((c) => c.active && (c.kind === 'blog' || c.kind === 'site'));
+  const inv = h('select', { 'aria-label': '투자 글 블로그' }, optSel('', '같은 블로그에 올림', !st.invest_channel), ...blogs.map((c) => optSel(c.id, c.name, st.invest_channel === c.id)));
+  inv.addEventListener('change', markDirty);
+  return [
+    h('p', { class: 'hint' }, "자동 작가는 '말투 카드'대로 써. 기본 말투를 고르거나, 내가 쓴 글을 붙여넣어 '내 말투'를 만들 수 있어 (안 써본 걸 써본 척하는 문장은 말투와 상관없이 계속 막아)."),
+    ...scopes,
+    h('b', null, '시리즈 이름 (제목 앞에 [이름 11/3] · [이름 #12])'), ...seriesRows,
+    field('블로그 이름 (썸네일 아래에 작게)', brand),
+    field('투자 글(증시·종목)을 올릴 블로그', inv, '생활·가전 블로그에 증시 글이 섞이면 네이버가 보는 주제 집중도가 흐려져. 두 번째 블로그를 만들어 두면 원고에 "투자 블로그용"으로 표시돼.'),
+    h('div', { class: 'go' }, btn('저장', 'sm', async (ev) => {
+      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { voice, series, brand_name: brand.value.trim(), invest_channel: inv.value } }), '저장했어');
+      if (j) { dirty = false; await load(); }
+    })),
+    ecosHelp(),
+  ];
+}
+function ecosHelp() {
+  const d = det('ecos-help', '공식 숫자 대조 (한국은행 ECOS) 켜는 법', false, '');
+  d.append(h('ol', null, h('li', null, '한국은행 경제통계시스템 Open API(ecos.bok.or.kr/api)에 가입하면 인증키가 나와.'),
+    h('li', null, 'Supabase 대시보드 > Edge Functions > Secrets 에 이름 ECOS_API_KEY, 값은 인증키로 넣어.'),
+    h('li', null, "투자 글 원고 화면의 '한국은행 숫자와 맞춰보기'로 코스피·코스닥·외국인 순매수·원/달러 환율을 대조해 (요금 안내는 아직 확인 못 했어 — 가입할 때 확인해줘).")));
+  return d;
+}
+const TEMPLATE_KINDS = [['', '모든 글'], ...Object.entries(PLAN_KINDS).map(([k, x]) => [k, x.label])];
+function secTemplates() {
+  const list = S.templates || [];
+  const kindSel = h('select', { 'aria-label': '틀을 쓸 글 종류' }, ...TEMPLATE_KINDS.map(([k, l]) => optSel(k, l, k === '')));
+  const name = h('input', { type: 'text', maxlength: '60', placeholder: '예: 가습기 1위 글' });
+  const photos = h('input', { type: 'number', min: '0', max: '30', inputmode: 'numeric', placeholder: '예: 6' });
+  const text = h('textarea', { rows: '6', maxlength: '30000', placeholder: '잘 나가는 글(검색 상위·홈판 인기 글)을 통째로 복사해서 붙여넣어줘. 문장은 저장하지 않아.' });
+  const prev = h('div', { class: 'stack' });
+  let made = null;
+  const analyze = btn('틀 뽑기', 'sm', () => {
+    const r = L.analyzeReference(text.value, { photos: photos.value === '' ? null : Number(photos.value) });
+    if (!r.ok) { put(prev, h('p', { class: 'notice' }, r.reason)); made = null; return; }
+    made = r;
+    put(prev, h('p', { class: 'okbox' }, L.templateLine(r)),
+      h('div', { class: 'chips' }, r.outline.map((x, i) => h('span', { class: 'chip' }, `${i + 1}. ${x.role} · ${x.size}${x.list ? ' · 목록' : ''}`))),
+      h('p', { class: 'hint' }, `소제목 ${r.stats.headings}개를 찾았어. 맞지 않으면 원문의 소제목을 줄 하나에 따로 두고 다시 뽑아줘.`),
+      btn('이 틀 저장', 'sm', async (ev) => {
+        const j = await run(ev.currentTarget, () => api('/templates', { method: 'POST', body: { kind: kindSel.value, name: name.value.trim(), outline: made.outline, stats: made.stats, fp: made.fp } }), '틀을 저장했어 — 원문은 저장하지 않았어');
+        if (j) { text.value = ''; put(prev); await load(); }
+      }));
+  });
+  const kindName = (k) => (TEMPLATE_KINDS.find(([x]) => x === k) || [k, k])[1];
+  return [
+    h('p', { class: 'hint' }, "잘 나가는 글을 붙여넣으면 소제목 흐름·분량·사진 수·도입/마무리 방식·말투만 뽑아서 '틀'로 저장해. 자동 작가는 그 틀대로 새 내용을 쓰고, 참고 글과 25자 넘게 똑같은 문장이 있으면 발행 전 검사가 막아 (문장 대신 지문 숫자만 저장)."),
+    h('div', { class: 'row' }, field('어느 글에 쓸까', kindSel), field('이름 (선택)', name), field('사진 몇 장이었어? (선택)', photos)),
+    text, h('div', { class: 'go' }, analyze), prev,
+    list.length ? h('div', { class: 'list' }, list.map((t) => h('div', { class: 'item' },
+      h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${t.name} · ${kindName(t.kind)}${t.active ? '' : ' (꺼짐)'}`), h('small', null, L.templateLine(t))),
+      h('div', { class: 'side' },
+        btn(t.active ? '끄기' : '켜기', 'sm ghost', async (ev) => { const j = await run(ev.currentTarget, () => api(`/templates/${t.id}`, { method: 'POST', body: { active: !t.active } })); if (j) await load(); }),
+        btn('지우기', 'sm ghost', async (ev) => {
+          if (!confirmBox(ev.currentTarget, '지울까?')) return;
+          const j = await run(ev.currentTarget, () => api(`/templates/${t.id}`, { method: 'DELETE' }), '지웠어');
+          if (j) await load();
+        }))))) : h('p', { class: 'hint' }, S.templates == null ? 'DB 업데이트(021) 전이라 틀을 저장할 수 없어.' : '저장한 틀이 없어.'),
+  ];
 }
 // 1.6.0: 발행은 사용자가 블로그에서 직접 → 올린 뒤 바로 지우기, 자동 원고는 보관해야 자동 정리에서 빠짐
 function quickActions(p) {
@@ -1292,12 +1473,14 @@ function copyPanel(p, r, links) {
     btn('서식 그대로 복사', 'sm', (ev) => copyRich(L.exportHtml(p, ctx), L.exportPlain(p, ctx), ev.currentTarget)),
     btn('HTML 코드', 'sm ghost', (ev) => copyPlain(L.exportHtml(p, ctx), ev.currentTarget)),
     btn('텍스트만', 'sm ghost', (ev) => copyPlain(L.exportPlain(p, ctx), ev.currentTarget))));
-  const gps = promptsOf(p.body).filter((x) => x.prompt);
+  const gps = promptsOf(p.body).filter((x) => x.prompt && !x.app); // 1.7.0: 앱이 그리는 썸네일·정보 카드 자리는 제미나이 프롬프트가 아님
   if (gps.length) {
     box.append(h('div', { class: 'go' }, btn(`사진 프롬프트 ${gps.length}개 모두 복사`, 'sm ghost', (ev) => copyPlain(L.promptsText(p), ev.currentTarget))),
       h('p', { class: 'hint' }, "📷 사진 자리마다 제미나이 프롬프트가 있어 — 미리보기의 '프롬프트 복사'로 하나씩 제미나이에 붙여 넣어 만들고, 받은 사진을 블로그의 '📷 사진 n' 자리에 넣어줘. 복사한 글에는 프롬프트가 안 들어가."));
   } else if (countImg(p.body)) box.append(h('p', { class: 'hint' }, "📷 사진은 앱이 블로그에 대신 올리지 않아. 복사한 글의 사진 자리마다 내려받을 파일 이름이 적혀 있으니, 원고 아래 '이미지'에서 '모두 내려받기'로 받은 파일을 그 자리에 넣어줘."));
-  box.append(h('p', { class: 'hint' }, "'서식 그대로 복사'는 소제목을 크게, ==강조==와 핵심 상자는 바탕색을 칠해서 붙여 넣어 (네이버 편집기가 일부 서식을 버리면 그 부분만 직접 고쳐줘)."));
+  box.append(h('p', { class: 'hint' }, "'서식 그대로 복사'는 소제목을 크게, ==강조==와 핵심 상자는 바탕색을 칠해서 붙여 넣어 (네이버 편집기가 일부 서식을 버리면 그 부분만 직접 고쳐줘). 출처가 있으면 글 끝에 '참고 자료'와 [1] 번호가 같이 들어가."));
+  // 1.7.0: 네이버가 2026년 5월에 만든 'AI 활용' 표시 (블로그는 권장, 의무 아님 — MTN 2026-07-25 보도)
+  if (promptsOf(p.body).some((x) => x.prompt && !x.app)) box.append(h('p', { class: 'hint' }, "🤖 제미나이로 만든 사진처럼 보이는 이미지를 넣으면, 네이버 글쓰기의 'AI 활용' 표시를 켜는 걸 권해 (블로그는 의무가 아니라 권장이야 — 밝히면 오히려 믿음이 가)."));
   if (disc.text) box.append(h('p', { class: 'hint' }, '맨 위에 이 고지문이 자동으로 들어가:'), h('p', { class: 'sns' }, disc.text));
   else if ((p.program_ids || []).length) box.append(h('p', { class: 'hint' }, '이 글의 수익 모델에는 넣을 고지문이 없어 (설정 > 수익 모델에서 확인).'));
   const tags = p.hashtags || [];
@@ -1333,10 +1516,13 @@ function bodyPanel(p) {
   const img = countImg(p.body);
   if (img) {
     const c = ST.slotCount(p);
-    const np = promptsOf(p.body).filter((x) => x.prompt).length;
+    const ps = promptsOf(p.body);
+    const np = ps.filter((x) => x.prompt && !x.app).length;
+    const na = ps.filter((x) => x.app).length;
+    const appNote = na ? ` 썸네일·정보 카드 자리 ${na}곳은 아래 '이미지'에서 앱이 그려줘.` : '';
     box.append(h('p', { class: 'notice' }, np
-      ? `📷 사진 자리 ${img}곳 · 제미나이 프롬프트 ${np}개 — 미리보기의 '프롬프트 복사'로 제미나이에서 만들어 블로그의 그 자리에 넣어줘 (아래 '이미지'에서 만들어 연결해도 돼).`
-      : `📷 사진 자리 ${img}곳 · 이미지 연결 ${c ? c.linked : 0}곳 — 아래 '이미지'에서 만들거나 찾거나 올려서 연결하고, 블로그에는 내려받아서 직접 넣어줘.`));
+      ? `📷 사진 자리 ${img}곳 · 제미나이 프롬프트 ${np}개 — 미리보기의 '프롬프트 복사'로 제미나이에서 만들어 블로그의 그 자리에 넣어줘 (아래 '이미지'에서 만들어 연결해도 돼).${appNote}`
+      : `📷 사진 자리 ${img}곳 · 이미지 연결 ${c ? c.linked : 0}곳 — 아래 '이미지'에서 만들거나 찾거나 올려서 연결하고, 블로그에는 내려받아서 직접 넣어줘.${appNote}`));
   }
   const prev = h('div', { class: 'post', id: 'pv-' + p.id });
   fillPreview(prev, p);
@@ -1986,7 +2172,7 @@ function viewSettings() {
   const box = h('div', { class: 'view' });
   const sec = route.parts[0] || '';
   const sections = [
-    ['auto', '자동 글쓰기', secAuto], ['images', '이미지 (AI·사진·비용 한도)', () => ST.settingsSection()], ['jobs', '작업 기록', secJobs], ['programs', '수익 모델', secPrograms], ['channels', '게시 채널', secChannels],
+    ['auto', '자동 글쓰기', secAuto], ['voice', '말투·전문성 (말투 카드·시리즈·투자 블로그·공식 숫자)', secVoice], ['templates', '참고 글 틀 (잘 나가는 글의 구조)', secTemplates], ['images', '이미지 (AI·사진·비용 한도)', () => ST.settingsSection()], ['jobs', '작업 기록', secJobs], ['programs', '수익 모델', secPrograms], ['channels', '게시 채널', secChannels],
     ['compat', '수익 모델 × 채널 조합표', secCompat], ['products', '상품 목록', secProducts], ['devices', '기기·접속 코드', secDevices],
     ['backup', '백업·복구', secBackup], ['trash', '휴지통', secTrash], ['guide', '사용 방법', secGuide], ['about', '앱 정보', secAbout],
   ];
@@ -2256,7 +2442,7 @@ function secGuide() {
       h('li', null, '제휴 링크는 받은 그대로. 줄이거나 다른 주소로 돌리지 마 (제휴사 규정 위반이 될 수 있어).'),
       h('li', null, '내가 산 건 수익으로 인정 안 될 수 있어 (토스 쉐어링크는 본인·지인 구매 불인정).'))),
     g('이미지 넣기',
-      h('ol', null, h('li', null, "원고 아래 '이미지'에서 사진 자리마다 AI로 만들기·실제 사진 찾기(Pexels)·파일 올리기·보관함에서 고르기 중 하나 (파일을 올릴 때는 '이 사진은 어디서 났어?'에서 출처를 골라줘 — 직접 찍은 사진으로 셀지 정해져)"),
+      h('ol', null, h('li', null, "원고 아래 '이미지'에서 사진 자리마다 AI로 만들기·실제 사진 찾기(Pixabay·Unsplash·Pexels)·파일 올리기·보관함에서 고르기 중 하나 (파일을 올릴 때는 '이 사진은 어디서 났어?'에서 출처를 골라줘 — 직접 찍은 사진으로 셀지 정해져)"),
         h('li', null, "미리보기에서 자를 곳을 맞추고 '사용 가능'으로 검수"), h('li', null, "'모두 내려받기' → '서식 그대로 복사'로 붙여넣은 뒤, 적힌 파일 이름대로 사진을 넣기"),
         h('li', null, "블로그에 넣었으면 '사용 완료' 표시")),
       h('p', null, 'AI 이미지는 일반 상황 삽화·배경용이야. 실제 상품 모습은 공식 이미지나 직접 찍은 사진으로. 이미지 안 글자는 카드뉴스에서 앱이 직접 그려. AI 이미지 키·한도는 설정 > 이미지.')),

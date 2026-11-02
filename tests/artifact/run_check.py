@@ -33,7 +33,7 @@ with sync_playwright() as p:
     pg.goto('file://' + os.path.join(WORK, 'wrapped.html'))
     pg.wait_for_function("document.querySelector('#connText').textContent.includes('앱 연결됨')", timeout=8000)
     check('catalog loads → 연결됨', True, pg.inner_text('#connText'))
-    check('job count badge = 6 (개선안 작업 포함 — 기다리는 요청 전체)', pg.inner_text('#jobCount').strip() == '6', pg.inner_text('#jobCount'))
+    check('job count badge = 7 (개선안·말투 다듬기 작업 포함 — 기다리는 요청 전체)', pg.inner_text('#jobCount').strip() == '7', pg.inner_text('#jobCount'))
     chips = pg.eval_on_selector_all('#prPicks label', 'els => els.map(e => e.textContent)')
     check('program chips from catalog', len(chips) == 8 and any('확인 필요' in c for c in chips), str(chips[:3]))
     check('default channel naver_blog checked', pg.is_checked('#ch-naver_blog'))
@@ -112,18 +112,23 @@ with sync_playwright() as p:
     check('comparison job left to auto writer', '자동 작가 몫' in jl)
     check('refresh job (1.4.0) shown as left to auto writer, not run here', '개선안' in jl and '개선안은 자동 작가가 써' in jl, jl[-300:])
     check('backlog full note on connection line (1.4.0)', '자동 작가는 새 자동 글을 멈춘 상태' in pg.inner_text('#connText'), pg.inner_text('#connText')[-160:])
-    check('run button counts 4 doable', '(4개)' in pg.inner_text('#jRun'), pg.inner_text('#jRun'))
+    check('polish job (1.7.0) shown as doable here', '말투 다듬기' in jl and '전기요 고르는 법 말투 다듬기' in jl, jl[-200:])
+    check('run button counts 5 doable', '(5개)' in pg.inner_text('#jRun'), pg.inner_text('#jRun'))
     pg.click('#jRun')
     pg.wait_for_function("document.querySelector('#jStatus').textContent.includes('처리했어')", timeout=15000)
     st = pg.inner_text('#jStatus')
-    check('jobs processed: 3 done, 1 failed (needs experience)', '3개 처리했어' in st and '실패 1개' in st, st)
+    check('jobs processed: 4 done (incl. 다듬기 1), 1 failed (needs experience)', '4개 처리했어' in st and '다듬기 1' in st and '실패 1개' in st, st)
     q = pg.evaluate('window.__log.queries')
-    check('job_start ×4, fill_post, add_topics(job), set_variants, job_fail(needs input), log_run', sum('public.job_start(' in x for x in q) == 4 and any('public.fill_post(' in x for x in q) and any(re.search(r"add_topics\('[0-9a-f-]{36}'", x) for x in q) and any('public.set_variants(' in x for x in q) and any('public.job_fail(' in x and 'true);' in x for x in q) and any("public.log_run('artifact'" in x for x in q))
+    check('job_start ×5, fill_post, add_topics(job), set_variants, set_polish, job_fail(needs input), log_run', sum('public.job_start(' in x for x in q) == 5 and any('public.set_polish(' in x for x in q) and any('public.fill_post(' in x for x in q) and any(re.search(r"add_topics\('[0-9a-f-]{36}'", x) for x in q) and any('public.set_variants(' in x for x in q) and any('public.job_fail(' in x and 'true);' in x for x in q) and any("public.log_run('artifact'" in x for x in q))
     sv = [x for x in q if 'public.set_variants(' in x][-1]
     v = json.loads(re.search(r'(\$gf[a-z0-9]+\$)([\s\S]*?)\1', sv).group(2))
     check('variants: #광고 line stripped from threads', v['threads'] == '전기요 고를 때 소재부터 봐' and len(v['cards']) == 2, json.dumps(v, ensure_ascii=False))
     lr = [x for x in q if "public.log_run('artifact'" in x][-1]
-    check('log_run status 일부 실패 with counts', '일부 실패' in lr and ', 3, 1, 1,' in lr, lr[:160])
+    check('log_run status 일부 실패 with counts', '일부 실패' in lr and ', 4, 1, 1,' in lr and '다듬기 1' in lr, lr[:200])
+    sp = [x for x in q if 'public.set_polish(' in x]
+    pv = json.loads(re.search(r'(\$gf[a-z0-9]+\$)([\s\S]*?)\1', sp[-1]).group(2))
+    psamples = [x for x in pg.evaluate('window.__log.samples') if '말투만 다시 써줘' in x]
+    check('polish: link line changed on 1st answer → asked once more, saved only the answer with same image/link lines', len(sp) == 1 and len(psamples) == 2 and '[링크: 가격 보기]' in pv['body'] and '최저가 보러 가기' not in pv['body'] and 'titles' not in pv, json.dumps(pv, ensure_ascii=False)[:160])
     bad = [x for x in q if re.search(r'\b(delete|drop|truncate|alter|insert|update)\b', re.sub(r'(\$gf[a-z0-9]+\$)[\s\S]*?\1', '', x), re.I)]
     check('no raw delete/drop/truncate/alter/insert/update outside functions', not bad, str(bad[:1])[:200])
     pg.screenshot(path=os.path.join(shots, '4-jobs.png'), full_page=True)

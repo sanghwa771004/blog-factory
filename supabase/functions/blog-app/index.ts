@@ -1,11 +1,11 @@
-// 블로그 글공장 서버 API (1.6.0)
+// 블로그 글공장 서버 API (1.7.0)
 // - 기기별 로그인: 접속 코드로 한 번 로그인하면 기기마다 세션 토큰을 받음 (접속 코드는 기기에 남기지 않음)
 // - 표는 모두 RLS로 잠겨 있고, 이 함수만 서버 키로 읽고 씀
 // - '발행 준비 완료'는 서버에서도 checks.js 로 다시 검사해서 오류가 있으면 거부
 // - 이미지 스튜디오: OpenAI·Pexels 키는 이 함수의 환경변수(Secrets)에만 있고 화면으로는 '있음/없음'만 보냄.
 //   이미지 파일은 비공개 버킷(post-images)에, 정보는 post_images 표에. 화면은 1시간짜리 서명 주소로만 봄
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE, cleanPlan, KEEP_DAYS } from "./checks.js";
+import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE, cleanPlan, KEEP_DAYS, PLAN_KINDS, VOICE_PRESETS, VOICE_SCOPES } from "./checks.js";
 import {
   parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, QUALITIES, ratioOf, sizeFor,
   validApiSize, promptRisk, blocksOf, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
@@ -19,11 +19,11 @@ import {
   cleanFit, ALL_EVAL_KEYS,
 } from "./images.js";
 import {
-  BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter,
+  BUCKET, TEST_MODEL, PHOTO_PROVIDERS, runGeneration, saveStockPhoto, saveUploaded, b64ToBytes, needMsFor, busyRetryAfter, isUnsplashId,
   reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub, storagePath, sha256Hex,
 } from "./image_service.js";
 
-const VERSION = "1.6.0";
+const VERSION = "1.7.0";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)
@@ -269,15 +269,17 @@ async function getPost(id: string) {
   return data as J;
 }
 async function runChecks(post: J) {
-  const [cat, links, pp] = await Promise.all([
+  const [cat, links, pp, tpl] = await Promise.all([
     catalog(),
     sb.from("links").select("*").eq("post_id", post.id),
     sb.from("post_products").select("sort, products(*)").eq("post_id", post.id).order("sort"),
+    // 1.7.0: 참고 글 '틀'의 지문 — 원고가 참고 글 문장을 그대로 가져왔으면 막음 (021 전 DB면 건너뜀)
+    Promise.resolve(sb.from("post_templates").select("name, fp").eq("active", true).limit(50)).then(({ data, error }) => (error ? [] : data ?? [])).catch(() => []),
   ]);
   if (links.error) throw links.error;
   if (pp.error) throw pp.error;
   const products = (pp.data ?? []).map((x: J) => x.products).filter(Boolean);
-  const result = checkPost(post, { ...cat, links: links.data ?? [], products, today: kstToday() });
+  const result = checkPost(post, { ...cat, links: links.data ?? [], products, today: kstToday(), templates: tpl as J[] });
   return { result, disclosure: disclosureFor(post.program_ids as string[], cat.programs).text };
 }
 // PostgREST는 한 번에 최대 1000줄(Supabase 기본 설정)만 돌려줘서, 나눠서 끝까지 가져옴
@@ -407,7 +409,7 @@ async function getState(c: Ctx) {
   const rpcData = (p: PromiseLike<{ data: unknown; error: unknown }>) => Promise.resolve(p).then(({ data, error }) => { if (error) throw error; return data; });
   // 홈 '최근 7일 정리'의 자동 작가 실행 수: 한국 날짜로 6일 전 0시부터 (실행 기록 목록이 잘려도 정확하게)
   const week0 = new Date(Date.parse(`${kstToday()}T00:00:00+09:00`) - 6 * 86400e3).toISOString();
-  const [postChannels, searchTerms, metricPosts, runsAuto7d, planToday] = await Promise.all([
+  const [postChannels, searchTerms, metricPosts, runsAuto7d, planToday, templates] = await Promise.all([
     soft(fetchAll("post_channels", [["posted_on", false], ["id", true]]), "post_channels", [] as J[]),
     soft(fetchAll("search_terms", [["period_end", false], ["id", true]], (q) => q.gte("period_end", since400),
       "id, post_id, term, views, period_start, period_end, channel_id, source_label, created_at"), "search_terms", [] as J[]),
@@ -418,6 +420,9 @@ async function getState(c: Ctx) {
       .catch((e) => { console.error("state runs_auto_7d:", String((e as Error)?.message ?? e)); return null; }),
     // 1.6.0 오늘 계획: 종류별로 오늘 자동으로 쓴 원고 수 (올리고 지운 것도 셈). 020 전 DB면 null
     Promise.resolve(sb.rpc("plan_today")).then(({ data, error }) => (error ? null : data as J)).catch(() => null),
+    // 1.7.0 잘 나가는 글 '틀' (구성·분량·지문만 — 원문은 없음). 021 전 DB면 null
+    Promise.resolve(sb.from("post_templates").select("id, kind, name, outline, stats, fp, note, active, created_at").order("created_at", { ascending: false }).limit(50))
+      .then(({ data, error }) => (error ? null : data as J[])).catch(() => null),
   ]);
   const [products, pp, links, imageSlots] = await Promise.all([
     fetchAll("products", [["updated_at", false], ["id", true]]),
@@ -448,7 +453,7 @@ async function getState(c: Ctx) {
     channels: channels.data, programs: programs.data, compat: compat.data, topics: topics.data, products,
     post_products: pp, links, imports: imports.data, image_slots: imageSlots.error ? [] : imageSlots.data,
     post_channels: postChannels, search_terms: searchTerms, metric_post_ids: metricPosts, unavailable, runs_auto_7d: runsAuto7d,
-    plan_today: planToday, expired,
+    plan_today: planToday, expired, templates,
     requests: jobs.data, lastRun: runs.data?.[0] ?? null, // 예전 화면 호환
   });
 }
@@ -769,6 +774,126 @@ async function retryPost(c: Ctx) {
   return json({ job_id: data });
 }
 
+// 1.7.0 이전 본문 (다듬기·되돌리기 전에 DB가 보관한 것)
+const noTable = (e: unknown, t: string) => { const x = (e ?? {}) as { code?: string; message?: string }; return ["42P01", "PGRST205"].includes(String(x.code ?? "")) || String(x.message ?? "").includes(t); };
+async function listRevisions(c: Ctx) {
+  await getPost(c.params[0]);
+  const { data, error } = await sb.from("post_revisions").select("id, reason, job_id, body, titles, created_at").eq("post_id", c.params[0]).order("created_at", { ascending: false }).limit(10);
+  if (error && noTable(error, "post_revisions")) return json({ revisions: [], unavailable: true });
+  if (error) throw error;
+  return json({ revisions: data ?? [] });
+}
+async function revertRevision(c: Ctx) {
+  const { data, error } = await sb.rpc("revert_post", { rev: c.params[0] });
+  if (error && /revision not found/.test(String(error.message))) fail(404, "not_found");
+  if (error) rpcError(error);
+  const post = await getPost(String((data as J).post_id));
+  return json({ post, restored_from: (data as J).restored_from });
+}
+
+// 1.7.0 잘 나가는 글 '틀': 화면이 계산한 구성·분량·지문만 받음 (원문은 받지 않음 — 저장도 안 함)
+const TEMPLATE_ROLES = ["FAQ", "정리", "주의", "비교", "추천·고르기", "가격·비용", "방법", "원인", "일정·대상", "숫자·현황", "후기·경험", "개념", "설명"];
+function cleanTemplate(b: J) {
+  const kind = b.kind === undefined || b.kind === "" ? "" : String(b.kind);
+  if (kind && !has(PLAN_KINDS, kind)) fail(400, "bad_field", { field: "kind" });
+  if (!Array.isArray(b.outline) || b.outline.length > 15) fail(400, "bad_field", { field: "outline" });
+  const outline = (b.outline as J[]).map((x) => {
+    if (!x || typeof x !== "object" || !TEMPLATE_ROLES.includes(String(x.role))) fail(400, "bad_field", { field: "outline" });
+    return { role: String(x.role), size: ["짧게", "보통", "길게"].includes(String(x.size)) ? String(x.size) : "보통", list: x.list === true, question: x.question === true };
+  });
+  const st = (b.stats && typeof b.stats === "object" && !Array.isArray(b.stats) ? b.stats : {}) as J;
+  const num = (v: unknown, max: number) => (Number.isFinite(Number(v)) && v !== null && v !== "" ? Math.max(0, Math.min(max, Math.round(Number(v)))) : null);
+  const stats = {
+    chars: num(st.chars, 50000), paragraphs: num(st.paragraphs, 2000), headings: num(st.headings, 50), photos: num(st.photos, 30), lists: num(st.lists, 50),
+    intro: ["질문으로 시작", "숫자로 시작", "상황 설명으로 시작"].includes(String(st.intro)) ? String(st.intro) : "",
+    ending: ["요약으로 끝", "질문으로 끝", "할 일 안내로 끝"].includes(String(st.ending)) ? String(st.ending) : "",
+    style: ["해요체", "합니다체", "반말", "섞어 씀"].includes(String(st.style)) ? String(st.style) : "",
+    avg_sentence: num(st.avg_sentence, 500),
+  };
+  if (!Array.isArray(b.fp) || b.fp.length > 6000 || !(b.fp as unknown[]).every((x) => Number.isInteger(x) && (x as number) >= -2147483648 && (x as number) <= 2147483647)) fail(400, "bad_field", { field: "fp" });
+  return { kind, name: str(b.name, 60).trim() || "참고 글", outline, stats, fp: b.fp, note: str(b.note, 300).trim() };
+}
+async function createTemplate(c: Ctx) {
+  const b = await readJson(c.req, 200_000);
+  const row = cleanTemplate(b);
+  const { count, error: ce } = await sb.from("post_templates").select("id", { count: "exact", head: true });
+  if (ce && noTable(ce, "post_templates")) fail(409, "db_update_needed", { migration: "021" });
+  if (ce) throw ce;
+  if ((count ?? 0) >= 50) fail(409, "too_many", { max: 50 });
+  const { data, error } = await sb.from("post_templates").insert(row).select("id, kind, name, outline, stats, fp, note, active, created_at").single();
+  // 개수 세기(HEAD)는 표가 없어도 오류 없이 빈 답이 올 수 있어서, 넣을 때도 한 번 더 확인
+  if (error && noTable(error, "post_templates")) fail(409, "db_update_needed", { migration: "021" });
+  if (error) throw error;
+  return json({ template: data });
+}
+async function patchTemplate(c: Ctx) {
+  const b = await readJson(c.req, 5_000);
+  const patch: J = {};
+  if ("active" in b) patch.active = b.active === true;
+  if ("name" in b) patch.name = str(b.name, 60).trim() || "참고 글";
+  if ("kind" in b) { const k = String(b.kind ?? ""); if (k && !has(PLAN_KINDS, k)) fail(400, "bad_field", { field: "kind" }); patch.kind = k; }
+  if (!Object.keys(patch).length) fail(400, "empty");
+  const { data, error } = await sb.from("post_templates").update(patch).eq("id", c.params[0]).select("id, kind, name, outline, stats, fp, note, active, created_at").maybeSingle();
+  if (error) throw error;
+  if (!data) fail(404, "not_found");
+  return json({ template: data });
+}
+async function deleteTemplate(c: Ctx) {
+  const { data, error } = await sb.from("post_templates").delete().eq("id", c.params[0]).select("id");
+  if (error) throw error;
+  if (!(data ?? []).length) fail(404, "not_found");
+  return json({ ok: true });
+}
+
+// 1.7.0 숫자 확인표를 한국은행 ECOS 공식 숫자와 맞춰 보기 (코스피·코스닥 지수, 외국인 순매수, 원/달러 환율 — 일별)
+// 키: Supabase Secrets 의 ECOS_API_KEY. ECOS는 다음 영업일쯤 올라와서 오늘 숫자는 '아직 없음'일 수 있음
+const ECOS_SERIES: { re: RegExp; stat: string; item: string; name: string; unit: string }[] = [
+  { re: /외국인.*(코스닥|kosdaq)|(코스닥|kosdaq).*외국인/i, stat: "802Y001", item: "0113000", name: "외국인 순매수(코스닥)", unit: "억원" },
+  { re: /외국인/i, stat: "802Y001", item: "0030000", name: "외국인 순매수(유가증권시장)", unit: "억원" },
+  { re: /코스닥|kosdaq/i, stat: "802Y001", item: "0089000", name: "KOSDAQ지수", unit: "포인트" },
+  { re: /코스피|kospi/i, stat: "802Y001", item: "0001000", name: "KOSPI지수", unit: "포인트" },
+  { re: /(원\s*\/?\s*달러|달러\s*환율|원·달러|원달러|환율)/i, stat: "731Y001", item: "0000001", name: "원/미국달러(매매기준율)", unit: "원" },
+];
+const numOf = (v: unknown) => { const m = String(v ?? "").replace(/,/g, "").match(/[-+]?\d+(\.\d+)?/); return m ? Number(m[0]) : NaN; };
+async function verifyFigures(c: Ctx) {
+  const post = await getPost(c.params[0]);
+  const key = Deno.env.get("ECOS_API_KEY") ?? "";
+  if (!key) fail(503, "ecos_key_missing");
+  const figs = (Array.isArray(post.figures) ? post.figures : []).filter((f: J) => f && typeof f === "object").slice(0, 30) as J[];
+  const out: J[] = [];
+  let calls = 0;
+  for (const f of figs) {
+    const label = String(f.label ?? "");
+    const ser = ECOS_SERIES.find((x) => x.re.test(label));
+    const date = String(f.as_of ?? "").slice(0, 10);
+    if (!ser) { out.push({ label, value: f.value, status: "대조 안 함", note: "한국은행 자료에 없는 항목" }); continue; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) { out.push({ label, value: f.value, status: "대조 못 함", note: "기준 날짜가 없어" }); continue; }
+    if (calls >= 10) { out.push({ label, value: f.value, status: "대조 못 함", note: "한 번에 10개까지만" }); continue; }
+    calls++;
+    const d = date.replace(/-/g, "");
+    let row: J | null = null;
+    try {
+      const r = await fetch(`https://ecos.bok.or.kr/api/StatisticSearch/${encodeURIComponent(key)}/json/kr/1/5/${ser.stat}/D/${d}/${d}/${ser.item}`, { signal: AbortSignal.timeout(12_000) });
+      await imageDeps().logCall("ecos", "series", r.status);
+      const j = await r.json().catch(() => null) as J | null;
+      const rows = ((j?.StatisticSearch as J | undefined)?.row ?? []) as J[];
+      if (!r.ok) { out.push({ label, value: f.value, status: "대조 못 함", note: `한국은행 응답 ${r.status}` }); continue; }
+      const msg = String(((j?.RESULT as J | undefined)?.MESSAGE) ?? "");
+      if (/인증키|KEY/i.test(msg) && !rows.length) fail(503, "ecos_key_invalid");
+      row = rows[0] ?? null;
+    } catch (e) {
+      if ((e as { status?: number })?.status) throw e;
+      out.push({ label, value: f.value, status: "대조 못 함", note: "한국은행에 연결하지 못했어" }); continue;
+    }
+    if (!row) { out.push({ label, value: f.value, date, status: "아직 없음", note: "한국은행 자료가 아직 안 올라왔거나 그날은 장이 안 열렸어", official_name: ser.name }); continue; }
+    const official = Number(String(row.DATA_VALUE ?? "").replace(/,/g, ""));
+    const mine = numOf(f.value);
+    const same = Number.isFinite(official) && Number.isFinite(mine) && Math.abs(official - mine) <= Math.max(0.011, Math.abs(official) * 0.0005);
+    out.push({ label, value: f.value, date, official, official_name: ser.name, unit: ser.unit, status: same ? "같음" : "다름" });
+  }
+  return json({ results: out, source: "한국은행 경제통계시스템(ECOS)", checked_at: nowIso() });
+}
+
 // 상품
 const TRUST = ["미검증", "출처 있음", "확인 완료"] as const;
 function productFields(b: J, partial: boolean) {
@@ -975,6 +1100,22 @@ async function createJob(c: Ctx) {
     if (error) throw error;
     return json({ job: data });
   }
+  if (b.kind === "polish") {
+    // 1.7.0 사람 말투로 다듬기: 자동 작가가 말투 카드·AI 티 규칙으로 문장만 다시 씀 (사진·링크 자리 줄·사실·숫자는 그대로, 이전 본문은 보관)
+    if (!isUuid(b.post_id)) fail(400, "bad_field", { field: "post_id" });
+    const post = await getPost(b.post_id as string);
+    if (String(post.body || "").length < 200) fail(400, "no_body");
+    const voice = b.voice === "invest" ? "invest" : b.voice === "general" ? "general" : (["market", "stock"].includes(String(post.plan_kind)) ? "invest" : "general");
+    const note = str(b.note, 300).trim();
+    const { data: dup, error: e1 } = await sb.from("requests").select("id").eq("post_id", post.id).eq("kind", "polish").eq("status", "pending").limit(1);
+    if (e1) throw e1;
+    if ((dup ?? []).length) fail(409, "job_exists");
+    await jobLimits(1);
+    const { data, error } = await sb.from("requests").insert({ keyword: String(post.keyword || ""), kind: "polish", post_id: post.id, payload: { voice, ...(note ? { note } : {}) }, money: String(post.money || ""), platform: String(post.platform || "") }).select().single();
+    if (error && kindNotAllowed(error)) fail(409, "db_update_needed", { migration: "021" });
+    if (error) throw error;
+    return json({ job: data });
+  }
   return fail(400, "bad_field", { field: "kind" });
 }
 const REFRESH_FOCUS = ["all", "title", "ctr", "conversion", "search"];
@@ -1120,6 +1261,24 @@ async function cancelImport(c: Ctx) {
 }
 
 // 설정·카탈로그
+// 1.7.0 말투 카드 정리: 범위마다 기본 말투 이름·카드(1,500자)·숫자 요약·예시 문장 3개(각 120자)만
+function cleanVoice(v: unknown) {
+  if (!v || typeof v !== "object" || Array.isArray(v)) fail(400, "bad_field", { field: "voice" });
+  const out: J = {};
+  for (const scope of Object.keys(VOICE_SCOPES)) {
+    const x = (v as J)[scope];
+    if (x == null) continue;
+    if (typeof x !== "object" || Array.isArray(x)) fail(400, "bad_field", { field: "voice" });
+    const o = x as J;
+    const preset = has(VOICE_PRESETS, String(o.preset)) ? String(o.preset) : (VOICE_SCOPES as J)[scope] && ((VOICE_SCOPES as J)[scope] as J).def;
+    const card = str(o.card, 1500).trim();
+    const source = o.source === "mine" && card ? "mine" : "preset";
+    const examples = Array.isArray(o.examples) ? (o.examples as unknown[]).filter((e) => typeof e === "string").map((e) => (e as string).trim().slice(0, 120)).filter(Boolean).slice(0, 3) : [];
+    const stats = o.stats && typeof o.stats === "object" && !Array.isArray(o.stats) && JSON.stringify(o.stats).length <= 4000 ? o.stats : {};
+    out[scope] = { preset, card: source === "mine" ? card : "", source, examples: source === "mine" ? examples : [], stats: source === "mine" ? stats : {}, updated_at: nowIso() };
+  }
+  return out;
+}
 async function patchSettings(c: Ctx) {
   const b = await readJson(c.req, 20_000);
   const s: J = {};
@@ -1137,6 +1296,30 @@ async function patchSettings(c: Ctx) {
     s.daily_plan = cleanPlan(b.daily_plan);
   }
   if ("keep_days" in b) s.keep_days = optInt(b.keep_days, "keep_days", KEEP_DAYS.min, KEEP_DAYS.max) ?? KEEP_DAYS.def;
+  // 1.7.0 말투 카드: 범위(general·invest)마다 { preset, card, stats, examples, source } — 앱이 내 글에서 계산한 결과만 저장 (원문은 안 받음)
+  if ("voice" in b) s.voice = cleanVoice(b.voice);
+  // 1.7.0 시리즈 이름 (예: 오늘의 증시) — 종류마다 20자까지, 비우면 시리즈 안 씀
+  if ("series" in b) {
+    if (!b.series || typeof b.series !== "object" || Array.isArray(b.series)) fail(400, "bad_field", { field: "series" });
+    const out: J = {};
+    for (const [k, v] of Object.entries(b.series as J)) {
+      if (!has(PLAN_KINDS, k)) continue;
+      if (typeof v !== "string" || v.length > 20 || /[\[\]\n]/.test(v)) fail(400, "bad_field", { field: "series" });
+      if (v.trim()) out[k] = v.trim();
+    }
+    s.series = out;
+  }
+  // 1.7.0 투자 글(증시·종목)을 올릴 블로그 채널 — 있는 블로그 채널만, 비우면 같은 블로그
+  if ("invest_channel" in b) {
+    const ch = str(b.invest_channel, 40).trim();
+    if (ch) {
+      const { data: row, error: ce } = await sb.from("channels").select("id, kind").eq("id", ch).maybeSingle();
+      if (ce) throw ce;
+      if (!row || !["blog", "site"].includes(String((row as J).kind))) fail(400, "bad_field", { field: "invest_channel" });
+    }
+    s.invest_channel = ch;
+  }
+  if ("brand_name" in b) s.brand_name = str(b.brand_name, 30).trim();
   if ("score_weights" in b) {
     const w: J = {};
     for (const f of Object.keys(SCORE_FACTORS)) {
@@ -1233,7 +1416,7 @@ async function patchSettings(c: Ctx) {
   // DB에 015(주력 주제 낱말 열)가 아직 없으면 그 칸만 빼고 저장 — 서버를 DB보다 먼저 올려도 다른 설정 저장이 막히지 않게
   const skipped: string[] = [];
   // DB에 그 열이 아직 없으면(015 전: 주력 주제 낱말, 016 전: 쌓아둘 원고 한도) 그 칸만 빼고 저장
-  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs", "daily_plan", "keep_days"]) {
+  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs", "daily_plan", "keep_days", "voice", "series", "invest_channel", "brand_name"]) {
     if (!(error && col in s && missingColumn(error, col))) continue;
     delete s[col];
     skipped.push(col);
@@ -1340,7 +1523,8 @@ const keyOpenAI = () => Deno.env.get("OPENAI_API_KEY") ?? "";
 const keyCf = () => ({ accountId: (Deno.env.get("CF_ACCOUNT_ID") ?? "").trim(), token: (Deno.env.get("CF_API_TOKEN") ?? "").trim() });
 // 1.5.0: Google Gemini API 키 (Supabase Secrets 의 GEMINI_API_KEY). 화면에는 있음/없음만
 const keyGemini = () => (Deno.env.get("GEMINI_API_KEY") ?? "").trim();
-const keysInfo = () => ({ openai: !!keyOpenAI(), gemini: !!keyGemini(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? ""), cloudflare: !!(keyCf().accountId && keyCf().token) });
+const keysInfo = () => ({ openai: !!keyOpenAI(), gemini: !!keyGemini(), pexels: !!(Deno.env.get("PEXELS_API_KEY") ?? ""), cloudflare: !!(keyCf().accountId && keyCf().token),
+  pixabay: !!(Deno.env.get("PIXABAY_API_KEY") ?? ""), unsplash: !!(Deno.env.get("UNSPLASH_ACCESS_KEY") ?? ""), ecos: !!(Deno.env.get("ECOS_API_KEY") ?? "") });
 const providerKeys = () => ({ openai: keyOpenAI(), gemini: keyGemini(), cf: keyCf() });
 const providerKeyOk = (p: string) => (p === "openai" ? !!keyOpenAI() : p === "gemini" ? !!keyGemini() : p === "cloudflare" ? keysInfo().cloudflare : false);
 const keyMissingCode = (p: string) => (p === "gemini" ? "gemini_key_missing" : p === "cloudflare" ? "cf_key_missing" : "openai_key_missing");
@@ -2360,18 +2544,33 @@ async function stockSearch(c: Ctx) {
   const orientation = c.url.searchParams.get("orientation") ?? "";
   const page = optInt(c.url.searchParams.get("page") ?? "1", "page", 1, 50) ?? 1;
   const key = Deno.env.get(P.envKey) ?? "";
-  if (!key) fail(503, "pexels_key_missing");
+  if (!key) fail(503, provider === "pexels" ? "pexels_key_missing" : "photo_key_missing", { provider });
+  // Pixabay 이용 조건: 같은 검색은 24시간 저장해 두고 다시 묻지 않기 → DB(api_cache)에 저장 (021 전 DB면 서버 일꾼 기억만)
+  const ck = provider === "pixabay" ? `pixabay:${q.toLowerCase()}|${orientation}|${page}` : "";
+  if (ck) {
+    const { data: hit } = await sb.from("api_cache").select("body").eq("key", ck).gte("at", new Date(Date.now() - 24 * 3600e3).toISOString()).maybeSingle().then((x) => x, () => ({ data: null }));
+    if (hit && (hit as J).body) return json({ ...((hit as J).body as J), cached: true });
+  }
   await stockGuard(provider);
   const r = await P.search({ fetchImpl: fetch, key, query: q, orientation, page, perPage: 24 }) as J;
-  await imageDeps().logCall(provider, "search", Number(r.status ?? 0));
-  if (!r.ok) fail(r.code === "pexels_rate_limited" ? 429 : 502, String(r.code));
-  return json({ provider, label: P.label, site: P.site, license_url: P.licenseUrl, photos: r.photos, total: r.total, page: r.page, has_next: r.hasNext, remaining: r.remaining });
+  if (!r.cached) await imageDeps().logCall(provider, "search", Number(r.status ?? 0));
+  if (!r.ok) fail(r.code === "pexels_rate_limited" || r.code === "photo_rate_limited" ? 429 : 502, String(r.code));
+  const out = { provider, label: P.label, site: P.site, license_url: P.licenseUrl, photos: r.photos, total: r.total, page: r.page, has_next: r.hasNext, remaining: r.remaining, link_only: !!(P as J).hotlinkOnly };
+  if (ck) {
+    await sb.from("api_cache").upsert({ key: ck, body: out, at: nowIso() }).then(() => null, () => null);
+    if (Math.random() < 0.05) await sb.from("api_cache").delete().lt("at", new Date(Date.now() - 2 * 86400e3).toISOString()).then(() => null, () => null);
+  }
+  return json(out);
 }
 async function stockSelect(c: Ctx) {
   const b = await readJson(c.req, 10_000);
   const provider = str(b.provider, 20) || "pexels";
   if (!has(PHOTO_PROVIDERS, provider)) fail(400, "bad_field", { field: "provider" });
-  const photoId = optInt(b.photo_id, "photo_id", 1, 9_000_000_000_000);
+  // Pexels·Pixabay 는 숫자, Unsplash 는 글자 번호
+  // Unsplash 는 검색만 (가이드라인상 서버가 사진을 복사해 두지 않음 — 사용자가 Unsplash 에서 받아 직접 올림)
+  if ((PHOTO_PROVIDERS[provider as keyof typeof PHOTO_PROVIDERS] as J).hotlinkOnly) fail(409, "unsplash_link_only");
+  const idKind = (PHOTO_PROVIDERS[provider as keyof typeof PHOTO_PROVIDERS] as J).idKind;
+  const photoId = idKind === "str" ? (isUnsplashId(b.photo_id) ? String(b.photo_id) : null) : optInt(b.photo_id, "photo_id", 1, 9_000_000_000_000);
   if (!photoId) fail(400, "bad_field", { field: "photo_id" });
   const { post, slot, purpose } = await slotTarget(b, false);
   await stockGuard(provider);
@@ -2420,9 +2619,15 @@ async function uploadImage(c: Ctx) {
     if (r0.error && missingColumn(r0.error, "composite")) r0 = await sb.from("post_images").select(cols).eq("id", meta.bg_image_id).maybeSingle();
     bg = (r0.data as J | null) ?? null;
   }
+  // 1.7.0 공공누리 제1유형: 출처(기관·자료 이름)를 꼭 적어야 함 — 적은 출처가 캡션·라이선스에 그대로 남음
+  const kogl = meta.source_type === "kogl" ? str(meta.attribution, 200).trim() : "";
+  // 1.7.0: 외부에서 받은 사진은 출처 문구를 같이 받을 수 있음 (선택 — 예: Photo by 사진가 on Unsplash)
+  const credit = meta.source_type === "external" ? str(meta.attribution, 200).trim() : "";
+  if (meta.source_type === "kogl" && !kogl) fail(400, "bad_field", { field: "attribution" });
+  const cardLabel = ["정보 카드", "썸네일", "카드뉴스"].includes(String(meta.card_label)) ? String(meta.card_label) : "";
   const r = await saveUploaded(imageDeps(), {
     bytes, declaredMime: declared, kind: meta.kind === "card" ? "card" : "upload", rights: meta.rights === true,
-    post, slot, purpose, description: str(meta.description, 300), link: meta.link === true && !!slot, bg,
+    post, slot, purpose, description: str(meta.description, 300), link: meta.link === true && !!slot, bg, kogl, credit, cardLabel,
   }) as J;
   if (!r.ok) { if (r.error) rpcError(r.error as { message?: string }); fail(Number(r.status ?? 500), String(r.code), r.reason ? { reason: r.reason } : {}); }
   // 직접 올린 사진의 출처: 사용자가 고른 것만 저장 (안 고르면 빈칸 = 출처 확인 필요. 올렸다고 직접 촬영으로 보지 않음)
@@ -2435,7 +2640,7 @@ async function uploadImage(c: Ctx) {
   }
   return json({ image: (await withUrls([r.image as J]))[0], slot: r.slot ?? null, reused: !!r.reused });
 }
-const SOURCE_TYPES = ["own", "official", "external"] as const;
+const SOURCE_TYPES = ["own", "official", "external", "kogl"] as const;
 // PostgREST '그런 열 없음' 오류인지 (마이그레이션 전 DB)
 function missingColumn(e: unknown, col: string): boolean {
   const x = (e ?? {}) as { code?: string; message?: string };
@@ -2774,6 +2979,12 @@ const ROUTES: [string, RegExp, (c: Ctx) => Promise<Response>][] = [
   ["PATCH", R(`posts/${U}`), patchPost],
   ["DELETE", R(`posts/${U}`), deletePost],
   ["POST", R(`posts/${U}/restore`), restorePost],
+  ["GET", R(`posts/${U}/revisions`), listRevisions],
+  ["POST", R(`revisions/${U}/revert`), revertRevision],
+  ["POST", R(`posts/${U}/verify-figures`), verifyFigures],
+  ["POST", R("templates"), createTemplate],
+  ["POST", R(`templates/${U}`), patchTemplate],
+  ["DELETE", R(`templates/${U}`), deleteTemplate],
   ["POST", R(`posts/${U}/retry`), retryPost],
   ["POST", R(`posts/${U}/products`), attachProduct],
   ["DELETE", R(`posts/${U}/products/${U}`), detachProduct],

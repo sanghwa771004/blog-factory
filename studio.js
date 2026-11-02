@@ -1,9 +1,10 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.6.0';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.6.0';
-import { createProduct, PRODUCT_ERR } from './product.js?v=1.6.0';
+import * as IMG from './images.js?v=1.7.0';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.7.0';
+import { cardCandidates, bestCandidate, renderInfoCard, themeOf, footnoteOf, fontsFor } from './infocards.js?v=1.7.0';
+import { createProduct, PRODUCT_ERR } from './product.js?v=1.7.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -15,7 +16,7 @@ export const IMAGE_ERR = {
   pexels_rate_limited: 'Pexels 요청 한도에 닿았어. 조금 뒤에 다시 해줘.',
   pexels_error: 'Pexels에서 문제가 생겼어. 조금 뒤에 다시 해줘.',
   pexels_network: 'Pexels에 연결하지 못했어. 조금 뒤에 다시 해줘.',
-  stock_hour_limit: '사진 검색을 한 시간에 너무 많이 했어 (Pexels 한도 보호). 조금 뒤에 다시 해줘.',
+  stock_hour_limit: '사진 검색을 한 시간에 너무 많이 했어 (사진 사이트 한도 보호). 조금 뒤에 다시 해줘.',
   stock_month_limit: '이번 달 사진 검색 한도에 거의 닿았어. 다음 달에 다시 쓸 수 있어.',
   prompt_blocked: '이미지로 만들 수 없는 요청이 있어. 표시된 내용을 고쳐줘.',
   estimate_changed: '예상 비용이 바뀌었어. 다시 확인하고 눌러줘.',
@@ -35,7 +36,7 @@ export const IMAGE_ERR = {
   bad_source: '허용하지 않은 주소의 사진이야.',
   too_big: '파일이 너무 커.',
   storage_failed: '파일을 저장하지 못했어. 다시 해줘.',
-  stock_bad_image: 'Pexels 사진 파일을 읽지 못했어. 다른 사진을 골라줘.',
+  stock_bad_image: '사진 사이트의 사진 파일을 읽지 못했어. 다른 사진을 골라줘.',
   real_photo_needed: "실제 상품·화면이 보여야 하는 자리야. 진짜 제품 사진을 참고 사진('대상 모양 유지')으로 넣거나, 직접 찍은 사진을 올리거나, 일반 장면으로 만들겠다고 체크해줘.",
   openai_unsupported_option: '이 모델이 그 크기·품질을 지원하지 않아. 설정 > 이미지에서 모델이나 품질을 바꿔줘.',
   openai_spend_limit: 'OpenAI에 걸어둔 사용 한도(Spend limit)에 닿았어. OpenAI 설정의 Limits에서 한도를 올리거나 다음 달까지 기다려줘.',
@@ -98,6 +99,8 @@ const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
 const byId = (list) => Object.fromEntries((list || []).map((x) => [x.id, x]));
 const put = (el, ...kids) => el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
 // 이미 있는 요소에 더하기 — null·false 는 건너뜀 (DOM append 는 null 을 'null' 글자로 넣음 — 1.2.0부터 사진 자리 버튼 줄에 'null' 이 보였어, 1.5.2)
+// 사진 사이트 이름 (1.7.0: Pexels 말고 Pixabay 도 — 예전 사진은 Pexels)
+const siteName = (img) => ({ pexels: 'Pexels', pixabay: 'Pixabay', unsplash: 'Unsplash' })[img && img.provider] || 'Pexels';
 const add = (el, ...kids) => { for (const k of kids.flat(Infinity)) if (k != null && k !== false && k !== '') el.append(k instanceof Node ? k : String(k)); return el; };
 const fmtBytes = (n) => (n == null ? '' : n < 1024 * 1024 ? Math.max(1, Math.round(n / 1024)) + 'KB' : (n / 1048576).toFixed(1) + 'MB');
 const typeName = (t) => ({ 'image/jpeg': 'JPEG', 'image/png': 'PNG', 'image/webp': 'WebP' }[t] || t);
@@ -325,7 +328,7 @@ export function createStudio(ui) {
   // 출처 표시: 게시 원고·보관함·검수 화면이 모두 IMG.originLabel 을 씀 (직접 올린 사진은 고른 출처, 안 골랐으면 '출처 확인 필요')
   const kindChip = (img) => h('span', { class: 'chip k-' + img.kind + ' o-' + IMG.originOf(img) }, IMG.originLabel(img));
   // 직접 올린 사진의 출처 고르기 (파일을 올렸다고 직접 촬영으로 보지 않아서, 사용자가 확인해야 '직접 촬영'으로 셈)
-  const SOURCE_OPTS = [['', '잘 모르겠어 (출처 확인 필요)'], ['own', '내가 직접 찍은 사진'], ['official', '제조사·판매처가 준 공식 이미지'], ['external', '다른 곳에서 받은 사진 (무료 사진 사이트 등)']];
+  const SOURCE_OPTS = [['', '잘 모르겠어 (출처 확인 필요)'], ['own', '내가 직접 찍은 사진'], ['official', '제조사·판매처가 준 공식 이미지'], ['kogl', '공공누리 제1유형 (정부·공공기관 사진 — 출처 표시)'], ['external', '다른 곳에서 받은 사진 (무료 사진 사이트 등)']];
   const sourceSelect = (value) => h('select', { value: value || '' }, SOURCE_OPTS.map(([v, l]) => opt(v, l))); // 이름은 감싸는 칸 제목('이 사진은 어디서 났어?')
   function sourcePicker(img, after) {
     const sel = sourceSelect(img.source_type);
@@ -353,9 +356,9 @@ export function createStudio(ui) {
       parts.push(img.model || 'AI');
       const c = genCost(g);
       if (c) parts.push(`비용 ${usd(c.usd)} (${c.label})`);
-    } else if (img.kind === 'stock') parts.push(img.attribution_text || `사진: ${img.author_name || '사진가'} (Pexels)`);
-    else if (img.kind === 'upload') parts.push('직접 올림 · 쓸 권한 확인함');
-    else if (img.kind === 'card') parts.push('카드뉴스 (앱에서 만듦)');
+    } else if (img.kind === 'stock') parts.push(img.attribution_text || IMG.attributionFor(img) || `사진: ${img.author_name || '사진가'}`);
+    else if (img.kind === 'upload') parts.push(img.source_type === 'kogl' && img.attribution_text ? `${img.attribution_text} · 직접 올림` : '직접 올림 · 쓸 권한 확인함');
+    else if (img.kind === 'card') parts.push(/^(정보 카드|썸네일)/.test(img.license || '') ? `${/^(정보 카드|썸네일)/.exec(img.license)[1]} (앱에서 그림)` : '카드뉴스 (앱에서 만듦)');
     else if (img.kind === 'composite') parts.push('상품은 원본 사진 그대로 · 배경은 AI');
     if (IMG.productSceneMode(img)) parts.push(IMG.productApproved(img) ? '상품 검수 승인' : '상품 검수 전');
     if (img.width && img.height) parts.push(`${img.width}×${img.height}`);
@@ -459,7 +462,7 @@ export function createStudio(ui) {
       const ready = img && reviewOk && !dupKeys && !(info.ai === 'no' && img.kind !== 'upload');
       card.append(h('div', { class: 'slotinfo' },
         h('small', null, `왜: ${info.why} · 보여줄 것: ${info.explains}`),
-        h('small', null, info.ai === 'no' ? '직접 찍은 사진만 (AI·합성 안 됨)' : info.ai === 'real' ? '실제 상품이 보여야 해 — 직접 찍은 사진·공식 사진·원본 보존 합성 권장 (AI 실사 장면은 원본과 비교해서)' : `AI 장면으로 대신해도 돼 · 추천 종류: ${info.preset_label} (${info.preset_why})`),
+        h('small', null, info.ai === 'app' ? `앱이 그리는 ${info.app === 'thumb' ? '썸네일' : '정보 카드'} 자리 — 원고의 제목·표·숫자로 바로 그려 (AI·남의 사진 필요 없음)` : info.ai === 'no' ? '직접 찍은 사진만 (AI·합성 안 됨)' : info.ai === 'real' ? '실제 상품이 보여야 해 — 직접 찍은 사진·공식 사진·원본 보존 합성 권장 (AI 실사 장면은 원본과 비교해서)' : `AI 장면으로 대신해도 돼 · 추천 종류: ${info.preset_label} (${info.preset_why})`),
         // 이미지가 있는지는 위 칩에 이미 있어서 여기서는 게시 준비와 그 이유만
         h('small', null, `게시 준비: ${ready ? '됨 ✓' : img ? `아직 (${[`검수 ${scene && !IMG.productApproved(img) ? '상품 검수 전' : img.review_status}`, dupKeys ? '다른 자리와 같은 이미지' : '', info.ai === 'no' && img.kind !== 'upload' ? '직접 찍은 사진이 필요' : ''].filter(Boolean).join(' · ')})` : running ? '아직 (만드는 중)' : '아직 (넣을 이미지를 골라줘)'}`)));
       if (dupKeys) {
@@ -484,15 +487,22 @@ export function createStudio(ui) {
         h('div', { class: 'grid3' }, cands.map((i) => pickThumb(i, (ev) => linkTo(p, s, i, ev.currentTarget))))));
     }
     const row2 = h('div', { class: 'go' });
-    if (!img) {
+    const appKind = s.n && IMG.isAppSlot(s.text) ? IMG.appSlotKind(s.text) : '';
+    if (!img && appKind) {
+      // 1.7.0 앱이 그리는 자리: 정보 카드·썸네일 먼저, 그 밖에는 올리기·보관함
+      row2.append(btn(appKind === 'thumb' ? '썸네일 만들기' : '정보 카드 만들기', 'sm', () => infoCardSheet(p, s)), btn('파일 올리기', 'sm ghost', () => uploadSheet(p, s)), btn('보관함에서', 'sm ghost', () => pickSheet(p, s)));
+    } else if (!img) {
       // 실제 상품·화면이 보여야 하는 자리는 직접 찍은 사진 올리기를 먼저 권함
       const ai = btn('AI로 만들기', risk.real ? 'sm ghost' : 'sm', () => genSheet(p, s), { disabled: running });
       const up = btn('파일 올리기', risk.real ? 'sm' : 'sm ghost', () => uploadSheet(p, s));
       const own = s.n && IMG.isOwnPhotoSlot(s.text);
-      row2.append(risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)),
-        own ? null : btn('상품 사진으로 장면 만들기', 'sm ghost', () => prd().start({ postId: p.id, slotKey: s.key })));
+      // add: 빈 자리(null)는 건너뜀 — append(null) 은 화면에 'null' 글자를 넣음
+      add(row2, risk.real ? up : ai, btn('실제 사진 찾기', 'sm ghost', () => stockSheet(p, s)), risk.real ? ai : up, btn('보관함에서', 'sm ghost', () => pickSheet(p, s)),
+        own ? null : btn('상품 사진으로 장면 만들기', 'sm ghost', () => prd().start({ postId: p.id, slotKey: s.key })),
+        own || !s.n ? null : btn('정보 카드로', 'sm ghost', () => infoCardSheet(p, s)));
     } else {
       add(row2, btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
+        appKind ? btn('다시 그리기', 'sm ghost', () => infoCardSheet(p, s)) : null,
         img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => regen(p, s, d, img), { disabled: running }) : null,
         btn(row.used_at ? '사용 완료 취소' : '사용 완료', 'sm ghost', (ev) => markUsed(p, s, !row.used_at, ev.currentTarget)),
         btn('빼기', 'sm ghost', (ev) => { if (confirmBox(ev.currentTarget, '연결을 뺄까?')) unlink(p, s, ev.currentTarget); }));
@@ -622,7 +632,7 @@ export function createStudio(ui) {
       h('div', { class: 'stack' },
         btn('AI로 새로 만들기', 'wide', () => genSheet(p, s)),
         img && img.kind === 'ai' ? btn('이 이미지 고쳐서 만들기 (편집)', 'wide ghost', () => genSheet(p, s, { base: img })) : null,
-        btn('실제 사진 찾기 (Pexels)', 'wide ghost', () => stockSheet(p, s)),
+        btn('실제 사진 찾기 (무료 사진 사이트)', 'wide ghost', () => stockSheet(p, s)),
         btn('파일 올리기', 'wide ghost', () => uploadSheet(p, s)),
         btn('보관함에서 고르기', 'wide ghost', () => pickSheet(p, s)),
         // 1.5.1: 상품 사진으로 장면 만들기 ('(직접 찍기)' 자리는 빼고)
@@ -876,7 +886,7 @@ export function createStudio(ui) {
       put(riskBox, ...risks.map((r) => h('p', { class: r.level === 'block' ? 'badbox' : 'notice' }, r.msg)),
         own ? h('p', { class: 'badbox' }, gate.msg) : '',
         !own && (realNeeded || (sr.real && !gate.composite)) ? h('p', { class: 'notice' }, IMG.slotRisk(`${IMG.stripOwnMark(s.text)} ${gateText}`).msg || sr.msg) : '',
-        !own && realNeeded && f.refs.some((r) => r.role === 'subject' && !IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "AI로 만든 이미지는 '대상 모양 유지'로 넣어도 진짜 제품 사진이 아니라서 실제 상품 자리를 채우지 못해. 직접 올린 사진이나 Pexels 사진을 넣어줘.") : '',
+        !own && realNeeded && f.refs.some((r) => r.role === 'subject' && !IMG.REAL_KINDS.includes(r.image.kind)) ? h('p', { class: 'notice' }, "AI로 만든 이미지는 '대상 모양 유지'로 넣어도 진짜 제품 사진이 아니라서 실제 상품 자리를 채우지 못해. 직접 올린 사진이나 사진 사이트(Pixabay·Pexels) 사진을 넣어줘.") : '',
         !own && realNeeded ? genericRow : '',
         // 1.5.1: 진짜 상품 사진을 '대상 모양 유지'로 넣으면 자리와 상관없이 AI 실사 장면으로 기록 → 상품 디테일 검수 필요 (서버와 같은 판단).
         // 상품이 아닌 사진(반려동물·사람·물건)이라고 끄면 'AI 합성 이미지'로만 표시 — 실제 상품이 보여야 하는 자리는 늘 상품 사진으로 봄 (1.5.1 재검토)
@@ -1442,18 +1452,30 @@ export function createStudio(ui) {
     return box;
   }
 
-  // ═════════ 실제 사진 찾기 (Pexels) ═════════
-  function stockSheet(p, s) {
+  // ═════════ 실제 사진 찾기 (Pixabay·Unsplash·Pexels) ═════════
+  // 1.7.0: 써도 되는 사진 사이트 — Pixabay(키 무료로 안내됨)·Unsplash(데모 키 무료)·Pexels(새 키 발급 멈춤). 키가 있는 곳만 보여줌
+  const PHOTO_SITES = {
+    pixabay: { label: 'Pixabay', site: 'https://pixabay.com', license: 'https://pixabay.com/service/license-summary/', credit: 'Pixabay 콘텐츠 라이선스',
+      lic: ['Pixabay 콘텐츠 라이선스: 무료로 쓰고 고쳐 써도 돼. 출처 표시 의무는 없지만 글에 넣을 출처 문구(사진: 사진가 (Pixabay))를 만들어 둬.', '안 되는 것: 사진을 그대로 팔기·다른 사진 사이트에 다시 올리기, 상표·로고가 보이는 사진을 상업적으로 쓰기, 알아볼 수 있는 사람을 나쁘게 보이게 쓰기, 오해하게 쓰기.'] },
+    unsplash: { label: 'Unsplash', site: 'https://unsplash.com/?utm_source=blog_factory&utm_medium=referral', license: 'https://unsplash.com/license', credit: 'Unsplash 라이선스',
+      lic: ['Unsplash 라이선스: 무료로 쓰고 고쳐 써도 돼. 출처 문구(Photo by 사진가 on Unsplash)를 같이 적어줘.', 'Unsplash API 규칙상 앱이 사진을 복사해 두지 않아 — 아래 버튼으로 Unsplash 사진 페이지에서 받은 뒤 \'받은 파일 올리기\'로 올려줘.', '안 되는 것: 사진을 고치지 않고 그대로 팔기, 비슷한 사진 사이트를 만들기.'], linkOnly: true },
+    pexels: { label: 'Pexels', site: 'https://www.pexels.com', license: 'https://www.pexels.com/license/', credit: 'Pexels 라이선스',
+      lic: ['Pexels 라이선스: 무료로 쓸 수 있고 고쳐 써도 돼. 출처 표시는 꼭은 아니지만 권장 — 글에 넣을 출처 문구(사진: 사진가 (Pexels))를 자동으로 만들어 둬.', '안 되는 것: 사진 속 사람·브랜드가 내 상품을 추천·보증하는 것처럼 쓰기, 사진을 그대로 팔기, 다른 사진·배경화면 사이트에 다시 올리기, 사람을 나쁘게 보이게 쓰기.'] },
+  };
+  function stockSheet(p, s, want) {
     const d = dataOf(p.id) || {};
     const purpose = (s.row && s.row.purpose) || IMG.slotPurpose(s.key);
     const ratio = (s.row && s.row.crop && s.row.crop.ratio) || IMG.ratioOf(purpose);
     const title = `${slotName(s)} — 실제 사진 찾기`;
-    if (d.keys && !d.keys.pexels) {
-      openSheet(title, h('p', { class: 'notice' }, IMAGE_ERR.pexels_key_missing),
-        h('p', { class: 'hint' }, 'Pexels는 지금 새 API 키 발급을 멈춰 둔 상태야 (2026-10-22 Pexels API 페이지 안내). 발급이 다시 열리면 설정 > 이미지 안내대로 넣으면 바로 돼.'),
+    const sites = Object.keys(PHOTO_SITES).filter((k) => !d.keys || d.keys[k]);
+    if (!sites.length) {
+      openSheet(title, h('p', { class: 'notice' }, '사진 사이트 키가 아직 없어. Pixabay 나 Unsplash 키를 넣으면 바로 검색돼 (설정 > 이미지에 방법). 지금은 직접 올리기로 계속할 수 있어.'),
+        h('p', { class: 'hint' }, 'Pexels는 지금 새 API 키 발급을 멈춰 둔 상태야. Pixabay(키 무료로 안내됨)·Unsplash(데모 키 무료, 시간당 50번)는 가입하면 키가 나와.'),
         h('div', { class: 'go' }, btn('파일 올리기로', 'sm', () => uploadSheet(p, s)), btn('설정 보기', 'sm ghost', () => { closeSheet(); go('settings/images'); })));
       return;
     }
+    const provider = sites.includes(want) ? want : sites[0];
+    const SITE = PHOTO_SITES[provider];
     const sugg = IMG.searchSuggestions(p, s);
     const q = h('input', { type: 'search', value: sugg[0] || '', placeholder: '예: 원룸 책상, small room desk', 'aria-label': '사진 검색어', enterkeyhint: 'search', maxlength: '100' });
     let orientation = IMG.orientationFor(ratio);
@@ -1463,8 +1485,9 @@ export function createStudio(ui) {
     const drawOr = () => put(orSeg, ...[['', '전체'], ['landscape', '가로'], ['portrait', '세로'], ['square', '정사각형']].map(([k, l]) =>
       h('button', { type: 'button', 'aria-pressed': String(k === orientation), onclick: () => { orientation = k; drawOr(); search(1); } }, l)));
     drawOr();
-    const credit = h('p', { class: 'hint' }, h('a', { href: 'https://www.pexels.com', target: '_blank', rel: 'noopener noreferrer' }, 'Photos provided by Pexels'), ' — 앱이 서버에서 대신 검색해 (키는 화면에 안 보임).');
-    const searchView = [credit, h('p', { class: 'hint' }, s.n ? `사진 자리: ${s.text}` : s.label || ''),
+    const credit = h('p', { class: 'hint' }, h('a', { href: SITE.site, target: '_blank', rel: 'noopener noreferrer' }, `Photos provided by ${SITE.label}`), ' — 앱이 서버에서 대신 검색해 (키는 화면에 안 보임).');
+    const siteSeg = sites.length > 1 ? h('div', { class: 'seg', role: 'group', 'aria-label': '사진 사이트' }, sites.map((k) => h('button', { type: 'button', 'aria-pressed': String(k === provider), onclick: () => { if (k !== provider) stockSheet(p, s, k); } }, PHOTO_SITES[k].label))) : null;
+    const searchView = [siteSeg, credit, h('p', { class: 'hint' }, s.n ? `사진 자리: ${s.text}` : s.label || ''),
       h('div', { class: 'chips' }, sugg.map((x) => h('button', { type: 'button', class: 'copy', onclick: () => { q.value = x; search(1); } }, x))),
       h('div', { class: 'searchrow' }, q, btn('검색', 'sm', () => search(1))), orSeg, results];
     const show = () => openSheet(title, ...searchView);
@@ -1474,7 +1497,7 @@ export function createStudio(ui) {
         h('div', { class: 'grid2' }, items.map((ph) => h('button', { type: 'button', class: 'pick', onclick: () => detail(ph) },
           h('img', { src: ph.thumb, alt: ph.alt || '사진', loading: 'lazy', decoding: 'async', referrerpolicy: 'no-referrer' }), h('small', null, ph.photographer)))),
         j.has_next ? btn('더 보기', 'sm ghost', (ev) => { if (searching) return; ev.currentTarget.disabled = true; search(page + 1); }) : null,
-        h('p', { class: 'hint' }, `사진 ${j.total ? L.fmtNum(j.total) + '장 중 ' : ''}${items.length}장 · Pexels 남은 요청 ${j.remaining ?? '알 수 없음'}`));
+        h('p', { class: 'hint' }, `사진 ${j.total ? L.fmtNum(j.total) + '장 중 ' : ''}${items.length}장 · ${SITE.label} 남은 요청 ${j.remaining ?? '알 수 없음'}`));
     };
     // 검색을 빨리 여러 번 눌러도 마지막 검색 결과만 보여줌 (예전 응답은 버림 — 결과가 섞이지 않게)
     const search = async (pg) => {
@@ -1484,27 +1507,28 @@ export function createStudio(ui) {
       searching = true;
       if (pg === 1) put(results, h('p', { class: 'hint' }, '찾는 중…'));
       try {
-        const j = await api(`/stock/search?provider=pexels&q=${encodeURIComponent(qq)}&orientation=${encodeURIComponent(orientation)}&page=${pg}`);
+        const j = await api(`/stock/search?provider=${provider}&q=${encodeURIComponent(qq)}&orientation=${encodeURIComponent(orientation)}&page=${pg}`);
         if (my !== sseq) return;
         page = pg; items = pg === 1 ? (j.photos || []) : items.concat(j.photos || []);
         drawResults(j);
       } catch (e) {
         if (my !== sseq || !e || e.code === 'auth') return;
-        put(results, h('p', { class: 'badbox' }, ui.errText(e)), e.code === 'pexels_key_missing' ? btn('파일 올리기로', 'sm ghost', () => uploadSheet(p, s)) : null);
+        put(results, h('p', { class: 'badbox' }, ui.errText(e)), e.code === 'pexels_key_missing' || e.code === 'photo_key_missing' ? btn('파일 올리기로', 'sm ghost', () => uploadSheet(p, s)) : null);
       } finally { if (my === sseq) searching = false; }
     };
     const detail = (ph) => {
       openSheet('사진 고르기',
         h('img', { class: 'big', src: ph.preview || ph.thumb, alt: ph.alt || '', referrerpolicy: 'no-referrer' }),
         h('p', null, 'Photo by ', ph.photographer_url ? h('a', { href: ph.photographer_url, target: '_blank', rel: 'noopener noreferrer' }, ph.photographer) : ph.photographer,
-          ' on ', h('a', { href: ph.url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels')),
-        h('ul', { class: 'lic' },
-          h('li', null, 'Pexels 라이선스: 무료로 쓸 수 있고 고쳐 써도 돼. 출처 표시는 꼭은 아니지만 권장 — 글에 넣을 출처 문구(사진: 사진가 (Pexels))를 자동으로 만들어 둬.'),
-          h('li', null, '안 되는 것: 사진 속 사람·브랜드가 내 상품을 추천·보증하는 것처럼 쓰기, 사진을 그대로 팔기, 다른 사진·배경화면 사이트에 다시 올리기, 사람을 나쁘게 보이게 쓰기.'),
+          ' on ', h('a', { href: ph.url, target: '_blank', rel: 'noopener noreferrer' }, SITE.label)),
+        h('ul', { class: 'lic' }, SITE.lic.map((x) => h('li', null, x)),
           h('li', null, '실제 상품 사진이 아니야. 상품 모습이 중요한 자리에는 공식 이미지나 직접 찍은 사진을 써줘.')),
-        h('div', { class: 'go' }, h('a', { class: 'copy', href: 'https://www.pexels.com/license/', target: '_blank', rel: 'noopener noreferrer' }, 'Pexels 라이선스 원문 ↗')),
-        btn(`이 사진 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => {
-          const j = await run(ev.currentTarget, () => api('/stock/select', { method: 'POST', body: { provider: 'pexels', photo_id: ph.id, post_id: p.id, slot_key: s.key, purpose, link: true } }));
+        h('div', { class: 'go' }, h('a', { class: 'copy', href: SITE.license, target: '_blank', rel: 'noopener noreferrer' }, `${SITE.credit} 원문 ↗`)),
+        SITE.linkOnly ? h('div', { class: 'stack' },
+          h('a', { class: 'btn wide', href: ph.url, target: '_blank', rel: 'noopener noreferrer' }, `${SITE.label}에서 이 사진 받기 ↗`),
+          btn(`받은 파일 올리기 → ${slotName(s)}`, 'wide ghost', () => uploadSheet(p, s, { source: 'external', credit: `Photo by ${ph.photographer || 'photographer'} on ${SITE.label}` }))) : null,
+        SITE.linkOnly ? null : btn(`이 사진 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => {
+          const j = await run(ev.currentTarget, () => api('/stock/select', { method: 'POST', body: { provider, photo_id: ph.id, post_id: p.id, slot_key: s.key, purpose, link: true } }));
           if (j) { toast(j.reused ? '이미 받아둔 사진이라 그걸 연결했어' : `${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
         }),
         btn('← 검색 결과로', 'sm ghost', show));
@@ -1514,15 +1538,66 @@ export function createStudio(ui) {
     if (q.value) search(1);
   }
 
+  // ═════════ 1.7.0 정보 카드·썸네일 (앱이 그림) ═════════
+  function infoCardSheet(p, s) {
+    const post = (ui.post && ui.post(p.id)) || p;
+    const cands = cardCandidates(post);
+    let cur = bestCandidate(cands, s.text) || cands[0];
+    const theme = themeOf(post);
+    const brand = String(settings().brand_name || '').trim();
+    const foot = footnoteOf(post);
+    const canvas = h('canvas', { class: 'cardprev', role: 'img', 'aria-label': '카드 미리보기' });
+    const warn = h('p', { class: 'notice', hidden: true }, '글자가 많아 잘린 곳이 있어. 원고의 표·목록을 줄이면 다 들어가.');
+    const seg = h('div', { class: 'chips' });
+    let seq = 0;
+    const draw = async () => {
+      const my = ++seq;
+      put(seg, cands.map((c) => h('button', { type: 'button', class: 'copy', 'aria-pressed': String(c === cur), onclick: () => { cur = c; draw(); } }, c.label)));
+      await fontsFor(cur);
+      if (my !== seq) return;
+      const r = renderInfoCard(canvas, cur, { theme, brand, foot, scale: 0.5 });
+      warn.hidden = !r.overflow;
+    };
+    const full = async () => { const c = document.createElement('canvas'); await fontsFor(cur); renderInfoCard(c, cur, { theme, brand, foot, scale: 1 }); return canvasToBlob(c, 'image/png'); };
+    const isThumb = () => cur && cur.type === 'thumb';
+    openSheet(`${slotName(s)} — 정보 카드·썸네일`,
+      h('p', { class: 'hint' }, '원고의 제목·표·목록·3줄 요약·숫자 확인표·용어 풀이로 앱이 직접 그려 (AI·남의 사진 없이, 글자 안 깨짐). 글 종류마다 색이 정해져 있어서 매일 같은 모양으로 보여.'),
+      seg, canvas, warn, foot ? h('p', { class: 'hint' }, `카드 아래 작은 글씨: ${foot}`) : null,
+      btn(`이 카드 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => {
+        const button = ev.currentTarget;
+        const thumbNow = isThumb();
+        const j = await run(button, async () => {
+          const blob = await full();
+          const fd = new FormData();
+          // 썸네일은 1:1 그대로 (본문 사진 기본 4:3 으로 잘리지 않게 '일반 삽화용'), 정보 카드는 4:3
+          fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose: thumbNow ? 'general' : 'blog_body', link: true, kind: 'card', card_label: thumbNow ? '썸네일' : '정보 카드',
+            description: (thumbNow ? '썸네일: ' : '정보 카드: ') + String(cur.title || cur.label || '').slice(0, 200) }));
+          fd.append('file', blob, (thumbNow ? 'thumbnail' : 'infocard') + '.png');
+          return api('/images/upload', { method: 'POST', body: fd });
+        });
+        if (j) { toast(`${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
+      }),
+      btn('PNG로 내려받기', 'sm ghost', async () => { const b = await full(); blobDownload(b, (isThumb() ? 'thumbnail' : 'infocard') + '.png'); }));
+    draw();
+  }
+
   // ═════════ 파일 올리기 ═════════
-  function uploadSheet(p, s) {
+  // preset: { source, credit } — 사진 사이트에서 직접 받아 올릴 때 출처를 미리 채움 (1.7.0 Unsplash)
+  function uploadSheet(p, s, preset = {}) {
     const purpose = (s.row && s.row.purpose) || IMG.slotPurpose(s.key);
     const input = h('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp', 'aria-label': '올릴 이미지 파일' });
     const pickLabel = h('span', null, '사진 고르기');
     const picker = h('label', { class: 'btn sm filebtn' }, pickLabel, input);
     const preview = h('div', { class: 'stack' });
     const rights = h('input', { type: 'checkbox' });
-    const srcSel = sourceSelect('');
+    const srcSel = sourceSelect(preset.source || '');
+    // 1.7.0 외부에서 받은 사진: 출처 문구(선택)를 같이 저장하면 캡션에 그대로 붙음
+    const credit = h('input', { type: 'text', maxlength: '200', value: preset.credit || '', placeholder: '예: Photo by 사진가 on Unsplash' });
+    const creditBox = h('div', { class: 'stack', hidden: srcSel.value !== 'external' }, field('출처 문구 (선택)', credit, '받은 사이트가 정한 표시 방법대로 적어줘. 글 캡션에 그대로 붙어.'));
+    // 1.7.0 공공누리 제1유형: 출처(기관·자료 이름)를 꼭 적어야 해서 칸을 보여줌
+    const kogl = h('input', { type: 'text', maxlength: '200', placeholder: '예: 문화체육관광부 정책브리핑(korea.kr) 2026-11-03 사진' });
+    const koglBox = h('div', { class: 'stack', hidden: true }, field('출처 (공공누리 제1유형 — 꼭 적어줘)', kogl, '사진을 받은 기관·누리집 이름. 글 캡션에 "출처: … (공공누리 제1유형)"으로 붙어.'));
+    srcSel.addEventListener('change', () => { koglBox.hidden = srcSel.value !== 'kogl'; creditBox.hidden = srcSel.value !== 'external'; });
     const ownSlot = !!(s.n && IMG.isOwnPhotoSlot(s.text));
     const desc = h('input', { type: 'text', value: s.n ? IMG.altTextFor(s.text) : s.label || '', maxlength: '300' });
     let ready = null, prevUrl = null;
@@ -1544,8 +1619,10 @@ export function createStudio(ui) {
     const send = async () => {
       if (!ready) return;
       if (!rights.checked) { toast(IMAGE_ERR.rights_required); return; }
+      if (srcSel.value === 'kogl' && !kogl.value.trim()) { toast('공공누리 사진은 출처를 적어야 해'); kogl.focus(); return; }
       const fd = new FormData();
-      fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose, rights: true, description: desc.value.trim(), link: true, source_type: srcSel.value }));
+      fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose, rights: true, description: desc.value.trim(), link: true, source_type: srcSel.value,
+        ...(srcSel.value === 'kogl' ? { attribution: kogl.value.trim() } : srcSel.value === 'external' && credit.value.trim() ? { attribution: credit.value.trim() } : {}) }));
       fd.append('file', ready.blob, ready.name);
       const j = await run(goBtn, () => api('/images/upload', { method: 'POST', body: fd }).catch((e) => {
         throw e && e.code === 'too_large' ? { code: 'bad_image', reason: 'too_big' } : e; // 이미지는 '나눠서 올려줘'가 아니라 크기 안내로
@@ -1556,6 +1633,7 @@ export function createStudio(ui) {
       h('p', { class: 'hint' }, 'JPEG·PNG·WebP만, 한 장 8MB까지 (큰 사진은 올리기 전에 자동으로 줄여). GIF·HEIC·SVG는 안 돼.'),
       h('div', { class: 'go' }, picker), preview,
       field('이 사진은 어디서 났어?', srcSel, ownSlot ? "'직접 찍기' 자리야. 네가 찍은 사진이면 '내가 직접 찍은 사진'을 골라줘 — 그래야 직접 촬영 사진으로 셈." : "안 고르면 '출처 확인 필요'로 남아. 직접 찍은 사진으로는 세지 않아."),
+      koglBox, creditBox,
       h('label', { class: 'chk' }, rights, '내가 찍었거나 쓸 권한이 있는 사진이야'),
       h('p', { class: 'notice' }, '다른 사람 사진·인터넷에서 받은 사진은 저작권자 허락이 있어야 써. 상품 공식 이미지는 판매처·제조사의 이용 조건을 먼저 확인해줘.'),
       field('사진 설명 (대체 텍스트)', desc),
@@ -1732,7 +1810,7 @@ export function createStudio(ui) {
       info.push(h('p', { class: 'hint' }, `블로그에 올릴 때 '${IMG.captionHint(img)}'를 사진 아래에 같이 넣어줘 (복사할 때 자동으로 들어가).`));
     } else if (img.kind === 'stock') {
       info.push(h('p', null, 'Photo by ', img.author_url ? h('a', { href: img.author_url, target: '_blank', rel: 'noopener noreferrer' }, img.author_name || '사진가') : (img.author_name || '사진가'),
-        ' on ', img.source_url ? h('a', { href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels') : 'Pexels'));
+        ' on ', img.source_url ? h('a', { href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, siteName(img)) : siteName(img)));
       info.push(h('p', { class: 'hint' }, `라이선스: ${img.license}`), h('div', { class: 'go' }, h('span', { class: 'sns' }, img.attribution_text), h('button', { type: 'button', class: 'copy', onclick: (ev) => ui.copyPlain(img.attribution_text, ev.currentTarget) }, '출처 문구 복사')));
     } else if (img.kind === 'upload') info.push(h('p', { class: 'hint' }, '직접 올린 사진 · 쓸 권한이 있다고 확인함'), sourcePicker(img, () => { refresh(p.id); }));
     else if (img.kind === 'composite') {
@@ -1877,7 +1955,7 @@ export function createStudio(ui) {
       const cur = dk.bg_image_id ? imgs[dk.bg_image_id] : null;
       put(bgNote,
         cur && cur.kind === 'ai' ? h('p', { class: 'notice' }, "AI로 만든 배경이야. 인스타에 올릴 때 캡션에 'AI로 만든 이미지'라고 같이 적어줘 (실제 사진처럼 보이지 않게).") : null,
-        cur && cur.kind === 'stock' ? h('p', { class: 'hint' }, `배경 사진: ${cur.attribution_text || 'Pexels'} — 캡션에 출처를 같이 적으면 좋아.`) : null,
+        cur && cur.kind === 'stock' ? h('p', { class: 'hint' }, `배경 사진: ${cur.attribution_text || siteName(cur)} — 캡션에 출처를 같이 적으면 좋아.`) : null,
         cur && cur.review_status === '사용 안 함' ? h('p', { class: 'badbox' }, "'사용 안 함'으로 표시한 이미지야. 다른 배경을 골라줘.") : null,
         cur && IMG.productSceneMode(cur) && !IMG.productApproved(cur) ? h('p', { class: 'badbox' }, '상품 디테일 검수를 승인해야 카드뉴스 배경으로 쓸 수 있어. 다른 배경을 고르거나 먼저 승인해줘.') : null,
         cur && cur.kind === 'composite' ? h('p', { class: 'notice' }, "원본 보존 합성 이미지야 (상품은 실제 사진, 배경은 AI). 캡션에 '실제 상품 사진에 AI 배경을 합성한 이미지'라고 같이 적어줘.") : null);
@@ -2075,7 +2153,7 @@ export function createStudio(ui) {
       img.description ? h('p', null, img.description) : null,
       img.kind === 'upload' ? sourcePicker(img, onChange) : null,
       h('p', { class: 'hint' }, [img.kind === 'ai' ? `${img.model}${c ? ` · 비용 ${usd(c.usd)} (${c.label})` : ''}` : '', img.kind === 'stock' ? img.attribution_text : '', `${img.width}×${img.height} · ${fmtBytes(img.bytes)} · ${L.fmtTime(img.created_at)}`].filter(Boolean).join(' · ')),
-      img.kind === 'stock' && img.source_url ? h('div', { class: 'go' }, h('a', { class: 'copy', href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, 'Pexels 원본 보기 ↗')) : null,
+      img.kind === 'stock' && img.source_url ? h('div', { class: 'go' }, h('a', { class: 'copy', href: img.source_url, target: '_blank', rel: 'noopener noreferrer' }, `${siteName(img)} 원본 보기 ↗`)) : null,
       h('p', { class: 'legend' }, inUse ? `쓰는 곳 ${inUse}곳` : '쓰는 곳 없음'),
       used.length ? h('ul', { class: 'lic' }, used) : null,
       (j.decks || []).length ? h('p', { class: 'hint' }, `카드뉴스 배경으로 ${(j.decks || []).length}곳에서 사용 중`) : null,
@@ -2155,7 +2233,7 @@ export function createStudio(ui) {
     const loadStatus = () => api('/images/config').then((j) => {
       put(status,
         ...PROV_ROWS.map(([id, title, env]) => provRow(id, title, env, j)),
-        ...j.providers.map((x) => h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${x.label} (실제 사진 검색)`), h('small', null, 'Supabase Secrets: PEXELS_API_KEY')), h('span', { class: 'badge ' + (x.connected ? 'v-ok' : 'v-no') }, x.connected ? '키 있음' : '키 없음'))),
+        ...j.providers.map((x) => h('div', { class: 'item' }, h('div', { class: 'main', style: 'cursor:default' }, h('b', null, `${x.label} (실제 사진 검색)`), h('small', null, `Supabase Secrets: ${({ pexels: 'PEXELS_API_KEY', pixabay: 'PIXABAY_API_KEY', unsplash: 'UNSPLASH_ACCESS_KEY' })[x.id] || ''}`)), h('span', { class: 'badge ' + (x.connected ? 'v-ok' : 'v-no') }, x.connected ? '키 있음' : '키 없음'))),
         h('p', { class: 'hint' }, "'키 있음'은 서버에 키가 있다는 뜻일 뿐이야. '연결 확인'은 이미지를 만들지 않고 키·모델을 공급자에 물어본 결과고(돈 안 듦), 실제로 만들어 본 기록은 따로 보여줘."),
         h('p', { class: 'hint' }, `${usageLine(j.usage)} · 보관함 ${L.fmtNum(j.usage.image_count || 0)}장 · ${fmtBytes(Number(j.usage.storage_bytes || 0))} (멈추는 선 ${fmtBytes(j.storage_limit)})`),
         j.settings.image_gen_model === j.test_model || j.settings.image_edit_model === j.test_model ? h('p', { class: 'notice' }, '점검용 가짜 모델(gf-test-fake)로 돼 있어. 실제로 쓰려면 아래에서 모델을 골라줘.') : null);
@@ -2249,14 +2327,19 @@ export function createStudio(ui) {
       h('li', null, '(선택) OpenAI: platform.openai.com 에 로그인 → API keys → Create new secret key. 결제(Billing)에 크레딧이 있어야 하고, GPT Image 모델은 조직 인증(Organization Verification)이 필요할 수 있어.'),
       h('li', null, 'OpenAI 쪽 안전장치: OpenAI 설정 → Limits → Spend 에서 한 달 한도를 넣고 Enforce a hard limit 를 켜두면, 앱 한도와 별개로 그 금액에서 막혀.'),
       h('li', null, '(선택) Gemini: aistudio.google.com 에 로그인 → Get API key → Create API key. 이미지 모델은 결제가 연결된 프로젝트에서만 쓸 수 있어 (Google AI Studio의 결제 설정). 키를 Supabase Secrets 에 GEMINI_API_KEY 이름으로 넣어.'),
-      h('li', null, 'Pexels: 지금(2026-10-22 확인)은 새 키 발급이 멈춰 있어. 다시 열리면 pexels.com/api → Get Started 로 받아 (무료, 시간당 200번·월 20,000번). 그 전까지는 직접 올리기를 써.'),
+      h('li', null, 'Pexels: 지금(2026-10-22 확인)은 새 키 발급이 멈춰 있어. 다시 열리면 pexels.com/api → Get Started 로 받아 (무료, 시간당 200번·월 20,000번). 그 전까지는 아래 Pixabay·Unsplash 나 직접 올리기를 써.'),
+      h('li', null, '(1.7.0) Pixabay: pixabay.com 에 가입 → pixabay.com/api/docs 에 로그인하면 키가 보여 (키는 무료로 안내돼 있어, 60초에 100번). Supabase Secrets 에 PIXABAY_API_KEY 이름으로 넣어. 출처 표시 의무는 없지만 앱이 출처 문구를 만들어 둬.'),
+      h('li', null, '(1.7.0) Unsplash: unsplash.com/developers → New Application → Access Key (데모는 무료, 시간당 50번). Supabase Secrets 에 UNSPLASH_ACCESS_KEY 이름으로 넣어. Unsplash 규칙상 앱은 검색만 하고, 고른 사진은 Unsplash 사진 페이지에서 받아 \'받은 파일 올리기\'로 올려 (사진가·Unsplash 표기도 같이).'),
+      h('li', null, '(1.7.0) 공공누리 제1유형 사진(정책브리핑 korea.kr 등 정부·공공기관 사진)은 출처만 밝히면 써도 돼 — 내려받아서 파일 올리기로 넣고 출처를 적어.'),
       h('li', null, 'Supabase 대시보드 → 이 프로젝트 → Edge Functions → Secrets 에서 이름대로 붙여넣고 저장. 다시 배포할 필요 없이 바로 적용돼.'),
       h('li', null, "이 화면을 다시 열어 '키 있음'이 보이면 '연결 확인'을 눌러 봐 (이미지를 만들지 않아서 돈이 안 들어). 키는 이 앱·채팅·GitHub에 붙여넣지 마 (서버에만 있어야 해).")),
       h('div', { class: 'go' }, h('a', { class: 'copy', href: 'https://supabase.com/dashboard/project/oxewhsqmdkiasckvnyua/functions/secrets', target: '_blank', rel: 'noopener noreferrer' }, 'Supabase Secrets 열기 ↗'),
         h('a', { class: 'copy', href: 'https://dash.cloudflare.com/profile/api-tokens', target: '_blank', rel: 'noopener noreferrer' }, 'Cloudflare 토큰 ↗'),
         h('a', { class: 'copy', href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener noreferrer' }, 'OpenAI 키 ↗'),
         h('a', { class: 'copy', href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener noreferrer' }, 'Gemini 키 ↗'),
-        h('a', { class: 'copy', href: 'https://www.pexels.com/api/', target: '_blank', rel: 'noopener noreferrer' }, 'Pexels API ↗')));
+        h('a', { class: 'copy', href: 'https://www.pexels.com/api/', target: '_blank', rel: 'noopener noreferrer' }, 'Pexels API ↗'),
+        h('a', { class: 'copy', href: 'https://pixabay.com/api/docs/', target: '_blank', rel: 'noopener noreferrer' }, 'Pixabay API ↗'),
+        h('a', { class: 'copy', href: 'https://unsplash.com/developers', target: '_blank', rel: 'noopener noreferrer' }, 'Unsplash 개발자 ↗')));
     const cmp = h('div', { class: 'stack' });
     const cmpDet = det('img-compare-stats', '모델 비교 기록 (내 평가만)', false, '');
     cmpDet.append(cmp);

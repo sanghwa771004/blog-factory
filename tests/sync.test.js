@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SEO_RULES, countMe, PLAN_KINDS, PLAN_RUNS, DEFAULT_PLAN, KEEP_DAYS, PLAN_MAX_PER_KIND, promptsOf, parseBody } from '../checks.js';
+import { SEO_RULES, countMe, PLAN_KINDS, PLAN_RUNS, DEFAULT_PLAN, KEEP_DAYS, PLAN_MAX_PER_KIND, promptsOf, parseBody, isAppDrawnSlot, VOICE_PRESETS, figureNumbers } from '../checks.js';
 import { AUTO_RULES, BACKLOG_STAGES, RESCHEDULE_STAGES, backlogInfo, autoPlan } from '../lib.js';
 import { isOwnPhotoSlot } from '../images.js';
 
@@ -78,7 +78,8 @@ test('1.4.0 운영: 쌓인 원고 한도·개선안·유입 검색어 규칙이 
   const APP = read('app.js');
   const SRV = read('supabase/functions/blog-app/index.ts');
   // 쓰기 함수 목록에 개선안 저장(set_refresh)이 있음
-  assert.match(PROMPT, /쓰기는 아래에 적힌 함수 호출만 써: expire_auto_posts, writer_context, job_start, fill_post, job_fail, add_topics, set_variants, set_refresh, add_post, log_run\./);
+  // 1.7.0: 사람 말투로 다듬기(set_polish)가 더해짐
+  assert.match(PROMPT, /쓰기는 아래에 적힌 함수 호출만 써: expire_auto_posts, writer_context, job_start, fill_post, job_fail, add_topics, set_variants, set_refresh, set_polish, add_post, log_run\./);
   // 쌓인 원고: 같은 단계(검수 필요·정보 필요·발행 준비·예약)와 같은 기본 한도(하루 발행 수 × 7)
   assert.deepEqual(BACKLOG_STAGES, ['review', 'verify', 'ready', 'scheduled']);
   assert.ok(M016.includes("p.stage in ('review', 'verify', 'ready', 'scheduled')"), 'DB backlog_state 가 같은 단계를 셈');
@@ -155,11 +156,56 @@ test('1.6.0 하루 계획: 종류·편수·시각·보관일·사진 프롬프�
   assert.ok(PROMPT.includes(`한 줄로 ${SEO_RULES.imagesMin}~${SEO_RULES.imagesMax}곳`));
   assert.ok(PROMPT.includes('"[프롬프트: …]"'));
   const sample = '[이미지: 창가 제습기]\n[프롬프트: 창가 책상 위 흰색 제습기, 오전 자연광, 4:3, 글자 없이]';
-  assert.deepEqual(promptsOf(sample), [{ n: 1, text: '창가 제습기', prompt: '창가 책상 위 흰색 제습기, 오전 자연광, 4:3, 글자 없이' }]);
+  assert.deepEqual(promptsOf(sample), [{ n: 1, text: '창가 제습기', prompt: '창가 책상 위 흰색 제습기, 오전 자연광, 4:3, 글자 없이', app: false }]);
   // 강조: ==문장== 과 "> " 핵심 상자를 앱이 알아봄
   assert.ok(PROMPT.includes('"==문장=="') && PROMPT.includes('"> " 로 시작하는 한 줄 상자'));
   assert.deepEqual(parseBody('> 핵심: 소음부터 봐').map((b) => b.t), ['note']);
   // 투자 글 안내 문구는 앱 검사가 알아봄
   const disc = PROMPT.match(/글 끝에 꼭: "([^"]+)"/)[1];
   assert.match(disc, /투자 권유가 아니에요/);
+});
+
+test('1.7.0 전문성·사람 말투: 사진 자리·상자·말투·다듬기·숫자 확인표 규칙이 프롬프트·앱·DB(021)·Claude 안 글공장에서 같음', () => {
+  const M021 = read('supabase/migrations/021_pro_voice_1_7_0.sql');
+  const APP = read('app.js');
+  const SRV = read('supabase/functions/blog-app/index.ts');
+  // 앱이 그리는 사진 자리: 프롬프트가 남기라는 표시를 앱이 그대로 알아봄 (Claude 안 글공장도 같은 표시)
+  for (const re of [/"\[이미지: \(썸네일\) [^"\]]*\]"/, /"\[이미지: \(정보 카드\) [^"\]]*\]"/]) {
+    const slot = PROMPT.match(re)[0].slice(1, -1);
+    assert.equal(isAppDrawnSlot(slot.replace(/^\[이미지:\s*|\]$/g, '')), true, slot);
+    assert.equal(promptsOf(slot + '\n[프롬프트: 앱이 그리는 정보 카드 — 제미나이 필요 없음]')[0].app, true);
+  }
+  assert.ok(ART.includes('[이미지: (썸네일) 제목 카드]') && ART.includes('[이미지: (정보 카드) 무엇을 보여줄지]'));
+  // [기준: …]·[용어: …] 예시를 앱이 상자로 읽음
+  const basis = PROMPT.match(/"(\[기준: [^"]+\])"/)[1];
+  assert.equal(parseBody(basis)[0].t, 'basis');
+  const term = PROMPT.match(/다음 줄에 "(\[용어: [^"]+\])"/)[1];
+  const tb = parseBody(term)[0];
+  assert.deepEqual([tb.t, !!tb.term, !!tb.text], ['term', true, true]);
+  assert.match(PROMPT, /"\[\^번호\]"\(sources 순서, 1부터\)/);
+  // 말투 카드: 프롬프트(규칙 16)·Claude 안 글공장 모두 앱 기본 말투와 같은 글자
+  for (const [k, v] of Object.entries(VOICE_PRESETS)) {
+    assert.ok(PROMPT.includes(`${k} = "${v.card}"`), '프롬프트 말투 ' + k);
+    assert.ok(ART.includes(v.card.replace(/"/g, '"')) || ART.includes(JSON.stringify(v.card).slice(1, -1)), 'Claude 안 글공장 말투 ' + k);
+  }
+  // 다듬기(polish): 작업 종류가 DB·서버·앱·프롬프트에서 같고, 사진·링크 줄이 바뀌면 DB가 거절
+  assert.ok(M021.includes("check (kind in ('write', 'topics', 'reformat', 'refresh', 'polish'))"));
+  assert.match(SRV, /kind === "polish"/);
+  assert.match(APP, /polish: '/);
+  assert.match(PROMPT, /select public\.set_polish\('<post_id>', '<작업 id>', \$gf\$\{"body": "<다듬은 본문>"\}\$gf\$::jsonb\);/);
+  assert.ok(M021.includes("raise exception 'polish changed image or link lines'") && PROMPT.includes('DB가 다르면 저장을 거절해'));
+  assert.ok(M021.includes("'body', case when r.kind in ('reformat', 'refresh', 'polish') then p.body end"), 'writer_context 가 다듬을 본문을 줌');
+  // 숫자 확인표: 프롬프트 JSON 예시의 값을 앱이 숫자로 읽고, 앱 검사가 보는 칸(as_of·source_url)이 예시에 있음
+  const figLine = PROMPT.match(/"figures": (\[\{[^\n]+\}\]),?\n/)[1];
+  const figs = JSON.parse(figLine);
+  assert.deepEqual(Object.keys(figs[0]), ['label', 'value', 'unit', 'as_of', 'source_url', 'source_title']);
+  assert.deepEqual([...figureNumbers(figs)], [2601.23]);
+  assert.ok(M021.includes("if jsonb_typeof(p->'figures') = 'array' then"), 'DB add_post 가 숫자 확인표를 저장');
+  assert.match(APP, /f\.source_title/);
+  // 투자 글 채널·시리즈 기본값: DB 기본값 = 프롬프트 설명
+  assert.ok(M021.includes(`'{"market": "오늘의 증시", "stock": "종목 한 장 정리"}'::jsonb`) || M021.includes('{"market":"오늘의 증시","stock":"종목 한 장 정리"}'), 'DB 시리즈 기본 이름');
+  assert.match(PROMPT, /\[오늘의 증시 11\/3\]/);
+  assert.ok(M021.includes("'naver_blog_invest'") && PROMPT.includes('settings.invest_channel'));
+  // 틀: writer_context 에 원문·지문(fp) 없이 구성만
+  assert.ok(M021.includes("'templates'") && !/'templates'[\s\S]{0,400}'fp'/.test(M021), 'writer_context 틀에 지문을 안 넘김');
 });

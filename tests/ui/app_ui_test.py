@@ -119,6 +119,8 @@ class Mock:
         self.fail_stats_from = set()  # 이 시작일의 통계 요청은 서버 오류로 답함 (홈이 '불러오는 중'에 멈추지 않는지)
         self.plan_today = None     # 1.6.0 서버의 오늘 계획 (020 전 서버면 None)
         self.expired = None        # 1.6.0 서버가 이번 조회에서 휴지통으로 옮긴 자동 원고 (한 번만 알려줌)
+        self.templates = []        # 1.7.0 잘 나가는 글 틀 (구성·통계·지문만 — 원문 없음)
+        self.revisions = {}        # 1.7.0 글마다 보관한 이전 본문 (다듬기·되돌리기 전)
         self.seq = 100
         P1, P2, P3, P4, P5, P6, P7 = (uid(i) for i in range(1, 8))
         self.ids = dict(P1=P1, P2=P2, P3=P3, P4=P4, P5=P5, P6=P6, P7=P7, L1=uid(11), L2=uid(12), PR1=uid(21), PR2=uid(22), J1=uid(31), T1=uid(41))
@@ -370,7 +372,7 @@ class Mock:
                 'metric_post_ids': [] if 'metric_post_ids' in self.unavailable else sorted({m['post_id'] for m in self.metrics if m.get('post_id')}),
                 'unavailable': list(self.unavailable),
                 'runs_auto_7d': sum(1 for r in self.runs if r.get('kind') == 'auto' and str(r.get('ran_at', ''))[:10] >= D(-6)),
-                'plan_today': self.plan_today, 'expired': self._take_expired()}
+                'plan_today': self.plan_today, 'expired': self._take_expired(), 'templates': self.templates}
 
     def _take_expired(self):
         e, self.expired = self.expired, None  # 서버처럼: 옮긴 건 그 조회 한 번에만 알려줌
@@ -408,6 +410,9 @@ class Mock:
             if self.pre015 and 'focus_terms' in body:
                 # 서버처럼: 015 전 DB면 주력 주제 낱말만 빼고 저장하고 알려줌
                 return 200, {'settings': self.settings, 'skipped': ['focus_terms']}
+        r = self.handle_pro(method, path, body)
+        if r is not None:
+            return r
         r = self.handle_images(method, path, query, headers, body)
         if r is not None:
             return r
@@ -565,6 +570,79 @@ class Mock:
                 return 400, {'error': 'bad_field', 'field': 'refresh'}
             p['refresh'] = {}
             return 200, {'post': p, 'demoted': None, 'image_sync': None}
+        return None
+
+    # ── 1.7.0 전문성·사람 말투: 말투 카드·시리즈 설정, 다듬기 요청, 이전 본문·되돌리기, 숫자 대조, 틀 (서버와 같은 규칙만 흉내) ──
+    def handle_pro(self, method, path, body):
+        post = lambda pid: next((p for p in self.posts if p['id'] == pid and not p['deleted_at']), None)
+        if path == 'settings' and method == 'POST' and 'voice' in body:
+            for k in ('voice', 'series', 'brand_name', 'invest_channel'):
+                if k in body:
+                    self.settings[k] = body[k]
+            return 200, {'settings': self.settings, 'skipped': []}
+        if path == 'jobs' and method == 'POST' and body.get('kind') == 'polish':
+            p = post(body.get('post_id'))
+            if not p:
+                return 404, {'error': 'not_found'}
+            if len(p.get('body') or '') < 200:
+                return 400, {'error': 'no_body'}
+            if any(j for j in self.jobs if j['kind'] == 'polish' and j['post_id'] == p['id'] and j['status'] == 'pending'):
+                return 409, {'error': 'job_exists'}
+            voice = 'invest' if p.get('plan_kind') in ('market', 'stock') else 'general'
+            job = {'id': self.new_id(), 'kind': 'polish', 'keyword': p['keyword'], 'status': 'pending', 'post_id': p['id'], 'attempts': 0, 'started_at': None,
+                   'created_at': NOW, 'done_at': None, 'note': '', 'payload': {'voice': voice}}
+            self.jobs.append(job)
+            return 200, {'job': job}
+        m = re.fullmatch(r'posts/([0-9a-f-]{36})/revisions', path)
+        if m and method == 'GET':
+            return 200, {'revisions': list(reversed(self.revisions.get(m.group(1), [])))}
+        m = re.fullmatch(r'revisions/([0-9a-f-]{36})/revert', path)
+        if m and method == 'POST':
+            for pid, revs in self.revisions.items():
+                r = next((x for x in revs if x['id'] == m.group(1)), None)
+                if r:
+                    p = post(pid)
+                    revs.append({'id': self.new_id(), 'reason': 'revert', 'job_id': None, 'body': p['body'], 'titles': p['titles'], 'created_at': NOW})
+                    p['body'] = r['body']
+                    if p['stage'] in ('ready', 'scheduled'):
+                        p['stage'] = 'review'
+                    return 200, {'post': p, 'restored_from': r['created_at']}
+            return 404, {'error': 'not_found'}
+        m = re.fullmatch(r'posts/([0-9a-f-]{36})/verify-figures', path)
+        if m and method == 'POST':
+            if not self.keys.get('ecos'):
+                return 503, {'error': 'ecos_key_missing'}
+            out = []
+            for f in post(m.group(1)).get('figures') or []:
+                if '코스피' in f['label']:
+                    off = 2612.45
+                    mine = float(str(f['value']).replace(',', ''))
+                    out.append({'label': f['label'], 'value': f['value'], 'date': f.get('as_of'), 'official': off, 'official_name': 'KOSPI지수', 'unit': '포인트', 'status': '같음' if abs(off - mine) < 0.01 else '다름'})
+                elif '환율' in f['label']:
+                    out.append({'label': f['label'], 'value': f['value'], 'date': f.get('as_of'), 'status': '아직 없음', 'note': '한국은행 자료가 아직 안 올라왔거나 그날은 장이 안 열렸어', 'official_name': '원/미국달러(매매기준율)'})
+                else:
+                    out.append({'label': f['label'], 'value': f['value'], 'status': '대조 안 함', 'note': '한국은행 자료에 없는 항목'})
+            return 200, {'results': out, 'source': '한국은행 경제통계시스템(ECOS)', 'checked_at': NOW}
+        if path == 'templates' and method == 'POST':
+            if not isinstance(body.get('outline'), list) or not isinstance(body.get('fp'), list) or not all(isinstance(x, int) for x in body['fp']):
+                return 400, {'error': 'bad_field', 'field': 'outline'}
+            t = {'id': self.new_id(), 'kind': body.get('kind', ''), 'name': (body.get('name') or '').strip() or '참고 글', 'outline': body['outline'], 'stats': body.get('stats') or {},
+                 'fp': body['fp'], 'note': '', 'active': True, 'created_at': NOW}
+            self.templates.insert(0, t)
+            return 200, {'template': t}
+        m = re.fullmatch(r'templates/([0-9a-f-]{36})', path)
+        if m:
+            t = next((x for x in self.templates if x['id'] == m.group(1)), None)
+            if not t:
+                return 404, {'error': 'not_found'}
+            if method == 'DELETE':
+                self.templates = [x for x in self.templates if x is not t]
+                return 200, {'ok': True}
+            if method == 'POST':
+                for k in ('active', 'name', 'kind'):
+                    if k in body:
+                        t[k] = body[k]
+                return 200, {'template': t}
         return None
 
     def handle_images(self, method, path, query, headers, body):
@@ -830,14 +908,18 @@ class Mock:
                 g.update({'actual_usd': body['actual_usd'], 'actual_checked_at': body.get('actual_checked_at'), 'cost_status': '청구액 확인'})
             return 200, {'generation': g}
         if path == 'stock/search' and method == 'GET':
-            if not self.keys['pexels']:
-                return 503, {'error': 'pexels_key_missing'}
+            prov = query.get('provider', ['pexels'])[0]
+            if prov not in ('pexels', 'pixabay', 'unsplash'):
+                return 400, {'error': 'bad_field', 'field': 'provider'}
+            if not self.keys.get(prov):
+                return 503, {'error': 'pexels_key_missing' if prov == 'pexels' else 'photo_key_missing'}
             if query.get('q', [''])[0] == '없는것':
                 return 200, {'provider': 'pexels', 'photos': [], 'total': 0, 'page': 1, 'has_next': False, 'remaining': 199}
             photos = [{'id': 1000 + n, 'width': w, 'height': h, 'alt': f'사진 {n}', 'photographer': f'사진가 {n}', 'photographer_url': f'https://www.pexels.com/@p{n}',
                        'url': f'https://www.pexels.com/photo/{1000 + n}/', 'avg_color': '#AABBCC', 'thumb': url, 'preview': url, 'download': url}
                       for n, (url, w, h) in enumerate((FX_IMG[k] for k in ('4x3', '16x9', '4x5')), 1)]  # 검색 결과는 사진 3장 (1.5.1 상품 시험 사진은 빼고)
-            return 200, {'provider': 'pexels', 'label': 'Pexels', 'site': 'https://www.pexels.com', 'license_url': 'https://www.pexels.com/license/', 'photos': photos,
+            label = {'pexels': 'Pexels', 'pixabay': 'Pixabay', 'unsplash': 'Unsplash'}[prov]
+            return 200, {'provider': prov, 'label': label, 'site': 'https://www.pexels.com', 'license_url': 'https://www.pexels.com/license/', 'photos': photos,
                          'total': 3, 'page': 1, 'has_next': False, 'remaining': 198}
         if path == 'stock/select' and method == 'POST':
             ex = next((i for i in self.images if i['source_id'] == str(body['photo_id']) and not i.get('deleted_at')), None)
@@ -851,10 +933,18 @@ class Mock:
                 return 400, {'error': 'bad_image', 'reason': 'bad_type'}
             if meta.get('kind') != 'card' and meta.get('rights') is not True:
                 return 400, {'error': 'rights_required'}
+            if meta.get('source_type') == 'kogl' and not str(meta.get('attribution') or '').strip():
+                return 400, {'error': 'bad_field', 'field': 'attribution'}
             i = self.add_image('card' if meta.get('kind') == 'card' else 'upload', meta.get('post_id'), meta.get('slot_key'), '4x5' if meta.get('kind') == 'card' else '4x3',
                                description=meta.get('description', ''), bytes=body.get('size', 1))
-            if i['kind'] == 'upload' and meta.get('source_type') in ('own', 'official', 'external'):
+            if i['kind'] == 'upload' and meta.get('source_type') in ('own', 'official', 'external', 'kogl'):
                 i['source_type'] = meta['source_type']  # 서버처럼: 고른 출처만 저장 (안 고르면 빈칸 = 출처 확인 필요)
+            if i['kind'] == 'upload' and meta.get('source_type') == 'kogl':  # 1.7.0 공공누리 제1유형: 출처를 꼭 받아서 출처 문구로
+                i['attribution_text'] = f"출처: {meta.get('attribution', '')} (공공누리 제1유형)"
+            elif i['kind'] == 'upload' and meta.get('source_type') == 'external' and meta.get('attribution'):  # 1.7.0 외부 사진의 출처 문구 (선택)
+                i['attribution_text'] = meta['attribution']
+            if i['kind'] == 'card' and meta.get('card_label'):
+                i['license'] = f"{meta['card_label']} (앱에서 직접 만듦)"
             slot = self.link(meta['post_id'], meta['slot_key'], i['id'], meta.get('purpose')) if meta.get('link') else None
             return 200, {'image': self.with_uses(i), 'slot': slot, 'reused': False}
         if path == 'images' and method == 'GET':
@@ -1412,7 +1502,7 @@ def main():
             expect(card).to_contain_text('사진: 사진가 2 (Pexels)')
             # 결과 없음 안내
             card.get_by_role('button', name='바꾸기', exact=True).click()
-            page.locator('#sheet').get_by_role('button', name='실제 사진 찾기 (Pexels)').click()
+            page.locator('#sheet').get_by_role('button', name='실제 사진 찾기 (무료 사진 사이트)').click()
             q = page.locator('#sheet input[type=search]')
             q.fill('없는것')
             page.locator('#sheet').get_by_role('button', name='검색').click()
@@ -1852,7 +1942,7 @@ def main():
             expect(page.locator('#sheet').get_by_role('button', name=re.compile(r'예상 \$[\d.]+ · 만들기'))).to_be_disabled()
             page.locator('#sheet').get_by_role('button', name='닫기').click()
             page.locator('section.studio .slot').nth(0).get_by_role('button', name='바꾸기', exact=True).click()
-            page.locator('#sheet').get_by_role('button', name='실제 사진 찾기 (Pexels)').click()
+            page.locator('#sheet').get_by_role('button', name='실제 사진 찾기 (무료 사진 사이트)').click()
             expect(page.locator('#sheet')).to_contain_text('직접 올리기로 계속할 수 있어')
             expect(page.locator('#sheet').get_by_role('button', name='파일 올리기로')).to_be_visible()
             page.locator('#sheet').get_by_role('button', name='닫기').click()
@@ -3571,6 +3661,287 @@ def main():
                 mock.expired = None
                 reload_keys()
         check('1.6.0 하루 계획: 자동 정리 알림·홈의 오늘 계획·목록에서 지우기(두 번)·보관·사진 자리 아래 제미나이 프롬프트 복사·프롬프트 모두 복사·서식 복사(소제목 24px·바탕색, 프롬프트 없음)·하루 계획 설정 저장·휴지통에서 되살린 지난 자동 원고는 보관', t_plan_160)
+
+        # ═════════ 1.7.0 전문성·사람 말투 ═════════
+        def t_pro_170():
+            close_sheet()
+            ctx.grant_permissions(['clipboard-read', 'clipboard-write'])
+            saved = {k: deepcopy(mock.settings.get(k)) for k in ('voice', 'series', 'brand_name', 'invest_channel')}
+            P, M, C = mock.new_id(), mock.new_id(), mock.new_id()
+            ai_body = '\n'.join([
+                '[이미지: (썸네일) 제목 카드]', '[프롬프트: 앱이 그리는 썸네일 — 제미나이 필요 없음]',
+                '## 1. 가습기 선택 방법', '[기준: 2026년 11월 기준 · 참고: 한국소비자원]',
+                '이번 포스팅에서는 가습기 선택 방법에 대해 자세히 알아보겠습니다. 가습기는 겨울철 필수 가전제품입니다[^1]. 다양한 종류의 가습기가 있습니다. 각각의 장단점이 존재합니다.',
+                '[용어: 초음파식 — 물을 진동으로 잘게 쪼개 내보내는 방식]',
+                '## 2. 가습기 종류', '가습기의 종류를 살펴보겠습니다. 초음파식 가습기가 있습니다. 가열식 가습기가 있습니다. 복합식 가습기가 있습니다.',
+                '- 초음파식', '- 가열식', '- 복합식', '[이미지: (정보 카드) 가습기 종류 체크리스트]', '[프롬프트: 앱이 그리는 정보 카드 — 제미나이 필요 없음]',
+                '## 3. 세척 방법', '세척을 자주 하는 것이 중요합니다. 효과적인 세척 방법을 알아두면 좋습니다. 많은 분들이 세척을 소홀히 합니다. 꼭 기억하세요.',
+                '- 물통', '- 필터', '- 진동자', '[이미지: 물통을 씻는 손]', '[프롬프트: 주방 개수대에서 물통을 씻는 손, 깔끔한 일러스트, 4:3, 글자 없이]',
+                '## 4. 결론', '결론적으로 가습기는 용도에 맞게 선택하는 것이 중요합니다. 다양한 제품을 비교해 보시기 바랍니다. 이 글이 도움이 되셨기를 바랍니다.',
+                '- 용도', '- 크기', '- 가격'])
+            REF = ('겨울 가습기 고르는 법 총정리\n겨울만 되면 코가 바짝 마르죠? 저도 매년 이맘때면 가습기를 꺼내요. 오늘은 원룸에 맞는 가습기 고르는 기준을 정리했어요.\n'
+                   '가습기 종류부터 알아두세요\n가습기는 크게 초음파식, 가열식, 복합식으로 나뉘어요. 방식마다 소음과 전기 요금, 세척 난이도가 꽤 달라요. 원룸이라면 소음이 적은 쪽이 편하답니다.\n'
+                   '- 초음파식: 조용하고 전기를 적게 써요\n- 가열식: 위생적이지만 전기를 많이 써요\n- 복합식: 중간이지만 가격이 높아요\n'
+                   '고를 때 꼭 볼 세 가지\n첫째는 물통 입구 크기예요. 손이 들어가야 구석까지 닦을 수 있거든요. 둘째는 소음인데, 잠잘 때 켜두니 30데시벨 아래가 좋아요. 셋째는 분리되는 부품 수예요.\n'
+                   '자주 묻는 질문\nQ. 수돗물을 써도 되나요? 초음파식은 하얀 가루가 생길 수 있어서 정수된 물이 나아요.\n정리하면 원룸은 소음과 세척부터 보시면 돼요.')
+            base = dict(mock.posts[0])
+            mock.posts.append({**base, 'id': P, 'keyword': '원룸 가습기 고르는 법', 'titles': ['원룸 가습기 고르는 법'], 'stage': 'review', 'channel_id': 'naver_blog', 'program_ids': ['naver_adpost'],
+                               'content_type': 'buying_guide', 'publish_date': D(0), 'created_at': NOW, 'source': 'auto', 'plan_kind': 'adpost', 'keep': False, 'body': ai_body,
+                               'summary': '소음부터\n세척 쉬운 구조\n방 크기에 맞게',
+                               'sources': [{'title': '한국소비자원 가습기 안전 정보', 'url': 'https://www.kca.go.kr/home/sub.do', 'checked_at': D(-1)}]})
+            mbody = ('## 오늘 코스피\n[기준: 어제 장 마감 · 참고: 한국거래소]\n코스피는 2,612.45로 마감했어요. 외국인은 1,234억 원을 팔았어요.\n' + ('지수는 외국인 수급에 따라 움직였어요. 금리 소식도 같이 봐야 해요. ' * 8)
+                     + '\n이 글은 공개된 정보를 정리한 것이고 투자 권유가 아니에요. 투자 판단과 책임은 본인에게 있어요.')
+            mock.posts.append({**base, 'id': M, 'keyword': '오늘 코스피 마감 정리', 'titles': ['[오늘의 증시 11/2] 코스피 정리'], 'stage': 'review', 'channel_id': 'naver_blog', 'program_ids': ['naver_adpost'],
+                               'content_type': 'market_summary', 'publish_date': D(0), 'created_at': NOW, 'source': 'auto', 'plan_kind': 'market', 'keep': False, 'body': mbody,
+                               'figures': [{'label': '코스피 종가', 'value': '2,612.45', 'unit': '포인트', 'as_of': D(-1), 'source_url': 'https://data.krx.co.kr/', 'source_title': 'KRX 정보데이터시스템'},
+                                           {'label': '원/달러 환율', 'value': '1,385.2', 'unit': '원', 'as_of': D(-1), 'source_url': ''}]})
+            cbody = '## 가습기 고르기\n원룸이면 이게 중요해요. 첫째는 물통 입구 크기예요. 손이 들어가야 구석까지 닦을 수 있거든요.\n' + ('나머지는 제 말로 정리했어요. 방 크기부터 재 봤어요. ' * 6)
+            mock.posts.append({**base, 'id': C, 'keyword': '원룸 가습기 물통', 'titles': ['원룸 가습기 물통 크기'], 'stage': 'review', 'channel_id': 'naver_blog', 'program_ids': ['naver_adpost'],
+                               'content_type': 'buying_guide', 'publish_date': D(1), 'created_at': NOW, 'source': 'request', 'plan_kind': '', 'body': cbody})
+            try:
+                reload_keys()
+                # ── 1) 사람 말투 점검: AI 말투 점수·걸린 표현, 발행 전 검사에도
+                goto_hash('content/post/' + P)
+                tone = page.locator('section.panel', has=page.locator('h2', has_text='사람 말투 점검'))
+                expect(tone).to_contain_text('AI 티 남')
+                expect(tone.locator('ul.hits')).to_contain_text('"알아보겠습니다" 같은 예고')
+                expect(tone.locator('ul.hits')).to_contain_text('이번 포스팅에서는 가습기 선택 방법에 대해 자세히 알아보겠습니다.')
+                expect(tone).to_contain_text('다듬을 때 쓰는 말투: 친근한 해요체 블로거 · 일반 글')
+                expect(tone.locator('ul.hits > li')).to_have_count(7)
+                expect(tone.locator('ul.hits li.more')).to_contain_text('그 밖에')
+                expect(page.locator('#view')).to_contain_text("AI 말투 점수")
+                # 미리보기: 기준·용어 상자, 출처 번호, 앱이 그리는 자리(제미나이 프롬프트는 일반 자리에만)
+                pv = page.locator(f'#pv-{P}')
+                expect(pv.locator('p.basis')).to_contain_text('이 글의 기준 2026년 11월 기준')
+                expect(pv.locator('p.term')).to_contain_text('용어 풀이 · 초음파식')
+                expect(pv.locator('sup.fn')).to_have_text('[1]')
+                expect(pv.locator('.img.app')).to_have_count(2)
+                expect(pv.locator('.img.app').first).to_contain_text('앱이 그려줘')
+                expect(pv.locator('.gprompt')).to_have_count(1)
+                expect(page.locator('#view')).to_contain_text("📷 사진 자리 3곳 · 제미나이 프롬프트 1개")
+                expect(page.locator('#view')).to_contain_text("썸네일·정보 카드 자리 2곳은 아래 '이미지'에서 앱이 그려줘")
+                # 서식 복사: 기준·용어 상자 바탕색, 출처 번호, 글 끝 참고 자료
+                cp = page.locator('section.panel', has=page.locator('h2', has_text='블로그에 올리기'))
+                expect(cp).to_contain_text("'참고 자료'")
+                expect(cp).to_contain_text("'AI 활용' 표시")
+                cp.get_by_role('button', name='사진 프롬프트 1개 모두 복사').click()
+                assert clip_text() == '[사진 3] 물통을 씻는 손\n주방 개수대에서 물통을 씻는 손, 깔끔한 일러스트, 4:3, 글자 없이', clip_text()
+                cp.get_by_role('button', name='서식 그대로 복사').click()
+                page.wait_for_timeout(300)
+                html = clip_html()
+                assert '📌 이 글의 기준' in html and 'background-color:#f2f4f7' in html and '용어 풀이 · 초음파식' in html and 'background-color:#eef3fb' in html, html[:400]
+                assert '<sup' in html and '참고 자료' in html and 'https://www.kca.go.kr/home/sub.do' in html, html[-500:]
+                no_overflow('1.7.0 원고 화면')
+                shot('70-pro170-post')
+                # 다듬기 요청 → 기다리는 중
+                tone.get_by_role('button', name='사람 말투로 다듬기').click()
+                expect(page.locator('#toast')).to_contain_text('다듬기를 요청했어')
+                b = [c for c in mock.calls if c['path'] == 'jobs' and c['method'] == 'POST'][-1]['body']
+                assert b == {'kind': 'polish', 'post_id': P}, b
+                tone = page.locator('section.panel', has=page.locator('h2', has_text='사람 말투 점검'))
+                expect(tone).to_contain_text('다듬기 기다리는 중')
+                expect(tone.get_by_role('button', name='사람 말투로 다듬기')).to_have_count(0)
+                # 이전 본문 보기 → 되돌리기 (두 번 눌러야)
+                tone.get_by_role('button', name='이전 본문 보기').click()
+                expect(tone).to_contain_text('보관한 이전 본문이 없어')
+                old = ai_body.replace('## 4. 결론', '## 4. 결론\n예전에 쓴 문장이에요.')  # 사진·링크 자리는 그대로인 이전 본문
+                REV = mock.new_id()
+                mock.revisions[P] = [{'id': REV, 'reason': 'polish', 'job_id': None, 'body': old, 'titles': ['원룸 가습기 고르는 법'], 'created_at': NOW}]
+                tone.get_by_role('button', name='이전 본문 보기').click()
+                rev = tone.locator('details.revbox')
+                expect(rev).to_have_count(1)
+                expect(rev.locator('summary')).to_contain_text('다듬기 전 본문')
+                rev.locator('summary').click()
+                expect(rev.locator('pre.revbody')).to_contain_text('예전에 쓴 문장이에요.')
+                rb = rev.locator('.go button').first  # 누르면 글자가 바뀌어서 자리로 찾음
+                expect(rb).to_have_text('이 본문으로 되돌리기')
+                rb.click()
+                expect(rb).to_have_text('되돌릴까? 한 번 더 눌러줘')
+                assert not [c for c in mock.calls if c['path'] == f'revisions/{REV}/revert'], '한 번 누르면 안 되돌림'
+                rb.click()
+                expect(page.locator('#toast')).to_contain_text('되돌렸어')
+                assert [c for c in mock.calls if c['path'] == f'revisions/{REV}/revert' and c['method'] == 'POST']
+                assert next(x for x in mock.posts if x['id'] == P)['body'] == old
+                expect(page.locator(f'#pv-{P}')).to_contain_text('예전에 쓴 문장이에요.')
+                # ── 2) 투자 글 숫자 확인표: 표·출처 링크·표에 없는 숫자, 한국은행 대조 (키 없음 → 안내, 키 있음 → 결과)
+                goto_hash('content/post/' + M)
+                fg = page.locator('section.panel', has=page.locator('h2', has_text='숫자 확인표'))
+                expect(fg.locator('h2')).to_contain_text('숫자 확인표 (2줄)')
+                expect(fg.locator('table.figs tr')).to_have_count(3)
+                expect(fg.get_by_role('link', name='KRX 정보데이터시스템')).to_have_attribute('href', 'https://data.krx.co.kr/')
+                expect(fg.locator('span.bad')).to_have_text('없음')
+                expect(fg).to_contain_text('표에 없는 숫자 1개: 1,234')
+                expect(page.locator('section.panel', has=page.locator('h2', has_text='사람 말투 점검'))).to_contain_text('숫자로 말하는 투자 해설 · 투자 글')
+                fg.get_by_role('button', name='한국은행 숫자와 맞춰보기').click()
+                expect(page.locator('#toast')).to_contain_text('한국은행 ECOS 인증키가 아직 없어')
+                mock.keys['ecos'] = True
+                fg.get_by_role('button', name='한국은행 숫자와 맞춰보기').click()
+                res = fg.locator('ul.figcheck')
+                expect(res.locator('li')).to_have_count(2)
+                expect(res).to_contain_text('같음')
+                expect(res).to_contain_text('아직 없음')
+                expect(res).to_contain_text('2,612.45 포인트')
+                expect(fg).to_contain_text('한국은행 경제통계시스템(ECOS)')
+                no_overflow('1.7.0 숫자 확인표')
+                shot('71-pro170-figures')
+                # ── 3) 설정 > 말투: 기본 말투 바꾸기, 내 글로 말투 만들기, 시리즈·투자 블로그 저장
+                goto_hash('settings/voice')
+                sec = page.locator('#sec-voice')
+                gsel = sec.locator('select[aria-label="일반 글 (쿠팡·토스·애드포스트·오늘 이슈) 말투"]')
+                gsel.select_option('calm')
+                expect(sec.locator('pre.voicecard').first).to_contain_text('핵심부터 말하고 이유를 붙여')
+                inv = sec.locator('.voicebox').nth(1)
+                inv.locator('summary', has_text='내 글로 말투 만들기').click()
+                expect(inv.locator('textarea')).to_have_attribute('placeholder', re.compile('붙여넣은 글 전체는 저장하지 않아'))
+                inv.locator('textarea').fill('짧아요.')
+                inv.get_by_role('button', name='내 말투 분석').click()
+                expect(inv).to_contain_text('문장이 너무 적어')
+                SAMPLE = ('오늘 코스피는 조금 올랐어요. 외국인이 사들인 게 컸거든요. 환율은 그대로였어요. 다음 주엔 금리 발표가 있어요. '
+                          '그래서 저는 조금 지켜보려고요. 숫자는 늘 날짜랑 같이 적어 둬요. 혹시 헷갈리면 거래소 자료를 다시 봐요.')
+                inv.locator('textarea').fill(SAMPLE)
+                inv.get_by_role('button', name='내 말투 분석').click()
+                expect(inv).to_contain_text('문장에서 뽑았어: 해요체')
+                inv.get_by_role('button', name='이 말투로 쓰기').click()
+                expect(inv.locator('select')).to_have_value('mine')
+                expect(inv.locator('pre.voicecard').first).to_contain_text('말투: 해요체')
+                sec.locator('label', has_text='미국·한국 증시 정리').locator('input').fill('증시 한눈에')
+                sec.locator('label', has_text='블로그 이름').locator('input').fill('상화의 생활 노트')
+                sec.locator('select[aria-label="투자 글 블로그"]').select_option('tistory')
+                sec.get_by_role('button', name='저장', exact=True).click()
+                expect(page.locator('#toast')).to_contain_text('저장했어')
+                b = [c for c in mock.calls if c['path'] == 'settings' and c['method'] == 'POST'][-1]['body']
+                assert b['voice']['general']['preset'] == 'calm', b['voice']
+                vi = b['voice']['invest']
+                assert vi['source'] == 'mine' and vi['card'].startswith('말투: 해요체') and len(vi['examples']) <= 3, vi
+                assert SAMPLE not in json.dumps(b, ensure_ascii=False), '붙여넣은 글 전체는 안 보냄'
+                assert b['series']['market'] == '증시 한눈에' and b['brand_name'] == '상화의 생활 노트' and b['invest_channel'] == 'tistory', b
+                no_overflow('1.7.0 설정 말투')
+                shot('72-pro170-voice')
+                # ── 4) 설정 > 참고 글 틀: 틀 뽑기 → 저장 (원문 없이 구성·지문만) → 베낀 원고는 발행 전 검사가 막음 → 끄기·지우기
+                goto_hash('settings/templates')
+                ts = page.locator('#sec-templates')
+                expect(ts).to_contain_text('저장한 틀이 없어')
+                ts.locator('select[aria-label="틀을 쓸 글 종류"]').select_option('adpost')
+                ts.locator('input[placeholder="예: 가습기 1위 글"]').fill('가습기 1위 글')
+                ts.locator('input[type=number]').fill('7')
+                ts.locator('textarea').fill(REF)
+                ts.get_by_role('button', name='틀 뽑기').click()
+                expect(ts.locator('.okbox')).to_contain_text('흐름: 개념 → 추천·고르기 → FAQ · 분량 333자 · 사진 7장')
+                ts.get_by_role('button', name='이 틀 저장').click()
+                expect(page.locator('#toast')).to_contain_text('틀을 저장했어')
+                b = [c for c in mock.calls if c['path'] == 'templates' and c['method'] == 'POST'][-1]['body']
+                assert set(b) == {'kind', 'name', 'outline', 'stats', 'fp'} and b['kind'] == 'adpost' and b['name'] == '가습기 1위 글', b
+                dumped = json.dumps(b, ensure_ascii=False)
+                assert '물통 입구 크기예요' not in dumped and '코가 바짝 마르죠' not in dumped, '원문 문장을 보내지 않음'
+                assert len(b['fp']) > 200 and all(isinstance(x, int) for x in b['fp'])
+                item = ts.locator('.list .item', has_text='가습기 1위 글')
+                expect(item).to_contain_text('애드포스트 유입 글')
+                goto_hash('content/post/' + C)
+                expect(page.locator('#view')).to_contain_text('글자 넘게 똑같은 부분이 있어')
+                goto_hash('settings/templates')
+                item = page.locator('#sec-templates .list .item', has_text='가습기 1위 글')
+                item.get_by_role('button', name='끄기').click()
+                expect(page.locator('#sec-templates .list .item', has_text='가습기 1위 글')).to_contain_text('(꺼짐)')
+                assert [c for c in mock.calls if re.fullmatch(r'templates/[0-9a-f-]{36}', c['path']) and c['method'] == 'POST'][-1]['body'] == {'active': False}
+                dl = page.locator('#sec-templates .list .item', has_text='가습기 1위 글').locator('.side button').nth(1)  # 누르면 글자가 바뀌어서 자리로 찾음
+                expect(dl).to_have_text('지우기')
+                dl.click()
+                expect(dl).to_have_text('지울까? 한 번 더 눌러줘')
+                dl.click()
+                expect(page.locator('#toast')).to_contain_text('지웠어')
+                expect(page.locator('#sec-templates')).to_contain_text('저장한 틀이 없어')
+                no_overflow('1.7.0 설정 틀')
+                # ── 5) 이미지: 썸네일·정보 카드는 앱이 그려서 연결, 사진 사이트 탭, 공공누리 출처
+                goto_hash('content/post/' + P)
+                studio = page.locator('section.studio')
+                expect(studio.locator('.slot').nth(0)).to_contain_text('(썸네일) 제목 카드')
+                studio.locator('.slot').nth(0).get_by_role('button', name='썸네일 만들기').click()
+                expect(sheet.locator('canvas.cardprev')).to_be_visible()
+                expect(sheet.locator('.chips button[aria-pressed="true"]')).to_have_text('썸네일 (대표 이미지 1:1)')
+                expect(sheet).to_contain_text('카드 아래 작은 글씨: 기준 2026년 11월 기준')
+                sheet_shot('73-pro170-thumb')
+                n0 = len([c for c in mock.calls if c['path'] == 'images/upload'])
+                sheet.get_by_role('button', name=re.compile('이 카드 쓰기')).click()
+                expect(page.locator('#toast')).to_contain_text('사진 1에 연결했어')
+                up = [c for c in mock.calls if c['path'] == 'images/upload']
+                assert len(up) == n0 + 1, '한 번 눌러 한 번 올림'
+                meta = up[-1]['body']['meta']
+                assert meta['kind'] == 'card' and meta['card_label'] == '썸네일' and meta['purpose'] == 'general' and meta['link'] is True, meta
+                assert up[-1]['body']['mime'] == 'image/png' and up[-1]['body']['size'] > 3000, (up[-1]['body']['mime'], up[-1]['body']['size'])
+                expect(studio.locator('.slot').nth(0).get_by_role('button', name='다시 그리기')).to_be_visible()
+                studio.locator('.slot').nth(1).get_by_role('button', name='정보 카드 만들기').click()
+                expect(sheet.locator('.chips button[aria-pressed="true"]')).to_have_text('체크리스트 — 2. 가습기 종류')
+                sheet.get_by_role('button', name=re.compile('이 카드 쓰기')).click()
+                expect(page.locator('#toast')).to_contain_text('사진 2에 연결했어')
+                meta = [c for c in mock.calls if c['path'] == 'images/upload'][-1]['body']['meta']
+                assert meta['card_label'] == '정보 카드' and meta['purpose'] == 'blog_body', meta
+                # 사진 사이트: Pixabay 키만 있으면 Pixabay 먼저, 탭으로 Pexels
+                reload_keys(pixabay=True, ecos=True)
+                goto_hash('content/post/' + P)
+                n1 = len([c for c in mock.calls if c['path'] == 'stock/search'])
+                page.locator('section.studio .slot').nth(2).get_by_role('button', name='실제 사진 찾기').click()
+                seg = sheet.locator('.seg[aria-label="사진 사이트"]')
+                expect(seg.locator('button')).to_have_text(['Pixabay', 'Pexels'])
+                expect(seg.locator('button[aria-pressed="true"]')).to_have_text('Pixabay')
+                expect(sheet.get_by_role('link', name='Photos provided by Pixabay')).to_have_attribute('href', 'https://pixabay.com')
+                expect(sheet.locator('.grid2 .pick')).to_have_count(3)
+                q1 = [c for c in mock.calls if c['path'] == 'stock/search'][n1:]
+                assert q1 and q1[-1]['query']['provider'] == ['pixabay'], q1[-1]['query'] if q1 else None
+                seg.get_by_role('button', name='Pexels').click()
+                expect(sheet.locator('.seg[aria-label="사진 사이트"] button[aria-pressed="true"]')).to_have_text('Pexels')
+                expect(sheet.locator('.grid2 .pick')).to_have_count(3)
+                assert [c for c in mock.calls if c['path'] == 'stock/search'][-1]['query']['provider'] == ['pexels']
+                sheet_shot('74-pro170-stock')
+                close_sheet()
+                # Unsplash: 검색만 앱에서, 사진은 Unsplash 페이지에서 받아 '받은 파일 올리기' (앱이 복사해 두지 않음 — API 규칙)
+                reload_keys(pixabay=True, unsplash=True, ecos=True)
+                goto_hash('content/post/' + P)
+                page.locator('section.studio .slot').nth(2).get_by_role('button', name='실제 사진 찾기').click()
+                expect(sheet.locator('.seg[aria-label="사진 사이트"] button')).to_have_text(['Pixabay', 'Unsplash', 'Pexels'])
+                sheet.locator('.seg[aria-label="사진 사이트"]').get_by_role('button', name='Unsplash').click()
+                expect(sheet.locator('.grid2 .pick')).to_have_count(3)
+                assert [c for c in mock.calls if c['path'] == 'stock/search'][-1]['query']['provider'] == ['unsplash']
+                n_sel = len([c for c in mock.calls if c['path'] == 'stock/select'])
+                sheet.locator('.grid2 .pick').nth(1).click()
+                expect(sheet.get_by_role('button', name=re.compile('이 사진 쓰기'))).to_have_count(0)
+                expect(sheet).to_contain_text('Unsplash API 규칙상 앱이 사진을 복사해 두지 않아')
+                expect(sheet.get_by_role('link', name='Unsplash에서 이 사진 받기 ↗')).to_have_attribute('href', 'https://www.pexels.com/photo/1002/')
+                sheet.get_by_role('button', name='받은 파일 올리기 → 사진 3').click()
+                expect(sheet.get_by_label('이 사진은 어디서 났어?')).to_have_value('external')
+                expect(sheet.locator('input[placeholder="예: Photo by 사진가 on Unsplash"]')).to_have_value('Photo by 사진가 2 on Unsplash')
+                assert len([c for c in mock.calls if c['path'] == 'stock/select']) == n_sel, 'Unsplash 사진은 서버에 고르기를 안 보냄'
+                close_sheet()
+                # 공공누리 제1유형: 출처를 안 적으면 안 올림, 적으면 출처와 같이
+                page.locator('section.studio .slot').nth(2).get_by_role('button', name='파일 올리기').click()
+                sheet.get_by_label('이 사진은 어디서 났어?').select_option('kogl')
+                expect(sheet).to_contain_text('출처 (공공누리 제1유형 — 꼭 적어줘)')
+                sheet.locator('input[type=file]').set_input_files(str(FIX / 'img' / 'exif.jpg'))
+                expect(sheet).to_contain_text('80×60')
+                sheet.get_by_label('내가 찍었거나 쓸 권한이 있는 사진이야').check()
+                n2 = len([c for c in mock.calls if c['path'] == 'images/upload'])
+                sheet.get_by_role('button', name='올리고 사진 3에 연결').click()
+                expect(page.locator('#toast')).to_contain_text('공공누리 사진은 출처를 적어야 해')
+                assert len([c for c in mock.calls if c['path'] == 'images/upload']) == n2
+                sheet.locator('input[placeholder^="예: 문화체육관광부"]').fill('문화체육관광부 정책브리핑(korea.kr)')
+                sheet.get_by_role('button', name='올리고 사진 3에 연결').click()
+                expect(page.locator('#toast')).to_contain_text('사진 3에 연결했어')
+                meta = [c for c in mock.calls if c['path'] == 'images/upload'][-1]['body']['meta']
+                assert meta['source_type'] == 'kogl' and meta['attribution'] == '문화체육관광부 정책브리핑(korea.kr)', meta
+                expect(page.locator('section.studio .slot').nth(2)).to_contain_text('출처: 문화체육관광부 정책브리핑(korea.kr) (공공누리 제1유형)')
+                no_overflow('1.7.0 이미지')
+                shot('75-pro170-images')
+            finally:
+                close_sheet()
+                mock.posts = [x for x in mock.posts if x['id'] not in (P, M, C)]
+                mock.jobs = [j for j in mock.jobs if j.get('post_id') not in (P, M, C)]
+                mock.templates, mock.revisions = [], {}
+                for k, v in saved.items():
+                    if v is None:
+                        mock.settings.pop(k, None)
+                    else:
+                        mock.settings[k] = v
+                reload_keys()
+        check('1.7.0 전문성·사람 말투: AI 말투 점수·다듬기 요청·이전 본문 되돌리기(두 번)·기준/용어 상자·출처 번호·참고 자료 서식 복사·숫자 확인표와 한국은행 대조·말투 카드(기본·내 글)·시리즈·투자 블로그·참고 글 틀(원문 없이)과 베끼기 검사·썸네일/정보 카드 그려서 연결·사진 사이트 탭·공공누리 출처', t_pro_170)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():

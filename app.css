@@ -362,3 +362,22 @@ canvas.cropcv{max-width:100%}
 .post .gprompt .gp-h b{font-size:12.5px;color:var(--muted);font-weight:600}
 .post .gprompt p{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .item .del{color:var(--late)}
+
+/* 1.7.0 전문가 틀 · 사람 말투 · 숫자 확인표 · 정보 카드 */
+.post p.basis{background:var(--chip);border-radius:10px;padding:10px 12px;font-size:14px;color:var(--ink)}
+.post p.term{background:var(--accent-soft);border-left:4px solid var(--accent);border-radius:8px;padding:10px 12px;font-size:14.5px}
+.post sup.fn{font-size:.7em;color:var(--muted);margin-left:1px}
+.post .img.app{border-style:solid;background:var(--accent-soft)}
+ul.hits{margin:0;padding-left:20px;font-size:14px;display:flex;flex-direction:column;gap:4px}
+pre.revbody,pre.voicecard{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;font-size:13.5px;line-height:1.6;background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0;max-height:320px;overflow:auto}
+.voicebox{border:1px solid var(--line);border-radius:12px;padding:12px}
+table.figs{border-collapse:collapse;font-size:13.5px;min-width:100%}
+table.figs th,table.figs td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+table.figs th{background:var(--bg);font-weight:600}
+table.figs .bad{color:var(--late)}
+canvas.cardprev{display:block;width:100%;max-width:560px;height:auto;border-radius:10px;border:1px solid var(--line);background:var(--chip)}
+.chips .copy[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+ul.hits li.more{color:var(--muted);list-style:none;margin-left:-20px;font-size:13px}
+ul.figcheck{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+ul.figcheck li{border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px;min-width:0}
+ul.figcheck small{color:var(--muted);overflow-wrap:anywhere}

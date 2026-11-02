@@ -2,7 +2,7 @@
 // 상품 사진(+마스크)과 AI 배경을 이 기기 안에서 작게 줄여 픽셀만 보고 '추정'해 — 서버·외부 AI로 보내지 않음 (0원).
 // 픽셀만으로는 실제 렌즈·광원·카메라 각도를 알 수 없어서 모든 값은 추정이고 확신 정도(confidence)를 같이 줌. 화면은 '추천값'으로만 보여주고,
 // 사용자가 '추천값 적용'을 눌러야 바뀌며, 그 뒤에도 슬라이더로 고칠 수 있음. 상품 픽셀은 여기서 읽기만 함.
-import { cleanLayer, PRODUCT_PURPOSES, PRODUCT_PLACES } from './images.js?v=1.6.0';
+import { cleanLayer, PRODUCT_PURPOSES, PRODUCT_PLACES } from './images.js?v=1.7.0';
 
 const lum = (r, g, b) => (0.299 * r + 0.587 * g + 0.114 * b) / 255;
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);

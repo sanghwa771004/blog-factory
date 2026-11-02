@@ -178,3 +178,70 @@ test('DB 오류 문구와 기타 도우미', () => {
   assert.ok(!P.typeOkHere('experience_review', {}) && P.typeOkHere('experience_review', { experience: true }));
   assert.ok(P.VAGUE_DISCLOSURE.test('수수료를 제공받을 수 있습니다'));
 });
+
+// ───────── 1.7.0 전문성·사람 말투 ─────────
+const P17 = new Function(pure + `\nreturn { parseBody, exportHtml, exportPlain, viewHtml, buildWritePrompt, buildPolishPrompt, normalizePolish, voiceCard, VOICE_PRESETS, AI_PHRASE_WORDS, markLines, isAppSlot, dbMsg };`)();
+
+test('1.7.0 본문 형식: [기준]·[용어] 상자, 출처 번호 [^n], 앱이 그리는 사진 자리가 앱(checks.js)과 같게 읽힘', async () => {
+  const app = await import('../checks.js');
+  const body = '[이미지: (썸네일) 제목 카드]\n[프롬프트: 앱이 그리는 썸네일 — 제미나이 필요 없음]\n## 전기요 고를 때\n[기준: 2026년 11월 기준 · 참고: 한국전기안전공사]\n[용어: KC 인증 — 국가가 안전 기준을 확인했다는 표시]\n전기요는 KC 인증부터 봐요[^1].\n| 항목 | 볼 것 |\n|---|---|\n| 소재 | 세탁 |\n[이미지: (정보 카드) 고르는 기준 표]\n[프롬프트: 앱이 그리는 정보 카드 — 제미나이 필요 없음]';
+  const mine = P17.parseBody(body).map((b) => [b.t, b.text || '', b.term || '']);
+  const theirs = app.parseBody(body).map((b) => [b.t, b.text || '', b.term || '']);
+  assert.deepEqual(mine, theirs);
+  assert.deepEqual(mine.filter((b) => b[0] === 'basis' || b[0] === 'term'), [['basis', '2026년 11월 기준 · 참고: 한국전기안전공사', ''], ['term', '국가가 안전 기준을 확인했다는 표시', 'KC 인증']]);
+  assert.ok(P17.isAppSlot('(썸네일) 제목 카드') && P17.isAppSlot('(정보 카드) 표') && !P17.isAppSlot('창가 제습기'));
+  for (const t of ['(썸네일) 제목 카드', '(정보 카드) 표', '창가 제습기', ' (정보  카드) x']) assert.equal(P17.isAppSlot(t), app.isAppDrawnSlot(t), t);
+  const d = { body, link: '', program_ids: [], sources: [{ title: '한국전기안전공사 안내', url: 'https://www.kesco.or.kr/', checked_at: '2026-11-02' }, { title: '', url: 'javascript:alert(1)' }] };
+  const html = P17.exportHtml(d, prog);
+  assert.ok(html.includes('📌 이 글의 기준') && html.includes('background-color:#f2f4f7') && html.includes('용어 풀이 · KC 인증') && html.includes('background-color:#eef3fb'));
+  assert.ok(html.includes('<sup style="font-size:.72em;color:#888;">[1]</sup>'), '출처 번호는 작은 [1]');
+  assert.ok(html.includes('<b>참고 자료</b>') && html.includes('[1] 한국전기안전공사 안내 (2026-11-02 확인)') && !html.includes('javascript:'), '참고 자료는 안전한 주소만');
+  assert.ok(html.includes('여기에 앱에서 만든 썸네일 넣기') && html.includes('여기에 앱에서 만든 정보 카드 넣기') && !html.includes('제미나이 필요 없음'), '앱이 그리는 자리 안내, 프롬프트 줄은 빠짐');
+  const plain = P17.exportPlain(d, prog);
+  assert.ok(plain.includes('📌 이 글의 기준: 2026년 11월 기준') && plain.includes('※ 용어 풀이 · KC 인증: 국가가') && plain.includes('봐요[1].') && /참고 자료\n\[1\] 한국전기안전공사 안내 \(2026-11-02 확인\) https:\/\/www\.kesco\.or\.kr\//.test(plain));
+  const view = P17.viewHtml(d);
+  assert.ok(view.includes('class="basis"') && view.includes('class="term"') && view.includes('<sup class="fn">[1]</sup>') && view.includes('앱이 그려줘') && view.includes('class="srcs"'));
+  assert.ok(!P17.exportHtml({ ...d, sources: [] }, prog).includes('참고 자료'), '출처가 없으면 목록도 없음');
+});
+
+test('1.7.0 말투 카드: 앱(checks.js)과 같은 기본 말투, 저장한 카드가 있으면 그 카드', async () => {
+  const app = await import('../checks.js');
+  for (const k of Object.keys(app.VOICE_PRESETS)) assert.equal(P17.VOICE_PRESETS[k].card, app.VOICE_PRESETS[k].card, k);
+  assert.deepEqual(Object.keys(P17.VOICE_PRESETS), Object.keys(app.VOICE_PRESETS));
+  const cases = [{}, { voice: { general: { preset: 'calm' } } }, { voice: { general: { preset: 'calm', card: '반말로 짧게 써.' } } }, { voice: { invest: { preset: 'friendly' } } }, { voice: { general: { preset: 'nope' } } }];
+  for (const st of cases) for (const sc of ['general', 'invest']) assert.equal(P17.voiceCard(st, sc), app.voiceCard(st, sc), JSON.stringify(st) + sc);
+  const wp = P17.buildWritePrompt({ keyword: '원룸 가습기 세척', channel: ch.naver_blog, programs: [prog.coupang_partners], contentType: '', len: '2500', products: [], recent: [], today: '2026-11-03', allowed: ['how_to'], voice: '반말로 짧게 써.' });
+  assert.ok(wp.includes('- 말투 카드') && wp.includes('반말로 짧게 써.') && !/undefined|null/.test(wp));
+  // 앱 'AI 말투 점수'가 잡는 말을 금지 목록으로, 전문가 틀([기준]·[용어]), 썸네일·정보 카드 자리
+  for (const ph of ['알아보겠습니다', '결론적으로', '하는 것이 중요합니다', '다양한', '도움이 되셨기를', '많은 분들이']) assert.ok(wp.includes(ph), ph);
+  assert.ok(wp.includes('[기준: 이 글의 기준 — 예: 2026년 11월 기준]') && wp.includes('[용어: 용어 — 한 줄 풀이]') && wp.includes('출처 번호'), '전문가 틀');
+  assert.ok(wp.includes('[이미지: (썸네일) 제목 카드]') && wp.includes('[이미지: (정보 카드)') && wp.includes('깔끔한 일러스트'), '앱이 그리는 자리·일러스트 위주');
+  const sns = P17.buildWritePrompt({ keyword: 'x', channel: ch.threads, programs: [], contentType: 'sns_short', products: [], recent: [], today: '2026-11-03', allowed: ['sns_short'], voice: '반말로 짧게 써.' });
+  assert.ok(!sns.includes('- 말투 카드') && !sns.includes('[기준:') && !sns.includes('(썸네일)'), 'SNS 글은 블로그 틀을 강제하지 않음');
+  // 문서(자동 작가 프롬프트)의 금지 목록과 같은 말
+  const doc = readFileSync(new URL('../docs/auto-writer-prompt.md', import.meta.url), 'utf8');
+  assert.ok(doc.includes(P17.AI_PHRASE_WORDS), '자동 작가 프롬프트 규칙 15와 같은 금지 목록');
+});
+
+test('1.7.0 말투 다듬기: 사진·링크 자리 줄이 그대로여야 저장, 제목은 고를 때만', () => {
+  const old = '[이미지: (썸네일) 제목 카드]\n## 고를 때\n가습기는 세척이 쉬운 것이 중요합니다. 다양한 제품이 있습니다.\n[링크: 가격 보기]\n[이미지: 창가 가습기]';
+  const good = '[이미지: (썸네일) 제목 카드]\n## 고를 때\n가습기는 세척이 쉬워야 오래 써요. 생각보다 종류가 많거든요.\n[링크: 가격 보기]\n[이미지: 창가 가습기]';
+  assert.deepEqual(P17.normalizePolish({ body: good, titles: [] }, old), { body: good });
+  assert.deepEqual(P17.normalizePolish({ body: good, titles: ['가습기 세척 쉬운 것 고르는 법', ''] }, old).titles, ['가습기 세척 쉬운 것 고르는 법']);
+  assert.throws(() => P17.normalizePolish({ body: good.replace('[링크: 가격 보기]', '[링크: 최저가 보기]') }, old), (e) => e.code === 'marks_changed');
+  assert.throws(() => P17.normalizePolish({ body: good.replace('[이미지: 창가 가습기]\n', '').replace('[링크: 가격 보기]', '[이미지: 창가 가습기]\n[링크: 가격 보기]') + '\n끝' }, old), (e) => e.code === 'marks_changed', '순서가 바뀌어도 거절');
+  assert.throws(() => P17.normalizePolish({ body: '짧아' }, old), (e) => e.code === 'empty_completion');
+  assert.throws(() => P17.normalizePolish([], old), (e) => e.code === 'invalid_json');
+  assert.deepEqual(P17.markLines(' [이미지: a]\n본문\n[링크: b] \n[내 경험: c]'), ['[이미지: a]', '[링크: b]']);
+  const pp = P17.buildPolishPrompt({ title: '가습기', body: old, voice: P17.VOICE_PRESETS.calm.card, note: '더 짧게' });
+  assert.ok(pp.includes(P17.VOICE_PRESETS.calm.card) && pp.includes('[요청 메모 — 이것부터] 더 짧게') && pp.includes('글자 하나도 바꾸지 말고') && pp.includes(old) && !/undefined|null/.test(pp));
+  assert.ok(P17.buildPolishPrompt({ title: '', body: old, voice: '', retry: true }).includes('지난번 답은 사진·링크 자리 줄이 바뀌어서'));
+  assert.equal(P17.dbMsg({ code: 'tool_error', message: 'ERROR:  P0001: polish changed image or link lines' }), '사진·링크 자리 줄이 바뀌어서 앱이 저장하지 않았어. 다시 요청해줘.');
+});
+
+test('1.7.0 말투 다듬기 기준이 DB(set_polish)와 같음: 줄 앞뒤 공백만 무시하고 [이미지|링크]로 시작하는 줄을 순서대로 비교', () => {
+  const M021 = readFileSync(new URL('../supabase/migrations/021_pro_voice_1_7_0.sql', import.meta.url), 'utf8');
+  assert.ok(M021.includes("where btrim(l.t) ~ '^\\[(이미지|링크)'"), 'DB 기준');
+  assert.ok(M021.includes("raise exception 'polish changed image or link lines'"));
+  assert.match(html, /markLines = b => String\(b \|\| ""\)\.split\("\\n"\)\.map\(l => l\.trim\(\)\)\.filter\(l => \/\^\\\[\(이미지\|링크\)\/\.test\(l\)\)/);
+});

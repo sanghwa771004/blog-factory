@@ -112,6 +112,13 @@ export function parseBody(md) {
     // full: 줄 전체가 [이미지: …] 인 '사진 자리' (images.js 의 parseSlots·countImg 와 같은 기준 → 이미지 연결 순서가 맞음)
     else if (/^\[이미지/.test(l)) blocks.push({ t: 'img', text: l.replace(/^\[이미지:?\s*|\]$/g, ''), full: /^\[이미지[^\]]*\]$/.test(l) });
     else if (/^\[링크/.test(l)) blocks.push({ t: 'cta', text: l.replace(/^\[링크\s*\d*\s*:?\s*|\]$/g, '') });
+    // 1.7.0 전문가 틀: "[기준: 11월 3일 장 마감 · 참고: 한국거래소]" = 이 글의 기준 상자, "[용어: PER — 주가를 주당순이익으로 나눈 값]" = 용어 풀이 상자
+    else if (BASIS_LINE.test(l)) blocks.push({ t: 'basis', text: l.replace(/^\[기준\s*:?\s*/, '').replace(/\]\s*$/, '').trim() });
+    else if (TERM_LINE.test(l)) {
+      const inner = l.replace(/^\[용어\s*:?\s*/, '').replace(/\]\s*$/, '').trim();
+      const m = inner.match(/^(.{1,40}?)\s*(?:—|–|-|:)\s*(.+)$/);
+      blocks.push({ t: 'term', term: m ? m[1].trim() : inner, text: m ? m[2].trim() : '' });
+    }
     // 1.6.0: "> " 줄은 눈에 띄게 바탕색을 칠하는 핵심 상자 (예전엔 그냥 문단)
     else if (/^>\s?/.test(l)) blocks.push({ t: 'note', text: l.replace(/^>\s?/, '') });
     else blocks.push({ t: 'p', text: l });
@@ -120,18 +127,26 @@ export function parseBody(md) {
   return blocks;
 }
 export const PROMPT_LINE = /^\s*\[프롬프트/;
+export const BASIS_LINE = /^\[기준\s*:/;
+export const TERM_LINE = /^\[용어\s*:/;
+// 1.7.0: 출처 번호 "[^1]" — 글 끝 '참고 자료'의 그 번호 (sources 순서)
+export const FOOTNOTE = /\[\^(\d{1,2})\]/g;
+// 1.7.0: 앱이 그리는 이미지 자리 — "[이미지: (정보 카드) 지수 표]", "[이미지: (썸네일) 제목 카드]" (제미나이 필요 없음)
+export const INFO_CARD_SLOT = /^\s*\(정보\s*카드\)/;
+export const THUMB_SLOT = /^\s*\(썸네일\)/;
+export const isAppDrawnSlot = (text) => INFO_CARD_SLOT.test(String(text || '')) || THUMB_SLOT.test(String(text || ''));
 const promptTextOf = (l) => l.trim().replace(/^\[프롬프트\s*\d*\s*:?\s*/, '').replace(/\]\s*$/, '').trim();
 // 사진 자리(줄 전체가 [이미지: …])마다 순서대로 { n, text: 사진 설명, prompt: 제미나이 프롬프트('' = 없음) }
 export function promptsOf(body) {
   const out = [];
-  for (const b of parseBody(body)) if (b.t === 'img' && b.full) out.push({ n: out.length + 1, text: b.text, prompt: b.prompt || '' });
+  for (const b of parseBody(body)) if (b.t === 'img' && b.full) out.push({ n: out.length + 1, text: b.text, prompt: b.prompt || '', app: isAppDrawnSlot(b.text) });
   return out;
 }
 // 본문 글자 수 (공백 포함) — 독자가 읽는 글만: 소제목·문단·목록·표 칸·핵심 상자. 사진 자리·프롬프트·링크 자리·강조 표시(**, ==)는 빼고 셈
 export function bodyChars(body) {
   let n = 0;
   for (const b of parseBody(body)) {
-    const parts = b.t === 'ul' ? b.items : b.t === 'table' ? b.rows.flat() : (b.t === 'img' || b.t === 'cta') ? [] : [b.text || ''];
+    const parts = b.t === 'ul' ? b.items : b.t === 'table' ? b.rows.flat() : (b.t === 'img' || b.t === 'cta') ? [] : b.t === 'term' ? [b.term, b.text] : [b.text || ''];
     for (const s of parts) n += stripMd(s).replace(ME_RE, '').trim().length;
   }
   return n;
@@ -166,7 +181,7 @@ export function compatOf(programId, channelId, compat) {
 
 // ───────── 문장 도우미 ─────────
 // **굵게** 와 ==바탕색 강조== (1.6.0) 표시를 뺀 글
-const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/==(.+?)==/g, '$1');
+const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/==(.+?)==/g, '$1').replace(FOOTNOTE, '');
 export function sentences(body) {
   const out = [];
   for (const b of parseBody(body)) {
@@ -336,6 +351,162 @@ export function linkTooEarly(body) {
 // ctx: { programs: {id: program}, channels: {id: channel}, compat: [], links: [], products: [], others: [{id, title, body}], today: 'YYYY-MM-DD',
 //        focus: 설정의 주력 주제 (없으면 주제 검사 안 함), focusTerms: 설정의 주력 주제 낱말 (쉼표로) }
 // 결과: { errors, warnings, tips } — errors 가 하나라도 있으면 '발행 준비 완료' 불가
+
+// ───────── 1.7.0 전문성·사람 말투 ─────────
+// 기본 말투 카드 (설정 > 말투에서 고르거나, 내 글을 붙여넣어 '내 말투'로 바꿈). 자동 작가 프롬프트·Claude 안 글공장도 같은 글을 씀 (tests/sync.test.js)
+export const VOICE_PRESETS = {
+  friendly: { label: '친근한 해요체 블로거', card: '해요체(~해요, ~거든요, ~더라고요)로 옆 사람에게 말하듯 써. 짧은 문장과 긴 문장을 섞고 2~3문장마다 줄을 바꿔. 가끔 독자에게 물어봐("이런 적 있죠?"). 이모티콘은 거의 안 써. 의견은 "개인적으로는 ~가 낫다고 봐요"처럼 이유와 같이.' },
+  calm: { label: '차분한 정보형', card: '해요체로 차분하게, 핵심부터 말하고 이유를 붙여. 감탄·과장 없이 숫자와 조건으로 설명해. 문단은 3~4문장, 문장 길이는 섞어서.' },
+  invest: { label: '숫자로 말하는 투자 해설', card: '해요체로 차분하게, 숫자는 날짜·출처와 같이 써. 가끔 "~했습니다"를 섞어 무게를 줘. 전망은 단정하지 말고 "지켜볼 점"으로. 전문용어는 처음 나올 때 한 줄로 풀어줘.' },
+};
+export const VOICE_SCOPES = { general: { label: '일반 글 (쿠팡·토스·애드포스트·오늘 이슈)', def: 'friendly' }, invest: { label: '투자 글 (증시·종목)', def: 'invest' } };
+// 말투 카드: 설정에 저장된 카드가 없으면 그 범위의 기본 말투
+export function voiceCard(settings, scope = 'general') {
+  const v = ((settings && settings.voice) || {})[scope] || {};
+  const card = String(v.card || '').trim();
+  if (card) return card;
+  const preset = VOICE_PRESETS[v.preset] || VOICE_PRESETS[(VOICE_SCOPES[scope] || VOICE_SCOPES.general).def];
+  return preset.card;
+}
+
+// AI 티 점검 — 기계가 쓴 것처럼 보이는 습관을 찾아서 점수로 알려줌 (발행은 막지 않음). '사람 말투로 다듬기'의 기준
+export const AI_PHRASES = [
+  { re: /알아\s*(보겠습니다|볼게요|보도록\s*하겠습니다|봅시다)/, label: '"알아보겠습니다" 같은 예고' },
+  { re: /살펴\s*(보겠습니다|볼게요|보도록)/, label: '"살펴보겠습니다" 같은 예고' },
+  { re: /(이번|오늘)\s*(포스팅|글)\s*에서(는)?/, label: '"이번 포스팅에서는"' },
+  { re: /에\s*대해(서)?\s*(자세히|알아|살펴|정리해)/, label: '"~에 대해 자세히"' },
+  { re: /결론적으로|요약하자면|종합하자면|종합해\s*보면/, label: '"결론적으로" 같은 정리 말' },
+  { re: /(것이|게)\s*(중요합니다|중요해요|필수적입니다|필수입니다)/, label: '"~하는 것이 중요합니다"' },
+  { re: /다양한/, label: '"다양한"' },
+  { re: /효과적(인|으로)|효율적(인|으로)/, label: '"효과적인"' },
+  { re: /도움이\s*(되셨기를|되었으면|되었기를|되길)/, label: '"도움이 되셨기를" 마무리' },
+  { re: /^(마무리하며|마치며|끝으로)/, label: '"마치며" 같은 마무리' },
+  { re: /많은\s*분들(이|께서)/, label: '"많은 분들이"' },
+  { re: /(앞서|위에서)\s*(살펴본|알아본|말씀드린)\s*(바와\s*같이|것처럼)/, label: '"앞서 살펴본 바와 같이"' },
+  { re: /꼭\s*기억(하세요|해\s*두세요|해\s*주세요)/, label: '"꼭 기억하세요"' },
+];
+const endingOf = (t) => {
+  const s = String(t || '').replace(/[\s.!?…~^ㅎㅋ)\]"'”’]+$/u, '').replace(/\p{Extended_Pictographic}/gu, '');
+  return s.slice(-2);
+};
+// 독자가 읽는 문장만 (문단·핵심 상자·목록). 소제목·사진 자리·표는 빼고. lists=false 면 목록 항목도 빼고 (짧은 명사 항목이 문장 통계를 흐리지 않게)
+function readerSentences(body, lists = true) {
+  const out = [];
+  for (const b of parseBody(body)) {
+    const parts = b.t === 'p' || b.t === 'note' ? [b.text] : b.t === 'ul' && lists ? b.items : [];
+    for (const part of parts) for (const x of stripMd(part).replace(ME_RE, '').split(/(?<=[.!?。…])\s+/)) { const t = x.trim(); if (t.length >= 2) out.push(t); }
+  }
+  return out;
+}
+export const AI_TONE_GOOD = 85, AI_TONE_BAD = 70;
+export function aiTone(body) {
+  const hits = [];
+  let score = 100;
+  const sents = readerSentences(body);
+  const prose = readerSentences(body, false); // 합니다체 비율·문장 길이는 문단 문장으로만
+  const heads = parseBody(body).filter((b) => b.t === 'h').map((b) => stripMd(b.text));
+  // 1) 틀에 박힌 말
+  for (const ph of AI_PHRASES) {
+    const ex = sents.filter((x) => ph.re.test(x));
+    const hh = heads.filter((x) => ph.re.test(x));
+    const n = ex.length + hh.length;
+    if (!n) continue;
+    score -= Math.min(12, 4 * n);
+    hits.push({ kind: 'phrase', label: ph.label, n, examples: [...ex, ...hh].slice(0, 2).map((x) => clip(x)) });
+  }
+  // 2) 같은 어미가 4문장 넘게 줄줄이 (예: ~니다. ~니다. ~니다. ~니다.)
+  let run = 1, runs = 0, runEx = '';
+  for (let i = 1; i < sents.length; i++) {
+    const same = endingOf(sents[i]) && endingOf(sents[i]) === endingOf(sents[i - 1]);
+    run = same ? run + 1 : 1;
+    if (run === 4) { runs++; if (!runEx) runEx = endingOf(sents[i]); }
+  }
+  if (runs) { score -= Math.min(15, 6 * runs); hits.push({ kind: 'endings', label: `같은 어미(~${runEx})가 4문장 넘게 이어짐`, n: runs, examples: [] }); }
+  // 3) 딱딱한 합니다체 위주 (블로그는 해요체가 더 사람 같음)
+  const formal = prose.filter((x) => /(니다|니까)$/.test(endingOf(x) + '') || /니다[.!?]?$/.test(x)).length;
+  if (prose.length >= 8 && formal / prose.length > 0.6) { score -= 10; hits.push({ kind: 'formal', label: `합니다체가 ${Math.round((formal / prose.length) * 100)}% — 보고서처럼 딱딱해`, n: formal, examples: [] }); }
+  // 4) 문장 길이가 다 비슷함 (사람 글은 짧은 문장·긴 문장이 섞임)
+  if (prose.length >= 12) {
+    const L = prose.map((x) => x.length);
+    const mean = L.reduce((a, n) => a + n, 0) / L.length;
+    const sd = Math.sqrt(L.reduce((a, n) => a + (n - mean) ** 2, 0) / L.length);
+    if (mean > 0 && sd / mean < 0.3) { score -= 10; hits.push({ kind: 'uniform', label: `문장 길이가 다 비슷해 (평균 ${Math.round(mean)}자)`, n: 1, examples: [] }); }
+  }
+  // 5) 소제목이 전부 같은 모양 (모두 번호로 시작하거나 끝말이 같음)
+  if (heads.length >= 4) {
+    const numbered = heads.every((x) => /^\d+[.)]\s*/.test(x));
+    const tails = new Set(heads.map((x) => x.replace(/[?!.\s]+$/, '').slice(-2)));
+    if (numbered || tails.size === 1) { score -= 6; hits.push({ kind: 'heads', label: numbered ? '소제목이 전부 번호 목록 모양' : `소제목 끝이 전부 "${[...tails][0]}"`, n: heads.length, examples: heads.slice(0, 2).map((x) => clip(x, 40)) }); }
+  }
+  // 6) 3개짜리 목록을 계속 (AI가 자주 쓰는 틀)
+  const three = parseBody(body).filter((b) => b.t === 'ul' && b.items.length === 3).length;
+  if (three >= 3) { score -= 6; hits.push({ kind: 'lists', label: `항목 3개짜리 목록이 ${three}번`, n: three, examples: [] }); }
+  score = Math.max(0, Math.round(score));
+  const verdict = score >= AI_TONE_GOOD ? '사람 같음' : score >= AI_TONE_BAD ? '조금 딱딱함' : 'AI 티 남';
+  return { score, verdict, hits, sentences: sents.length };
+}
+
+// 잘 나가는 글 '틀'의 지문: 띄어쓰기를 뺀 글을 8글자씩 한 칸씩 밀며 잘라 만든 해시(정수). 원문은 저장하지 않고 이 숫자만 저장
+export const FP_WINDOW = 8, FP_MAX = 6000;
+const fnv = (str) => { let h = 0x811c9dc5; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); } return h | 0; };
+const fpText = (t) => String(t || '').replace(/[\s\p{P}\p{S}]/gu, '');
+export function fpOf(text) {
+  const t = fpText(text);
+  const out = [];
+  for (let i = 0; i + FP_WINDOW <= t.length && out.length < FP_MAX; i++) out.push(fnv(t.slice(i, i + FP_WINDOW)));
+  return out;
+}
+// 새 원고가 참고 글과 똑같은 문장을 가졌는지: 이어진 같은 조각 수(run)로 판단 — run 18 ≈ 25글자 넘게 똑같음
+export const REF_COPY_RUN = 18;
+export function refOverlap(body, templates) {
+  const res = { maxRun: 0, share: 0, name: '', example: '' };
+  const t = fpText(stripMd(String(body || '').split('\n').filter((l) => !/^\s*\[(이미지|프롬프트|링크)/.test(l)).join('\n')));
+  if (t.length < FP_WINDOW) return res;
+  for (const tp of templates || []) {
+    const set = new Set(Array.isArray(tp && tp.fp) ? tp.fp : []);
+    if (!set.size) continue;
+    let run = 0, best = 0, bestEnd = 0, hit = 0, total = 0;
+    for (let i = 0; i + FP_WINDOW <= t.length; i++) {
+      total++;
+      if (set.has(fnv(t.slice(i, i + FP_WINDOW)))) { hit++; run++; if (run > best) { best = run; bestEnd = i; } } else run = 0;
+    }
+    const share = total ? hit / total : 0;
+    if (best > res.maxRun || (best === res.maxRun && share > res.share)) {
+      res.maxRun = best; res.share = share; res.name = String(tp.name || '');
+      res.example = best ? t.slice(Math.max(0, bestEnd - best + 1), bestEnd + FP_WINDOW).slice(0, 40) : '';
+    }
+  }
+  return res;
+}
+
+// 숫자 확인표 (posts.figures): 투자 글의 숫자는 표의 값과 같아야 함 — 본문에만 있는 숫자를 찾아 알려줌
+const BIG_NUM = /[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[-+]?\d+\.\d+|[-+]?\d{3,}/g;
+const numVal = (s) => Number(String(s).replace(/,/g, ''));
+export function figureNumbers(figures) {
+  const out = new Set();
+  for (const f of Array.isArray(figures) ? figures : []) {
+    if (!f || typeof f !== 'object') continue;
+    for (const m of String(f.value ?? '').match(BIG_NUM) || []) { const v = numVal(m); if (Number.isFinite(v)) out.add(Math.abs(v)); }
+    const n = Number(f.value);
+    if (Number.isFinite(n)) out.add(Math.abs(n));
+  }
+  return out;
+}
+export function unlistedNumbers(body, figures) {
+  const have = figureNumbers(figures);
+  const out = [];
+  for (const sentence of readerSentences(body)) {
+    for (const m of sentence.matchAll(BIG_NUM)) {
+      const after = sentence.slice(m.index + m[0].length, m.index + m[0].length + 3);
+      if (/^\s*(년|월|일|분기|시|분|주|개월|위|번째|차|호|명|곳|개|장|가지|편)/.test(after)) continue; // 날짜·순서·개수
+      const v = Math.abs(numVal(m[0]));
+      if (!Number.isFinite(v) || (v >= 1900 && v <= 2100 && !/[.,]/.test(m[0]))) continue; // 연도
+      if (![...have].some((x) => Math.abs(x - v) <= Math.max(1e-9, x * 1e-6))) out.push({ value: m[0], sentence: clip(sentence) });
+    }
+  }
+  return out;
+}
+
 export function checkPost(post, ctx = {}) {
   const errors = [], warnings = [], tips = [];
   const E = (code, msg, fix, examples) => errors.push({ code, msg, fix: fix || '', examples: examples || [] });
@@ -418,6 +589,17 @@ export function checkPost(post, ctx = {}) {
     if (!INVEST_DISCLAIMER.test(stripMd(body))) W('invest_disclaimer', '투자 글인데 "투자 권유가 아니다"는 안내가 없어.', '끝에 "이 글은 공개된 정보를 정리한 것이고 투자 권유가 아니에요. 투자 판단과 책임은 본인에게 있어요." 같은 문장을 넣어줘.');
     const advice = sents.filter((s) => INVEST_ADVICE.test(s.text) && !INVEST_DISCLAIMER.test(s.text) && !/(아니|아닙|아님|않|말고|마세요)/.test(s.text)).map((s) => clip(s.text));
     if (advice.length) W('invest_advice', `사라·팔라·목표가처럼 투자를 권하는 문장이 ${advice.length}곳 있어.`, '사실(무슨 일이 있었고 숫자가 어땠는지)과 지켜볼 점으로 바꿔줘.', advice.slice(0, 3));
+  }
+  // 1.7.0 숫자 확인표: 투자 글은 숫자마다 날짜·출처를 표로 (본문 숫자가 표와 같은지 확인)
+  if ((ctype && ctype.invest) || (planKind && PLAN_KINDS[planKind].invest)) {
+    const figs = Array.isArray(post.figures) ? post.figures.filter((f) => f && typeof f === 'object') : [];
+    if (!figs.length) W('figures_missing', '투자 글인데 숫자 확인표가 비어 있어. 숫자마다 기준 날짜·출처가 있어야 믿을 수 있어.', '자동 작가가 다시 쓰거나, 본문 숫자의 출처를 확인해줘.');
+    else {
+      const un = unlistedNumbers(body, figs);
+      if (un.length) T('figure_unlisted', `숫자 확인표에 없는 숫자가 ${un.length}개 있어. 출처에서 확인한 숫자인지 봐줘.`, '', un.slice(0, 3).map((x) => `${x.value} — ${x.sentence}`));
+      const noSrc = figs.filter((f) => !String(f.source_url || '').trim() || !String(f.as_of || '').trim());
+      if (noSrc.length) W('figure_no_source', `숫자 확인표 ${noSrc.length}줄에 기준 날짜나 출처가 없어.`, '출처 주소와 기준 날짜를 넣거나 그 숫자를 빼줘.', noSrc.slice(0, 3).map((f) => `${f.label || ''} ${f.value ?? ''}`.trim()));
+    }
   }
   const oldSources = sources.filter((s) => s.checked_at && daysBetween(s.checked_at, today) > 180);
   if (oldSources.length) T('sources_old', `확인한 지 6개월이 넘은 출처가 ${oldSources.length}개 있어.`, '내용이 바뀌지 않았는지 다시 봐줘.');
@@ -514,6 +696,19 @@ export function checkPost(post, ctx = {}) {
     if (nLinks > SEO_RULES.maxLinks) W('too_many_links', `링크가 ${nLinks}개야. 링크가 많으면 광고 글로 보이기 쉬워 (앱 권장 ${SEO_RULES.maxLinks}개까지).`, '본문 중간 1곳, 끝 1곳으로 줄여줘.');
     if (cta && linkTooEarly(body)) W('link_too_early', '글 첫 부분에 링크가 있어 (앱 권장: 정보 먼저, 링크는 중간·끝).', '첫 소제목 앞에서는 링크 자리를 빼줘.');
     if (!hasExperience && !me && !planKind) W('no_own_experience', '직접 겪은 내용이 한 줄도 없어 (발행은 막지 않아). 안 써봤어도 내 상황 한 줄(내 방·내 물건·재 본 숫자·매장에서 본 것)이 있으면 다른 글과 달라져.', "원고 정보의 '내 경험' 칸에 적거나, 본문에 [내 경험] 자리를 넣고 '내 경험 채우기'로 채워줘.");
+  }
+
+  // 13) 1.7.0 AI 티·참고 글 베끼기 (블로그·사이트 글)
+  if (searchCh && body.length >= 400) {
+    const tone = aiTone(body);
+    const ex = tone.hits.slice(0, 3).map((x) => x.label + (x.examples && x.examples[0] ? ` — "${x.examples[0]}"` : ''));
+    if (tone.score < AI_TONE_BAD) W('ai_tone', `AI 말투 점수 ${tone.score}점 (${tone.verdict}). 기계가 쓴 것처럼 보이는 습관이 ${tone.hits.length}가지 있어.`, "원고 화면의 '사람 말투로 다듬기'를 누르거나 걸린 표현을 고쳐줘.", ex);
+    else if (tone.score < AI_TONE_GOOD) T('ai_tone', `AI 말투 점수 ${tone.score}점 (${tone.verdict}).`, '걸린 표현을 조금만 고치면 더 사람 같아.', ex);
+  }
+  if (Array.isArray(ctx.templates) && ctx.templates.length && body.length >= 200) {
+    const ov = refOverlap(body, ctx.templates);
+    if (ov.maxRun >= REF_COPY_RUN) E('ref_copy', `참고 글 틀(${clip(ov.name || '이름 없음', 20)})의 원문과 ${ov.maxRun + FP_WINDOW - 1}글자 넘게 똑같은 부분이 있어. 그대로 올리면 베낀 글이 돼.`, '그 부분을 내 말로 다시 써줘.', ov.example ? [ov.example] : []);
+    else if (ov.share >= 0.1) W('ref_similar', `참고 글 틀(${clip(ov.name || '이름 없음', 20)})과 표현이 ${Math.round(ov.share * 100)}% 겹쳐.`, '구성만 참고하고 문장은 새로 써줘.');
   }
 
   return { errors, warnings, tips };

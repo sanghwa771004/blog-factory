@@ -7,14 +7,14 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (f) => readFileSync(join(ROOT, f), 'utf8');
-const CLIENT = ['index.html', 'app.js', 'studio.js', 'cards.js', 'images.js', 'lib.js', 'checks.js'];
+const CLIENT = ['index.html', 'app.js', 'studio.js', 'cards.js', 'images.js', 'lib.js', 'checks.js', 'infocards.js'];
 
 test('화면 파일에는 키처럼 생긴 글자도, OpenAI·Pexels 직접 호출도 없음 (키는 서버에만)', () => {
   for (const f of CLIENT) {
     const t = read(f);
     assert.ok(!/sk-[A-Za-z0-9_-]{16,}/.test(t), f + ': 키처럼 생긴 글자가 있음');
-    assert.ok(!/api\.openai\.com|api\.pexels\.com|generativelanguage\.googleapis\.com|api\.cloudflare\.com/.test(t), f + ': 화면이 OpenAI·Pexels·Gemini·Cloudflare API를 직접 부름');
-    assert.ok(!/(OPENAI|PEXELS|GEMINI)_API_KEY\s*[:=]\s*['"`][^'"`]+|CF_API_TOKEN\s*[:=]\s*['"`][^'"`]+/.test(t), f + ': 키 값을 넣는 코드');
+    assert.ok(!/api\.openai\.com|api\.pexels\.com|generativelanguage\.googleapis\.com|api\.cloudflare\.com|pixabay\.com\/api\/\?|api\.unsplash\.com|ecos\.bok\.or\.kr\/api\/[A-Z]/.test(t), f + ': 화면이 OpenAI·Pexels·Gemini·Cloudflare·Pixabay·Unsplash·ECOS API를 직접 부름');
+    assert.ok(!/(OPENAI|PEXELS|GEMINI|PIXABAY|ECOS)_API_KEY\s*[:=]\s*['"`][^'"`]+|UNSPLASH_ACCESS_KEY\s*[:=]\s*['"`][^'"`]+|CF_API_TOKEN\s*[:=]\s*['"`][^'"`]+/.test(t), f + ': 키 값을 넣는 코드');
     assert.ok(!/AIza[0-9A-Za-z_-]{20,}/.test(t), f + ': Google API 키처럼 생긴 글자가 있음');
     assert.ok(!/Authorization['"]?\s*:|x-goog-api-key/i.test(t), f + ': 화면에서 외부 인증 머리글을 씀');
   }
@@ -25,7 +25,8 @@ test('서버는 키를 환경변수(Supabase Secrets)에서만 읽고, 화면으
   assert.match(ts, /Deno\.env\.get\("OPENAI_API_KEY"\)/);
   assert.match(ts, /Deno\.env\.get\("PEXELS_API_KEY"\)/);
   // 1.5.0: Gemini 키(GEMINI_API_KEY)도 같은 방식 — 화면에는 있음/없음만, 키 값은 공급자 호출(keys: providerKeys())에만
-  assert.match(ts, /const keysInfo = \(\) => \(\{ openai: !!keyOpenAI\(\), gemini: !!keyGemini\(\), pexels: !!\(Deno\.env\.get\("PEXELS_API_KEY"\) \?\? ""\), cloudflare: !!\(keyCf\(\)\.accountId && keyCf\(\)\.token\) \}\);/);
+  // 1.7.0: Pixabay·Unsplash·한국은행 ECOS 키도 같은 방식 — 화면에는 있음/없음(!!)만
+  assert.match(ts, /const keysInfo = \(\) => \(\{ openai: !!keyOpenAI\(\), gemini: !!keyGemini\(\), pexels: !!\(Deno\.env\.get\("PEXELS_API_KEY"\) \?\? ""\), cloudflare: !!\(keyCf\(\)\.accountId && keyCf\(\)\.token\),\n  pixabay: !!\(Deno\.env\.get\("PIXABAY_API_KEY"\) \?\? ""\), unsplash: !!\(Deno\.env\.get\("UNSPLASH_ACCESS_KEY"\) \?\? ""\), ecos: !!\(Deno\.env\.get\("ECOS_API_KEY"\) \?\? ""\) \}\);/);
   assert.match(ts, /const providerKeys = \(\) => \(\{ openai: keyOpenAI\(\), gemini: keyGemini\(\), cf: keyCf\(\) \}\);/);
   assert.match(ts, /Deno\.env\.get\("GEMINI_API_KEY"\)/);
   // Cloudflare 계정 ID·토큰도 Secrets 에서만 읽고, 생성 호출(runGeneration)에만 넘김
@@ -51,9 +52,10 @@ test('화면 보안 정책(CSP): 스크립트는 같은 곳만, 이미지는 Sup
   // 1.5.1: 배경 지우기(ONNX Runtime Web)를 돌리려고 WebAssembly 컴파일만 허용 — 'unsafe-eval'(자바스크립트 eval)·'unsafe-inline' 은 여전히 없음, 스크립트는 같은 곳만
   assert.match(csp, /script-src 'self' 'wasm-unsafe-eval';/);
   assert.ok(!/script-src[^;]*'unsafe-eval'/.test(csp) && !/script-src[^;]*'unsafe-inline'/.test(csp) && !/script-src[^;]*https?:/.test(csp));
-  assert.match(csp, /img-src 'self' data: blob: https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co https:\/\/images\.pexels\.com;/);
+  // 1.7.0: 사진 검색 결과 미리보기용으로 Pixabay·Unsplash 이미지 서버만 더함 (고른 사진은 서버가 내려받아 Supabase 에 저장)
+  assert.match(csp, /img-src 'self' data: blob: https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co https:\/\/images\.pexels\.com https:\/\/pixabay\.com https:\/\/cdn\.pixabay\.com https:\/\/images\.unsplash\.com;/);
   assert.match(csp, /connect-src 'self' https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co;/);
-  assert.ok(!/connect-src[^;]*(openai|pexels|googleapis|cloudflare)/.test(csp), '화면이 OpenAI·Pexels·Gemini·Cloudflare로 직접 연결하지 못하게');
+  assert.ok(!/connect-src[^;]*(openai|pexels|googleapis|cloudflare|pixabay|unsplash|bok\.or\.kr)/.test(csp), '화면이 OpenAI·Pexels·Gemini·Cloudflare·Pixabay·Unsplash·ECOS로 직접 연결하지 못하게');
 });
 
 test('이미지 저장소는 비공개 버킷 + 정책 없음 (서버 키로만, 화면은 서명 주소로만)', () => {

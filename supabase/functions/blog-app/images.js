@@ -809,10 +809,14 @@ const REAL_NEEDED = /(구성품|박스|포장(?!마차)|뒷면|라벨|원재료|
 // '(직접 찍기)'로 표시한 자리 — 자동 작가가 '내가 직접 찍을 수 있는 장면'으로 남긴 자리 (원본 사진이 있어야 다른 글과 달라짐)
 const OWN_PHOTO = /직접\s*(찍|촬영)/;
 export const isOwnPhotoSlot = (text) => OWN_PHOTO.test(String(text || ''));
+// 1.7.0 앱이 그리는 자리: "(정보 카드) 지수 표" · "(썸네일) 제목 카드" — 원고의 표·숫자·제목으로 앱이 PNG를 그림 (AI·사진 필요 없음)
+const APP_SLOT = /^\s*\((정보\s*카드|썸네일)\)/;
+export const isAppSlot = (text) => APP_SLOT.test(String(text || ''));
+export const appSlotKind = (text) => (/^\s*\(썸네일\)/.test(String(text || '')) ? 'thumb' : isAppSlot(text) ? 'info' : '');
 // '(직접 찍기)' 표시만 뺀 설명 (검색어·대체 텍스트·AI에 보내는 장면 설명에는 표시를 안 넣음)
 export const stripOwnMark = (text) => String(text || '').replace(/\(\s*직접\s*(찍기|촬영)\s*\)\s*/g, '').trim();
 // 대체 텍스트·검색어·AI에 보내는 장면 설명에서는 '(제품 사진)' 표시도 뺌 (1.5.0 — 자동 작가가 다는 표시. 판단에는 표시를 남긴 글을 씀)
-export const stripSlotMarks = (text) => stripOwnMark(text).replace(/\(\s*제품\s*사진\s*\)\s*/g, '').trim();
+export const stripSlotMarks = (text) => stripOwnMark(text).replace(/\(\s*제품\s*사진\s*\)\s*/g, '').replace(/^\s*\((정보\s*카드|썸네일)\)\s*/, '').trim();
 export function slotRisk(text) {
   if (isOwnPhotoSlot(text)) return { real: true, word: '직접 찍기', msg: "'직접 찍기'로 표시한 자리야. 네가 찍은 사진이 들어가야 다른 글과 달라져 — 휴대폰으로 찍어서 '파일 올리기'로 넣어줘." };
   const m = firstHit(REAL_NEEDED, String(text || ''));
@@ -1495,6 +1499,11 @@ export function slotInfo(slot, { post = null } = {}) {
       preset: pr.id, preset_label: (PRESETS[pr.id] || {}).label || pr.id, preset_why: pr.why, extra: true };
   }
   const text = String(s.text || '');
+  if (isAppSlot(text)) {
+    const thumb = appSlotKind(text) === 'thumb';
+    return { explains: stripSlotMarks(text) || (thumb ? '제목 카드' : '정보 카드'), why: thumb ? '홈판·글 목록에 보이는 대표 이미지 (매번 같은 디자인이라 채널처럼 보임)' : '본문의 표·숫자·목록을 한눈에 보이게',
+      own: false, product: false, ai: 'app', app: thumb ? 'thumb' : 'info', preset: '', preset_label: '', preset_why: '', extra: false };
+  }
   const own = isOwnPhotoSlot(text);
   const mark = /\(\s*제품\s*사진\s*\)/.test(text);
   const risk = slotRisk(text);
@@ -1815,12 +1824,15 @@ export function stripMetadata(bytes) {
 }
 
 // ───────── 출처·대체 텍스트·파일 이름 ─────────
-export const KIND_LABEL = { ai: 'AI 생성', stock: '실제 사진(Pexels)', upload: '직접 올림', card: '카드뉴스', composite: '상품 합성' };
+export const KIND_LABEL = { ai: 'AI 생성', stock: '실제 사진 (사진 사이트)', upload: '직접 올림', card: '카드뉴스', composite: '상품 합성' };
 // ───────── 이미지 출처 (1.3.1) ─────────
 // 파일을 올렸다고 직접 찍은 사진으로 보지 않음. 직접 올린 사진은 사용자가 출처를 골라야 하고(source_type), 안 고르면 '출처 확인 필요'
 // AI·Pexels·카드뉴스는 만든 방법(kind)으로 출처가 정해짐. 예전에 올린 사진(source_type 빈칸)은 '출처 확인 필요'로 둠 (직접 촬영으로 소급하지 않음)
-export const SOURCE_TYPES = { own: '직접 촬영', official: '공식 제공', external: '외부 제공' };  // 직접 올린 사진에서 고를 수 있는 출처
-export const ORIGIN_LABEL = { own: '직접 촬영', ai: 'AI 생성', external: '외부 제공', official: '공식 제공', card: '카드뉴스', composite: '상품 사진 + AI 배경', unknown: '출처 확인 필요' };
+export const SOURCE_TYPES = { own: '직접 촬영', official: '공식 제공', external: '외부 제공', kogl: '공공누리' };  // 직접 올린 사진에서 고를 수 있는 출처 (1.7.0 공공누리 제1유형)
+export const ORIGIN_LABEL = { own: '직접 촬영', ai: 'AI 생성', external: '외부 제공', official: '공식 제공', kogl: '공공누리 (출처 표시)', card: '카드뉴스', composite: '상품 사진 + AI 배경', unknown: '출처 확인 필요' };
+const PHOTO_SITE = { pexels: 'Pexels', pixabay: 'Pixabay', unsplash: 'Unsplash' };
+// 1.7.0 앱이 그린 정보 카드·썸네일은 라이선스 칸 앞부분에 이름이 있음 ('정보 카드 (앱에서 직접 만듦)')
+const cardName = (img) => { const m = /^(정보 카드|썸네일)/.exec(String((img && img.license) || '')); return m ? m[1] : ''; };
 export function originOf(img) {
   if (!img) return 'unknown';
   if (img.kind === 'ai') return 'ai';
@@ -1836,13 +1848,17 @@ export function originLabel(img) {
   // 1.5.0: 실제 사진(제품 사진 등)을 참고해서 AI가 만든 이미지 — 직접 찍은 사진처럼 보이지 않게 따로 표시 (1.5.1: 'AI 합성 이미지'라고 그대로 남김)
   if (o === 'ai' && img && img.composite) return 'AI 합성 이미지 (실제 사진 참고)';
   if (o === 'composite') return '원본 보존 합성 (상품 사진 + AI 배경)';
-  if (o === 'external' && img && img.kind === 'stock') return '외부 제공 (Pexels)';
+  if (o === 'external' && img && img.kind === 'stock') return `외부 제공 (${PHOTO_SITE[img.provider] || '사진 사이트'})`;
+  if (o === 'card' && cardName(img)) return `${cardName(img)} (앱에서 만듦)`;
   if (img && img.kind === 'upload' && o !== 'own') return ORIGIN_LABEL[o] + ' · 직접 올림';
   return ORIGIN_LABEL[o];
 }
 export function attributionFor(img) {
   if (!img) return '';
   if (img.provider === 'pexels') return `사진: ${img.author_name || '사진가'} (Pexels)`;
+  // 1.7.0: Pixabay(표시 의무는 없지만 남김)·Unsplash(앱에서 쓸 때 사진가·Unsplash 표기가 규칙)
+  if (img.provider === 'pixabay') return `사진: ${img.author_name || '사진가'} (Pixabay)`;
+  if (img.provider === 'unsplash') return `Photo by ${img.author_name || 'photographer'} on Unsplash`;
   return '';
 }
 export function captionHint(img) {
@@ -1852,7 +1868,9 @@ export function captionHint(img) {
   if (img.kind === 'ai') return '※ AI로 만든 예시 이미지';
   // 원본 보존 합성: 상품은 실제 사진 그대로, 배경은 AI — 그 장소에서 실제로 찍은 사진이 아님. 상품 사진의 출처(Pexels 사진가 등)도 같이
   if (img.kind === 'composite') return '※ 원본 보존 합성 — 실제 상품 사진에 AI로 만든 배경을 합성한 이미지 (실제 사용 사진 아님)' + (img.attribution_text ? ` · ${img.attribution_text}` : '');
-  if (img.provider === 'pexels') return attributionFor(img);
+  if (img.provider === 'pexels' || img.provider === 'pixabay' || img.provider === 'unsplash') return attributionFor(img);
+  // 1.7.0 공공누리 제1유형: 출처를 꼭 밝혀야 함 (올릴 때 적은 출처 그대로)
+  if (img.kind === 'upload' && img.source_type === 'kogl') return img.attribution_text || '사진: 공공누리 제1유형 (출처 확인 필요)';
   // 카드뉴스: 배경으로 쓴 이미지의 출처를 그대로 (AI 배경이면 AI 표시, Pexels 배경이면 사진가)
   if (img.kind === 'card') {
     const t = String(img.license || '') + ' ' + String(img.attribution_text || '');
@@ -1867,7 +1885,8 @@ export function captionHint(img) {
   }
   // 직접 올린 사진: 고른 출처대로 (직접 촬영·출처 미확인은 캡션 없음). 구체적인 출처 이름은 이미지 검사 '참고'에서 적으라고 알려줌
   if (img.kind === 'upload' && img.source_type === 'official') return '사진: 제조사·판매처 제공 이미지';
-  if (img.kind === 'upload' && img.source_type === 'external') return '사진: 외부 제공 이미지';
+  // 1.7.0: 받은 곳의 출처 문구를 적어 올렸으면 그대로 (예: Unsplash 에서 받은 사진 → 'Photo by 사진가 on Unsplash')
+  if (img.kind === 'upload' && img.source_type === 'external') return img.attribution_text || '사진: 외부 제공 이미지';
   return '';
 }
 export const altTextFor = (text) => clip(stripSlotMarks(text).replace(/\s*(사진|이미지)$/, ''), 120);

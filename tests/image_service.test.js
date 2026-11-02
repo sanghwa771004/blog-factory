@@ -338,7 +338,7 @@ describe('실제 사진 고르기 흐름 (Pexels → 보관함)', () => {
     assert.deepEqual([nokey.status, nokey.code], [503, 'pexels_key_missing']);
     const missing = await saveStockPhoto(fakeDeps({ fetchImpl: fakeFetch(() => ({ status: 404, json: {} })) }), { provider: 'pexels', photoId: 5, key: 'PX' });
     assert.deepEqual([missing.status, missing.code], [404, 'not_found']);
-    assert.equal((await saveStockPhoto(fakeDeps(), { provider: 'unsplash', photoId: 1 })).code, 'bad_field', '연결 안 된 공급자');
+    assert.equal((await saveStockPhoto(fakeDeps(), { provider: 'shutterstock', photoId: 1 })).code, 'bad_field', '연결 안 된 공급자');
   });
 });
 

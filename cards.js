@@ -8,8 +8,8 @@ const THEMES = {
   mark: { bg: '#FFFDF2', ink: '#1B2420', muted: '#6A6550', accent: '#1F5D4C', soft: '#F7E9A6', mark: '#F4DA62', pill: '#1B2420', pillInk: '#FFFDF2' },
   dark: { bg: '#121815', ink: '#E9EFEA', muted: '#9AA8A0', accent: '#6FC3A8', soft: '#1E3A30', mark: '', pill: '#6FC3A8', pillInk: '#0E1A15' },
 };
-const FONT_TITLE = (px) => `400 ${px}px "Do Hyeon", "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
-const FONT_BODY = (px, w = 400) => `${w} ${px}px "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+export const FONT_TITLE = (px) => `400 ${px}px "Do Hyeon", "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
+export const FONT_BODY = (px, w = 400) => `${w} ${px}px "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif`;
 
 // 웹 글꼴이 다 내려온 다음에 그려야 글꼴이 맞음 (인터넷이 안 되면 기기 글꼴로 그림)
 // 한글 글꼴은 글자 범위별로 나뉘어 내려와서, 실제로 쓸 글자(text)와 쓰는 굵기(400·500·700, 제목 글꼴) 모두 미리 받음
@@ -73,7 +73,7 @@ const ICON_PATHS = {
   list: 'M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01',
   heart: 'M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z',
 };
-function drawIcon(ctx, name, x, y, size, color) {
+export function drawIcon(ctx, name, x, y, size, color) {
   const p = ICON_PATHS[name];
   if (!p || typeof Path2D === 'undefined') return;
   ctx.save();
@@ -83,7 +83,7 @@ function drawIcon(ctx, name, x, y, size, color) {
   ctx.stroke(new Path2D(p));
   ctx.restore();
 }
-function roundRect(ctx, x, y, w, h, r) {
+export function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
   ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();

@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES, PLAN_KINDS, PLAN_RUNS, cleanPlan, planTotal, KEEP_DAYS, promptsOf } from './checks.js?v=1.6.0';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES, PLAN_KINDS, PLAN_RUNS, cleanPlan, planTotal, KEEP_DAYS, promptsOf, fpOf, FOOTNOTE, isAppDrawnSlot as isAppSlot, VOICE_PRESETS } from './checks.js?v=1.7.0';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];
@@ -90,18 +90,28 @@ export function makeZip(files, date = new Date()) {
 
 // ───────── 원고 내보내기 ─────────
 // **굵게**, ==바탕색 강조== (1.6.0)
-const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/==(.+?)==/g, '$1');
+const stripMd = (s) => String(s || '').replace(/\*\*(.+?)\*\*/g, '$1').replace(/==(.+?)==/g, '$1').replace(FOOTNOTE, '[$1]');
 // 1.6.0 네이버 붙여넣기용 서식: 소제목은 크게(24px·굵게), 강조·핵심 상자는 바탕색. 스마트에디터가 h2 를 버려도 남게 글자 크기는 안쪽 span 에도 줌
 export const EXPORT_STYLE = {
   headPx: 24,
   mark: '#fff0a0',   // ==강조== 바탕색 (노랑)
   note: '#e3f4ea',   // > 핵심 상자 바탕색 (연두)
   me: '#fff1a8',     // 빈 [내 경험] 칸 (채우라는 표시)
+  basis: '#f2f4f7',  // 1.7.0 [기준] 상자 (회색)
+  term: '#eef3fb',   // 1.7.0 [용어] 풀이 상자 (연한 파랑)
 };
 function inlineHtml(s, mode) {
   const h = esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
     .replace(/==(.+?)==/g, mode === 'export' ? `<span style="background-color:${EXPORT_STYLE.mark};"><b>$1</b></span>` : '<mark>$1</mark>');
-  return h.replace(/\[(내 경험[^\]]*)\]/g, mode === 'export' ? `<span style="background:${EXPORT_STYLE.me};">[$1]</span>` : '<span class="me">[$1]</span>');
+  return h.replace(/\[(내 경험[^\]]*)\]/g, mode === 'export' ? `<span style="background:${EXPORT_STYLE.me};">[$1]</span>` : '<span class="me">[$1]</span>')
+    // 1.7.0 출처 번호 [^1] → 작은 [1] (스마트에디터가 위첨자를 버려도 [1] 글자는 남음)
+    .replace(/\[\^(\d{1,2})\]/g, mode === 'export' ? '<sup style="font-size:.72em;color:#888;">[$1]</sup>' : '<sup class="fn">[$1]</sup>');
+}
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+// 글 끝 '참고 자료' — 원고의 출처(sources) 순서 = 본문 [^n] 번호
+export function sourceList(post) {
+  return (Array.isArray(post && post.sources) ? post.sources : []).filter((x) => x && safeUrl(x.url)).slice(0, 12)
+    .map((x, i) => ({ n: i + 1, url: safeUrl(x.url), title: String(x.title || hostOf(x.url) || x.url).slice(0, 120), host: hostOf(x.url), checked_at: String(x.checked_at || '').slice(0, 10) }));
 }
 export const sortedLinks = (links) => [...(links || [])].sort((a, b) => (a.sort || 0) - (b.sort || 0) || String(a.created_at || '').localeCompare(String(b.created_at || '')));
 // 본문의 n번째 [링크] 자리에 들어갈 링크 (링크가 모자라면 마지막 링크)
@@ -119,13 +129,17 @@ export function viewHtml(post, links, imgs) {
     if (b.t === 'h') return `<h2>${inlineHtml(b.text, 'view')}</h2>`;
     if (b.t === 'p') return `<p>${inlineHtml(b.text, 'view')}</p>`;
     if (b.t === 'note') return `<p class="note">${inlineHtml(b.text, 'view')}</p>`;
+    if (b.t === 'basis') return `<p class="basis"><b>📌 이 글의 기준</b> ${inlineHtml(b.text, 'view')}</p>`;
+    if (b.t === 'term') return `<p class="term"><b>용어 풀이 · ${esc(b.term)}</b> ${inlineHtml(b.text, 'view')}</p>`;
     if (b.t === 'ul') return `<ul>${b.items.map((i) => `<li>${inlineHtml(i, 'view')}</li>`).join('')}</ul>`;
     if (b.t === 'table') return `<div class="tblwrap"><table>${b.rows.map((r, ri) => `<tr>${r.map((c) => (ri ? `<td>${inlineHtml(c, 'view')}</td>` : `<th>${inlineHtml(c, 'view')}</th>`)).join('')}</tr>`).join('')}</table></div>`;
     if (b.t === 'img') {
       if (!b.full) return `<div class="img">📷 ${esc(b.text)}</div>`;
       const n = ++pic, im = imgs && imgs[n - 1];
+      // 1.7.0: 앱이 그리는 정보 카드·썸네일 자리는 제미나이 프롬프트 대신 안내
+      if (isAppSlot(b.text) && !(im && safeImgUrl(im.url))) return `<div class="img app">🖼 ${esc(imgLabel(n, b))} — 앱이 그려줘 (아래 '이미지'에서 ${/썸네일/.test(b.text) ? '썸네일 만들기' : '정보 카드 만들기'})${im ? ' · 이미지 연결됨' : ''}</div>`;
       // 1.6.0: 사진 자리 아래에 제미나이 프롬프트 + 복사 버튼 (버튼은 화면이 data-prompt 번호로 연결)
-      const gp = b.prompt ? `<div class="gprompt"><div class="gp-h"><b>제미나이 프롬프트 · 사진 ${n}</b><button type="button" class="copy" data-prompt="${n}">프롬프트 복사</button></div><p>${esc(b.prompt)}</p></div>` : '';
+      const gp = b.prompt && !isAppSlot(b.text) ? `<div class="gprompt"><div class="gp-h"><b>제미나이 프롬프트 · 사진 ${n}</b><button type="button" class="copy" data-prompt="${n}">프롬프트 복사</button></div><p>${esc(b.prompt)}</p></div>` : '';
       if (im && safeImgUrl(im.url)) return `<figure class="img has"><img src="${esc(im.url)}" alt="${esc(im.alt || b.text)}" loading="lazy" decoding="async"><figcaption>${esc(imgLabel(n, b))}${im.label ? ' · ' + esc(im.label) : ''}</figcaption></figure>${gp}`;
       return `<div class="img">📷 ${esc(imgLabel(n, b))}${im ? ' · 이미지 연결됨' : ''}</div>${gp}`;
     }
@@ -144,6 +158,8 @@ export function exportHtml(post, { links, programs, images } = {}) {
     p: 'line-height:1.8;margin:0 0 1em;',
     h: `font-size:${EXPORT_STYLE.headPx}px;font-weight:bold;line-height:1.45;margin:1.8em 0 .7em;`,
     note: `line-height:1.8;margin:0 0 1.2em;padding:12px 14px;background-color:${EXPORT_STYLE.note};`,
+    basis: `font-size:.92em;line-height:1.7;color:#444;margin:0 0 1.4em;padding:10px 14px;background-color:${EXPORT_STYLE.basis};`,
+    term: `font-size:.95em;line-height:1.7;margin:0 0 1.2em;padding:10px 14px;background-color:${EXPORT_STYLE.term};`,
     th: 'border:1px solid #d9d9d9;padding:8px 10px;text-align:left;background:#f4f6f4;font-weight:bold;',
     td: 'border:1px solid #d9d9d9;padding:8px 10px;text-align:left;',
   };
@@ -154,6 +170,8 @@ export function exportHtml(post, { links, programs, images } = {}) {
     else if (b.t === 'p') out.push(`<p style="${S.p}">${inlineHtml(b.text, 'export')}</p>`);
     // 핵심 상자: 문단 바탕색 + 글자 바탕색 (스마트에디터가 문단 바탕색을 버려도 글자 바탕색은 남게)
     else if (b.t === 'note') out.push(`<p style="${S.note}"><span style="background-color:${EXPORT_STYLE.note};">${inlineHtml(b.text, 'export')}</span></p>`);
+    else if (b.t === 'basis') out.push(`<p style="${S.basis}"><span style="background-color:${EXPORT_STYLE.basis};"><b>📌 이 글의 기준</b> ${inlineHtml(b.text, 'export')}</span></p>`);
+    else if (b.t === 'term') out.push(`<p style="${S.term}"><span style="background-color:${EXPORT_STYLE.term};"><b>용어 풀이 · ${esc(b.term)}</b> ${inlineHtml(b.text, 'export')}</span></p>`);
     else if (b.t === 'ul') out.push(`<ul style="margin:0 0 1em;padding-left:1.4em;line-height:1.8;">${b.items.map((i) => `<li>${inlineHtml(i, 'export')}</li>`).join('')}</ul>`);
     else if (b.t === 'table') out.push(`<table style="border-collapse:collapse;width:100%;margin:0 0 1.2em;font-size:.95em;">${b.rows.map((r, ri) => `<tr>${r.map((c) => `<${ri ? 'td' : 'th'} style="${ri ? S.td : S.th}">${inlineHtml(c, 'export')}</${ri ? 'td' : 'th'}>`).join('')}</tr>`).join('')}</table>`);
     else if (b.t === 'img') {
@@ -173,6 +191,12 @@ export function exportHtml(post, { links, programs, images } = {}) {
         : `<p style="text-align:center;margin:1.4em 0;">🔗 ${esc(label)} (여기에 제휴 링크 넣기)</p>`);
     }
   }
+  // 1.7.0 글 끝 '참고 자료' (본문 [^n] 번호와 같은 순서) — 출처가 보이면 정보 글이 믿을 만해 보임
+  const src = sourceList(post);
+  if (src.length) {
+    out.push(`<p style="font-size:.88em;color:#555;margin:2.2em 0 .4em;"><b>참고 자료</b></p>`);
+    out.push(`<p style="font-size:.85em;line-height:1.7;color:#666;margin:0 0 1em;">${src.map((x) => `[${x.n}] ${esc(x.title)}${x.checked_at ? ` (${esc(x.checked_at)} 확인)` : ''}<br><a href="${esc(x.url)}" target="_blank" rel="noopener nofollow" style="color:#666;">${esc(x.url)}</a>`).join('<br>')}</p>`);
+  }
   return out.join('\n');
 }
 
@@ -185,6 +209,8 @@ export function exportPlain(post, { links, programs, images } = {}) {
     if (b.t === 'h') lines.push('', '■ ' + stripMd(b.text));
     else if (b.t === 'p') lines.push(stripMd(b.text));
     else if (b.t === 'note') lines.push('▶ ' + stripMd(b.text));
+    else if (b.t === 'basis') lines.push('📌 이 글의 기준: ' + stripMd(b.text));
+    else if (b.t === 'term') lines.push(`※ 용어 풀이 · ${b.term}: ${stripMd(b.text)}`);
     else if (b.t === 'ul') b.items.forEach((i) => lines.push('· ' + stripMd(i)));
     else if (b.t === 'table') b.rows.forEach((r) => lines.push(r.map(stripMd).join(' | ')));
     else if (b.t === 'img') {
@@ -197,6 +223,8 @@ export function exportPlain(post, { links, programs, images } = {}) {
       lines.push('👉 ' + (b.text || (l && l.cta) || '최저가 확인하기') + (l ? '\n' + l.url : ''));
     }
   }
+  const src = sourceList(post);
+  if (src.length) lines.push('', '참고 자료', ...src.map((x) => `[${x.n}] ${x.title}${x.checked_at ? ` (${x.checked_at} 확인)` : ''} ${x.url}`));
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
@@ -684,8 +712,116 @@ export function expiresOn(post, settings) {
 }
 // 사진 자리의 제미나이 프롬프트를 한 번에 복사할 글 (사진 번호 · 설명 · 프롬프트)
 export function promptsText(post) {
-  const ps = promptsOf(post && post.body).filter((x) => x.prompt);
+  const ps = promptsOf(post && post.body).filter((x) => x.prompt && !x.app); // 1.7.0: 앱이 그리는 정보 카드·썸네일 자리는 빼고
   return ps.map((x) => `[사진 ${x.n}] ${x.text}\n${x.prompt}`).join('\n\n');
+}
+
+// ───────── 1.7.0 내 말투 · 잘 나가는 글 틀 ─────────
+const HANGUL_WORD = /[가-힣]{2,}/g;
+const STOP = new Set(['그리고', '하지만', '그래서', '그런데', '이렇게', '그렇게', '저렇게', '이런', '그런', '있어요', '있습니다', '합니다', '해요', '이에요', '예요', '입니다', '있는', '없는', '하는', '되는', '것이', '것은', '것을', '수도', '때문에', '정도', '이번', '오늘', '우리', '제가', '저는', '너무', '정말', '진짜', '그냥', '조금', '많이', '같아요', '같은', '하고', '해서', '하면', '에서', '으로', '에게', '까지', '부터']);
+const splitSents = (text) => String(text || '').replace(/\r/g, '').split(/(?<=[.!?…])\s+|\n+/).map((x) => x.trim()).filter((x) => x.length >= 4);
+const lastWordEnd = (t) => String(t).replace(/[\s.!?…~^ㅎㅋ)\]"'”’]+$/u, '').replace(/\p{Extended_Pictographic}/gu, '').trim();
+// 내가 쓴 글(블로그 글·메모 아무거나)에서 말투를 숫자로: 어미·문장 길이·물음표·이모티콘·자주 쓰는 말 → 자동 작가가 따라 쓸 '말투 카드'
+export function voiceProfile(texts) {
+  const all = (Array.isArray(texts) ? texts : [texts]).map((t) => String(t || '')).join('\n').slice(0, 20000);
+  const sents = splitSents(all);
+  if (sents.length < 5) return { ok: false, reason: '문장이 너무 적어 (5문장 이상 붙여넣어줘)', sentences: sents.length };
+  const ends = sents.map(lastWordEnd);
+  const share = (f) => sents.filter((_, i) => f(ends[i], sents[i])).length / sents.length;
+  const haeyo = share((e) => /요$/.test(e));
+  const hamnida = share((e) => /(니다|니까)$/.test(e));
+  const banmal = share((e) => /(다|어|아|지|야|네|래|게|걸|까)$/.test(e) && !/(니다|니까)$/.test(e));
+  const endCount = new Map();
+  for (const e of ends) { const k = e.slice(-3); if (k.length >= 2) endCount.set(k, (endCount.get(k) || 0) + 1); }
+  const topEnds = [...endCount.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, n]) => ({ end: '~' + k.replace(/^[^가-힣]+/, ''), share: n / sents.length }));
+  const L = sents.map((x) => x.length);
+  const avg = L.reduce((a, n) => a + n, 0) / L.length;
+  const shortShare = L.filter((n) => n <= 15).length / L.length;
+  const longShare = L.filter((n) => n >= 50).length / L.length;
+  const question = sents.filter((x) => /\?\s*$/.test(x)).length / sents.length;
+  const exclaim = sents.filter((x) => /!\s*$/.test(x)).length / sents.length;
+  const emo = (all.match(/ㅎㅎ|ㅋㅋ|\^\^|ㅠㅠ|\p{Extended_Pictographic}/gu) || []).length;
+  const tilde = (all.match(/~/g) || []).length;
+  const paras = all.split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  const perPara = paras.length ? sents.length / paras.length : sents.length;
+  const words = new Map();
+  for (const w of all.match(HANGUL_WORD) || []) { if (STOP.has(w) || w.length > 6) continue; words.set(w, (words.get(w) || 0) + 1); }
+  const often = [...words.entries()].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([w]) => w);
+  const style = haeyo >= 0.5 ? '해요체' : hamnida >= 0.5 ? '합니다체' : banmal >= 0.5 ? '반말' : '섞어 씀';
+  // 예시 문장: 써본 경험·구매를 말하는 문장은 빼 (자동 작가가 '써본 척'을 따라 하지 않게)
+  const examples = sents.filter((x) => x.length >= 12 && x.length <= 70 && !/https?:|\d{3,}/.test(x) && !/(써\s*보|써본|사용해\s*보|샀|구매|구입|주문|내돈내산)/.test(x)).filter((x, i, a) => a.indexOf(x) === i)
+    .sort((a, b) => Math.abs(a.length - avg) - Math.abs(b.length - avg)).slice(0, 3);
+  const P = (r) => `${Math.round(r * 100)}%`;
+  const card = [
+    `말투: ${style} (해요체 ${P(haeyo)} · 합니다체 ${P(hamnida)} · 반말 ${P(banmal)}). 자주 쓰는 끝말: ${topEnds.map((x) => x.end).join(', ')}.`,
+    `문장 길이: 평균 ${Math.round(avg)}자, 15자 이하 짧은 문장 ${P(shortShare)}, 50자 넘는 긴 문장 ${P(longShare)} — 이 비율로 섞어.`,
+    `물음표 문장 ${P(question)}, 느낌표 ${P(exclaim)}${emo ? `, 'ㅎㅎ·^^' 같은 표시 ${emo}번` : ', 이모티콘 거의 없음'}${tilde ? `, 물결(~) ${tilde}번` : ''}.`,
+    `문단: 줄바꿈 한 덩어리에 평균 ${Math.max(1, Math.round(perPara))}문장.`,
+    often.length ? `자주 쓰는 말: ${often.join(', ')} (억지로 다 넣지 말고 자연스러울 때만).` : '',
+    examples.length ? `말투 예시 (그대로 베끼지 말고 리듬만): ${examples.map((x) => `"${x}"`).join(' / ')}` : '',
+  ].filter(Boolean).join('\n');
+  return { ok: true, sentences: sents.length, stats: { style, haeyo, hamnida, banmal, avg: Math.round(avg), shortShare, longShare, question, exclaim, emo, perPara: Math.round(perPara * 10) / 10, topEnds, often }, examples, card };
+}
+
+// 잘 나가는 글을 붙여넣으면 '틀'만 뽑음: 소제목 역할 순서·분량·문단·목록·사진 수·도입/마무리 방식·말투. 문장은 저장하지 않고 지문(fp)만
+const ROLES = [
+  ['FAQ', /자주\s*묻|Q\s*[.:]|질문|FAQ/i], ['정리', /정리|요약|결론|마무리|한\s*줄|핵심/], ['주의', /주의|조심|실수|피해야|단점|안\s*맞는/],
+  ['비교', /비교|차이|vs|장단점|어떤\s*게/i], ['추천·고르기', /추천|고르|고를|골라|선택|기준|구매|살\s*때/], ['가격·비용', /가격|비용|요금|전기세|가성비|최저가/],
+  ['방법', /방법|하는\s*법|순서|단계|팁|노하우|사용법|관리|세척|설치|신청하는/], ['원인', /원인|이유|왜/],
+  ['일정·대상', /신청|일정|기간|대상|조건|언제|누가/], ['숫자·현황', /지수|마감|현황|실적|매출|전망|수급|금리|환율|주가/],
+  ['후기·경험', /후기|사용기|써\s*보|경험/], ['개념', /란\??$|이란|뜻|개념|종류|특징|무엇/],
+];
+const roleOf = (h) => (ROLES.find(([, re]) => re.test(h)) || ['설명'])[0];
+const isHeadingLine = (l, next) => {
+  if (/^#{1,4}\s/.test(l)) return true;
+  if (/^[-•*·]\s/.test(l)) return false; // 목록 줄
+  const t = l.replace(/^[\d]+[.)]\s*|^[■□▶▷●○◆◇★☆✔✅📌]\s*/u, '');
+  if (t.length < 2 || t.length > 40) return false;
+  if (/[.,]$/.test(t) || /(요|다|죠|니다)[.!]?$/.test(t) && t.length > 18) return false;
+  return !!next && (next.length > t.length + 10 || /^[-•*·]\s|^\d+[.)]\s/.test(next));
+};
+export function analyzeReference(text, { photos = null } = {}) {
+  const raw = String(text || '').replace(/\r/g, '').slice(0, 30000);
+  const lines = raw.split('\n').map((x) => x.trim());
+  const body = lines.filter(Boolean);
+  if (body.join('').length < 300) return { ok: false, reason: '글이 너무 짧아 (300자 이상 붙여넣어줘)' };
+  const outline = [];
+  let cur = null, intro = [];
+  const plain = [];
+  for (let i = 0; i < body.length; i++) {
+    const l = body[i];
+    // 첫 줄이 짧으면 글 제목으로 보고 소제목에서 뺌
+    if (i === 0 && l.length <= 60 && body.length > 3 && !/^#{2,4}\s/.test(l)) continue;
+    if (isHeadingLine(l, body[i + 1])) {
+      cur = { role: roleOf(l.replace(/^#+\s*/, '')), chars: 0, list: false, question: /\?$/.test(l) };
+      outline.push(cur);
+      continue;
+    }
+    plain.push(l);
+    if (!cur) { intro.push(l); continue; }
+    cur.chars += l.length;
+    if (/^[-•*·]\s|^\d+[.)]\s/.test(l)) cur.list = true;
+  }
+  const chars = body.join('').replace(/\s/g, '').length;
+  const first = intro.join(' ') || body[0];
+  const last = body.slice(-3).join(' ');
+  const voice = voiceProfile(plain.join('\n'));
+  const stats = {
+    chars, paragraphs: body.length, headings: outline.length,
+    photos: Number.isFinite(Number(photos)) && photos !== null && photos !== '' ? Math.max(0, Math.min(30, Math.round(Number(photos)))) : null,
+    lists: outline.filter((x) => x.list).length,
+    intro: /\?/.test(first) ? '질문으로 시작' : /\d/.test(first) ? '숫자로 시작' : '상황 설명으로 시작',
+    ending: /정리|요약|한\s*줄|결론/.test(last) ? '요약으로 끝' : /\?/.test(last) ? '질문으로 끝' : '할 일 안내로 끝',
+    style: voice.ok ? voice.stats.style : '',
+    avg_sentence: voice.ok ? voice.stats.avg : null,
+  };
+  return { ok: true, outline: outline.slice(0, 15).map((x) => ({ role: x.role, size: x.chars >= 500 ? '길게' : x.chars >= 200 ? '보통' : '짧게', list: x.list, question: x.question })), stats, fp: fpOf(raw) };
+}
+// 틀 한 줄 설명 (화면·자동 작가에 보여줄 것)
+export function templateLine(t) {
+  const st = (t && t.stats) || {};
+  const flow = ((t && t.outline) || []).map((x) => x.role).join(' → ');
+  return [flow && `흐름: ${flow}`, st.chars && `분량 ${Number(st.chars).toLocaleString('ko-KR')}자`, st.photos != null && `사진 ${st.photos}장`, st.intro, st.ending, st.style && `말투 ${st.style}`].filter(Boolean).join(' · ');
 }
 
 // pendingWrites: 기다리는 원고 작업 수 — 2단계에서 채우면 '검수 필요'가 돼서 쌓인 원고가 그만큼 늘어 (프롬프트 3단계: 한도 − 쌓인 원고 − 2단계에서 저장한 원고)
