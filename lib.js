@@ -134,14 +134,16 @@ export function viewHtml(post, links, imgs) {
     if (b.t === 'ul') return `<ul>${b.items.map((i) => `<li>${inlineHtml(i, 'view')}</li>`).join('')}</ul>`;
     if (b.t === 'table') return `<div class="tblwrap"><table>${b.rows.map((r, ri) => `<tr>${r.map((c) => (ri ? `<td>${inlineHtml(c, 'view')}</td>` : `<th>${inlineHtml(c, 'view')}</th>`)).join('')}</tr>`).join('')}</table></div>`;
     if (b.t === 'img') {
-      if (!b.full) return `<div class="img">📷 ${esc(b.text)}</div>`;
+      // 1.7.0 고침: 사진 자리마다 data-ph(자리 이름)·data-n(사진 번호) — 미리보기를 긁어 복사할 때 화면이 사진을 '여기에 사진 넣기' 자리로 바꿈 (app.js)
+      if (!b.full) return `<div class="img" data-ph="${esc(b.text)}">📷 ${esc(b.text)}</div>`;
       const n = ++pic, im = imgs && imgs[n - 1];
+      const ph = ` data-n="${n}" data-ph="${esc(imgLabel(n, b))}"`;
       // 1.7.0: 앱이 그리는 정보 카드·썸네일 자리는 제미나이 프롬프트 대신 안내
-      if (isAppSlot(b.text) && !(im && safeImgUrl(im.url))) return `<div class="img app">🖼 ${esc(imgLabel(n, b))} — 앱이 그려줘 (아래 '이미지'에서 ${/썸네일/.test(b.text) ? '썸네일 만들기' : '정보 카드 만들기'})${im ? ' · 이미지 연결됨' : ''}</div>`;
+      if (isAppSlot(b.text) && !(im && safeImgUrl(im.url))) return `<div class="img app"${ph}>🖼 ${esc(imgLabel(n, b))} — 앱이 그려줘 (아래 '이미지'에서 ${/썸네일/.test(b.text) ? '썸네일 만들기' : '정보 카드 만들기'})${im ? ' · 이미지 연결됨' : ''}</div>`;
       // 1.6.0: 사진 자리 아래에 제미나이 프롬프트 + 복사 버튼 (버튼은 화면이 data-prompt 번호로 연결)
       const gp = b.prompt && !isAppSlot(b.text) ? `<div class="gprompt"><div class="gp-h"><b>제미나이 프롬프트 · 사진 ${n}</b><button type="button" class="copy" data-prompt="${n}">프롬프트 복사</button></div><p>${esc(b.prompt)}</p></div>` : '';
-      if (im && safeImgUrl(im.url)) return `<figure class="img has"><img src="${esc(im.url)}" alt="${esc(im.alt || b.text)}" loading="lazy" decoding="async"><figcaption>${esc(imgLabel(n, b))}${im.label ? ' · ' + esc(im.label) : ''}</figcaption></figure>${gp}`;
-      return `<div class="img">📷 ${esc(imgLabel(n, b))}${im ? ' · 이미지 연결됨' : ''}</div>${gp}`;
+      if (im && safeImgUrl(im.url)) return `<figure class="img has"${ph}><img src="${esc(im.url)}" alt="${esc(im.alt || b.text)}" loading="lazy" decoding="async"><figcaption>${esc(imgLabel(n, b))}${im.label ? ' · ' + esc(im.label) : ''}</figcaption></figure>${gp}`;
+      return `<div class="img"${ph}>📷 ${esc(imgLabel(n, b))}${im ? ' · 이미지 연결됨' : ''}</div>${gp}`;
     }
     if (b.t === 'cta') {
       const l = linkForSlot(links, slot++);
@@ -151,6 +153,9 @@ export function viewHtml(post, links, imgs) {
   }).join('');
 }
 
+// 붙여넣은 글의 사진 자리 모양 (서식 그대로 복사·미리보기 복사가 같은 모양)
+export const PHOTO_SLOT_STYLE = 'text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;';
+export const FIRST_PHOTO_NOTE = '⭐ 첫 사진이 대표 사진이 돼 (글 목록·홈판에 보이는 사진) — 네이버 사진 버튼이나 이미지 붙여넣기로 올려줘';
 export function exportHtml(post, { links, programs, images } = {}) {
   const disc = disclosureFor(post.program_ids, programs).text;
   const out = [];
@@ -177,11 +182,13 @@ export function exportHtml(post, { links, programs, images } = {}) {
     else if (b.t === 'img') {
       const im = b.full ? images && images[pic] : null;
       const n = b.full ? ++pic : 0;
+      // 1.7.0 고침: 네이버는 글의 첫 사진을 대표 사진(글 목록·홈판에 보이는 사진)으로 씀 — 사진이 없거나 주소로만 연결되면 목록에 글자만 나옴
+      const lead = n === 1 ? `<br><small>${esc(FIRST_PHOTO_NOTE)}</small>` : '';
       if (im && im.fileName) {
         // 앱이 블로그에 사진을 대신 올리지 않음 → 내려받은 파일 이름을 적어 두고, 붙여넣은 뒤 그 자리에 직접 넣음
-        out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 사진 ${n}: 내려받은 「${esc(im.fileName)}」 파일을 여기에 넣어줘<br><small>${esc(b.text)}</small></p>`);
+        out.push(`<p style="${PHOTO_SLOT_STYLE}">📷 사진 ${n}: 내려받은 「${esc(im.fileName)}」 파일을 여기에 넣어줘<br><small>${esc(b.text)}</small>${lead}</p>`);
         if (im.caption) out.push(`<p style="text-align:center;color:#777;font-size:.85em;margin:-.6em 0 1.2em;">${esc(im.caption)}</p>`);
-      } else out.push(`<p style="text-align:center;color:#888;border:1px dashed #c8c8c8;padding:18px;margin:0 0 1em;">📷 ${n ? '사진 ' + n + ': ' : ''}${esc(b.text)} (여기에 사진 넣기)</p>`);
+      } else out.push(`<p style="${PHOTO_SLOT_STYLE}">📷 ${n ? '사진 ' + n + ': ' : ''}${esc(b.text)} (여기에 사진 넣기)${lead}</p>`);
     }
     else if (b.t === 'cta') {
       const l = linkForSlot(links, slot++);

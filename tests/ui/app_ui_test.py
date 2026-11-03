@@ -3943,6 +3943,110 @@ def main():
                 reload_keys()
         check('1.7.0 전문성·사람 말투: AI 말투 점수·다듬기 요청·이전 본문 되돌리기(두 번)·기준/용어 상자·출처 번호·참고 자료 서식 복사·숫자 확인표와 한국은행 대조·말투 카드(기본·내 글)·시리즈·투자 블로그·참고 글 틀(원문 없이)과 베끼기 검사·썸네일/정보 카드 그려서 연결·사진 사이트 탭·공공누리 출처', t_pro_170)
 
+        # ═════════ 1.7.0 고침 (2026-11-03): 미리보기를 긁어 복사하면 사진이 주소로만 연결돼서 대표 사진이 안 되던 문제 ═════════
+        def copy_event(sel_js):
+            # 고른 곳을 정한 뒤 'copy' 를 보내고, 앱이 클립보드에 넣은 내용을 받아 봄 (진짜 클립보드 없이)
+            return page.evaluate("""(sel) => { const el = document.querySelector(sel); const r = document.createRange(); r.selectNodeContents(el);
+                const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+                const dt = new DataTransfer(); const ev = new ClipboardEvent('copy', { clipboardData: dt, bubbles: true, cancelable: true });
+                el.dispatchEvent(ev); s.removeAllRanges();
+                return { html: dt.getData('text/html'), text: dt.getData('text/plain'), prevented: ev.defaultPrevented }; }""", sel_js)
+
+        def t_copy_photo_fix():
+            close_sheet()
+            ctx.grant_permissions(['clipboard-read', 'clipboard-write'])
+            P = mock.new_id()
+            body = ('[이미지: (썸네일) 제목 카드]\n[프롬프트: 앱이 그리는 썸네일 — 제미나이 필요 없음]\n## 고르는 기준\n' + ('겨울엔 습도를 먼저 봐요. ' * 20) +
+                    '\n[이미지: 거실 창가 가습기]\n[프롬프트: 거실 창가 선반 위 상표 없는 흰 가습기, 4:3, 글자 없이]\n## 정리\n- 세척 쉬운 구조\n[이미지: 침실 협탁 위 작은 가습기]')
+            mock.posts.append({**dict(mock.posts[0]), 'id': P, 'keyword': '거실 가습기 고르기 기준', 'titles': ['거실 가습기 고르기'], 'stage': 'review',
+                               'program_ids': ['naver_adpost'], 'content_type': 'checklist', 'publish_date': D(0), 'created_at': NOW, 'source': 'request',
+                               'plan_kind': '', 'keep': False, 'body': body})
+            sl = parse_slots(body)
+            thumb = mock.add_image('card', P, sl[0]['key'], fx='4x3', review_status='사용 가능')
+            photo = mock.add_image('upload', P, sl[1]['key'], fx='4x3', review_status='검수 전')
+            mock.link(P, sl[0]['key'], thumb['id'])
+            mock.link(P, sl[1]['key'], photo['id'])
+            reload_keys()
+            goto_hash('content/post/' + P)
+            expect(page.locator('section.studio .slot').first).to_be_visible()
+            pv = page.locator('#pv-' + P)
+            expect(pv.locator('figure.img.has img')).to_have_count(2)
+            # 1) 미리보기를 통째로 긁어 복사 → 사진 2장은 '여기에 사진 넣기' 자리로, 프롬프트·버튼은 빠짐, 서명 주소 없음
+            out = copy_event(f'#pv-{P}')
+            assert out['prevented'], '앱이 복사 내용을 바꿈'
+            assert '<img' not in out['html'] and 'supabase' not in out['html'] and '/tests/fixtures/' not in out['html'], out['html'][:300]
+            assert out['html'].count('여기에 사진 넣기') == 3, out['html'][:500]
+            assert '사진 1 · (썸네일) 제목 카드 — 여기에 사진 넣기' in out['html'] and '첫 사진이 대표 사진이 돼' in out['html']
+            assert out['html'].count('첫 사진이 대표 사진이 돼') == 1
+            assert '프롬프트 복사' not in out['html'] and '상표 없는 흰 가습기' not in out['html'] and '<button' not in out['html']
+            assert '고르는 기준' in out['html'] and '겨울엔 습도를 먼저 봐요' in out['text'] and '여기에 사진 넣기' in out['text']
+            expect(page.locator('#toast')).to_contain_text('사진 2장은 빼고')
+            # 2) 글자만 고른 복사는 그대로 둠
+            out2 = copy_event(f'#pv-{P} h2')
+            assert out2['prevented'] is False and out2['html'] == '', out2
+            # 3) 휴대폰에서는 '이미지 복사' 버튼 없음 (사진에 저장 → 블로그 앱), 대표 사진 안내는 보임
+            expect(page.locator('section.studio').get_by_role('button', name='이미지 복사')).to_have_count(0)
+            expect(page.get_by_text('첫 사진이 대표 사진(글 목록·홈판에 보이는 사진)이야')).to_be_visible()
+            # 4) 서식 그대로 복사: 첫 사진 자리에 대표 사진 안내, 이미지 주소 없음
+            page.get_by_role('button', name='서식 그대로 복사').click()
+            page.wait_for_timeout(300)
+            h = clip_html()
+            assert '첫 사진이 대표 사진이 돼' in h and '<img' not in h, h[:300]
+            no_overflow('대표 사진 안내')
+            # 5) 컴퓨터 화면: 사진마다 '이미지 복사' → 클립보드에 PNG 그림 (내려받는 파일과 같은 크기), 검수 전이면 '사용 가능'으로
+            dctx = ctx.browser.new_context(viewport={'width': 1280, 'height': 860}, is_mobile=False, has_touch=False, locale='ko-KR', timezone_id='Asia/Seoul',
+                                           permissions=['clipboard-read', 'clipboard-write'])
+            try:
+                dctx.route(API + '/**', api_route)
+                dctx.route(GEN + '/**', api_route)
+                dctx.route(STORAGE + '**', storage_route)
+                dctx.route(re.compile(r'https://fonts\.(googleapis|gstatic)\.com/.*'), lambda r: r.fulfill(status=200, content_type='text/css', body=''))
+                dp = dctx.new_page()
+                dp.on('pageerror', lambda e: console_errors.append('pageerror(desktop): ' + str(e)))
+                dp.on('console', lambda m: console_errors.append('desktop: ' + m.text) if m.type == 'error' else None)
+                dp.goto(base + '?k=' + CODE)
+                expect(dp.locator('#app')).to_be_visible()
+                dp.evaluate(f"location.hash = 'content/post/{P}'")
+                slots = dp.locator('section.studio .slot')
+                expect(slots.nth(1).get_by_role('button', name='이미지 복사')).to_be_visible()
+                clip_img = lambda: dp.evaluate("""async () => { const items = await navigator.clipboard.read();
+                    for (const it of items) if (it.types.includes('image/png')) { const b = await it.getType('image/png'); const bm = await createImageBitmap(b); return [bm.width, bm.height, b.size]; }
+                    return null; }""")
+                def wait_img(want=None):
+                    # 복사는 그림을 만든 뒤에 끝나서 (사진 받기 → 자르기 → PNG) 잠깐 기다리며 확인
+                    for _ in range(40):
+                        g = clip_img()
+                        if g and (want is None or g[:2] == want):
+                            return g
+                        dp.wait_for_timeout(150)
+                    return clip_img()
+                slots.nth(1).get_by_role('button', name='이미지 복사').click()
+                expect(dp.locator('#toast')).to_contain_text('Ctrl+V')
+                got = wait_img()
+                assert got and got[0] > 0 and abs(got[0] / got[1] - 4 / 3) < 0.02 and got[2] > 1000, got
+                dp.wait_for_timeout(400)
+                assert next(i for i in mock.images if i['id'] == photo['id'])['review_status'] == '사용 가능', '복사해서 쓰면 내려받기처럼 사용 가능으로'
+                # 미리보기 창에서도
+                slots.nth(1).get_by_role('button', name='미리보기·내려받기').click()
+                dsheet = dp.locator('#sheet')
+                expect(dsheet.get_by_role('button', name=re.compile('이미지 복사'))).to_be_enabled()
+                dp.evaluate("navigator.clipboard.writeText('비움')")
+                dsheet.get_by_role('button', name=re.compile('이미지 복사')).click()
+                assert wait_img(), '미리보기 창의 이미지 복사도 그림'
+                dsheet.locator('.split button', has_text='닫기').first.click()
+                dp.wait_for_timeout(300)
+                # 앱이 그리는 썸네일 창에서도 (1080×1080 그대로)
+                slots.nth(0).get_by_role('button', name='다시 그리기').click()
+                expect(dsheet.get_by_role('button', name='이미지 복사')).to_be_visible()
+                dp.evaluate("navigator.clipboard.writeText('비움')")
+                dsheet.get_by_role('button', name='이미지 복사').click()
+                got = wait_img([1080, 1080])
+                assert got and got[0] == 1080 and got[1] == 1080, got
+                dp.screenshot(path=str(OUT / 'copyfix-desktop.png'), full_page=False)
+            finally:
+                dctx.close()
+        check("1.7.0 고침: 미리보기를 긁어 복사하면 사진은 '여기에 사진 넣기' 자리로(프롬프트·버튼·서명 주소 없음), 글자만 복사는 그대로, 첫 사진 대표 안내, 컴퓨터에선 사진·미리보기 창·썸네일 창의 '이미지 복사'가 PNG 그림", t_copy_photo_fix)
+
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
             close_sheet()  # 앞 시험이 연 창이 남아 있으면 닫고 (창이 새로고침 버튼을 가리지 않게)

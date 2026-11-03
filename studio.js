@@ -227,6 +227,20 @@ export async function renderOutput(img, o, src) {
   return fileOf(outBlob, o.name, out.w, out.h);
 }
 
+// 1.7.0 고침: 사진을 클립보드에 '그림'으로 복사 → 네이버 편집기에 붙여 넣으면 네이버에 올라감 (주소 연결이 아니라서 대표 사진이 되고 안 깨짐).
+// 컴퓨터에서만 보여줌 (휴대폰은 '사진에 저장' 뒤 블로그 앱에서 고르는 쪽이 확실). 클립보드 그림은 PNG 만 돼서 JPEG·WebP 는 PNG 로 바꿈
+export const canCopyImage = () => !MOBILE && typeof navigator !== 'undefined' && !!(navigator.clipboard && navigator.clipboard.write) && typeof ClipboardItem === 'function';
+export async function pngBlob(blob) {
+  if (blob && blob.type === 'image/png') return new Blob([blob], { type: 'image/png' });
+  const el = await loadImg(blob);
+  const cv = document.createElement('canvas');
+  cv.width = el.naturalWidth; cv.height = el.naturalHeight;
+  cv.getContext('2d').drawImage(el, 0, 0);
+  const out = await canvasToBlob(cv, 'image/png');
+  cv.width = 0; cv.height = 0;
+  return out;
+}
+
 export function createStudio(ui) {
   const { h, btn, field, det, opt, api, run, toast, openSheet, closeSheet, confirmBox, go, L } = ui;
   const C = {};        // 원고별 이미지 정보 { at, data, loading }
@@ -501,7 +515,10 @@ export function createStudio(ui) {
         own ? null : btn('상품 사진으로 장면 만들기', 'sm ghost', () => prd().start({ postId: p.id, slotKey: s.key })),
         own || !s.n ? null : btn('정보 카드로', 'sm ghost', () => infoCardSheet(p, s)));
     } else {
-      add(row2, btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)), btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
+      add(row2, btn('미리보기·내려받기', 'sm', () => previewSheet(p, s)),
+        // 1.7.0 고침: 컴퓨터에서 네이버 편집기에 바로 붙여 넣을 그림 (내려받는 파일과 같은 자르기)
+        canCopyImage() && copyable(img) ? btn('이미지 복사', 'sm ghost', (ev) => copyImage(() => renderOutput(img, slotOutput(s, img)), ev.currentTarget, () => reviewedByUse(p, img))) : null,
+        btn('바꾸기', 'sm ghost', () => chooser(p, s, img)),
         appKind ? btn('다시 그리기', 'sm ghost', () => infoCardSheet(p, s)) : null,
         img.kind === 'ai' ? btn('다시 만들기', 'sm ghost', () => regen(p, s, d, img), { disabled: running }) : null,
         btn(row.used_at ? '사용 완료 취소' : '사용 완료', 'sm ghost', (ev) => markUsed(p, s, !row.used_at, ev.currentTarget)),
@@ -1577,7 +1594,9 @@ export function createStudio(ui) {
         });
         if (j) { toast(`${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
       }),
-      btn('PNG로 내려받기', 'sm ghost', async () => { const b = await full(); blobDownload(b, (isThumb() ? 'thumbnail' : 'infocard') + '.png'); }));
+      btn('PNG로 내려받기', 'sm ghost', async () => { const b = await full(); blobDownload(b, (isThumb() ? 'thumbnail' : 'infocard') + '.png'); }),
+      // 1.7.0 고침: 컴퓨터에서는 그림으로 복사 → 네이버 편집기에 Ctrl+V (썸네일은 글 맨 위 첫 사진으로 — 대표 사진)
+      canCopyImage() ? btn('이미지 복사', 'sm ghost', (ev) => copyImage(() => full(), ev.currentTarget)) : null);
     draw();
   }
 
@@ -1752,14 +1771,26 @@ export function createStudio(ui) {
     // 내려받기 (열자마자 파일을 준비해 둠 → 누르면 바로 저장·공유 창)
     const fileName = () => IMG.fileNameFor(p, s.n || (IMG.extraSlot(s.key) || {}).file || 'image', s.n ? purpose : '', outExt(img));
     const dlBtn = btn('파일 준비 중…', 'wide', () => save(), { disabled: true });
+    // 1.7.0 고침: 컴퓨터에서는 그림으로 복사해서 네이버 편집기에 바로 붙여 넣기 (지금 화면의 자르기 그대로 — 내려받는 파일과 같음)
+    const cpBtn = canCopyImage() ? btn('이미지 복사', 'sm ghost', (ev) => copyImage(async () => renderOutput(img, { ratio, focus, purpose, name: fileName() }, await source()), ev.currentTarget, () => {
+      reviewedByUse(p, img, () => { drawReview(); syncDl(); });
+      if (cropDirty) saveSlot().catch(() => {}); // 저장 안 한 자르기로 복사했으면 그것도 저장 (내려받기와 같게)
+    })) : null;
     const outInfo = h('span', { class: 'hint' });
     let file = null, seq = 0;
     const syncDl = () => {
+      if (cpBtn) {
+        const t = img.review_status === '검수 전' && !pmode ? '검수 완료하고 이미지 복사' : pmode && !IMG.productApproved(img) ? '이미지 복사 (상품 검수 전)' : '이미지 복사';
+        cpBtn.dataset.label = t;
+        if (cpBtn.textContent !== '복사됨') cpBtn.textContent = t;
+        cpBtn.disabled = img.review_status === '사용 안 함';
+      }
       if (img.review_status === '사용 안 함') { dlBtn.disabled = true; dlBtn.textContent = "'사용 안 함' 이미지는 내려받지 않아"; return; }
       if (!file) return;
       dlBtn.disabled = false;
       dlBtn.textContent = pmode && !IMG.productApproved(img) ? `내려받기 (상품 검수 전) · ${file.name}` : img.review_status === '검수 전' ? `검수 완료하고 내려받기 · ${file.name}` : `내려받기 · ${file.name}`;
     };
+    syncDl(); // 이미지 복사 버튼 글자를 처음부터 맞게 (파일 준비 전에도 누를 수 있음)
     const prepare = async () => {
       const my = ++seq;
       file = null; dlBtn.disabled = true; dlBtn.textContent = '파일 준비 중…';
@@ -1828,7 +1859,7 @@ export function createStudio(ui) {
     const altSaved = () => alt.value.trim() === String(img.alt_text || '').trim();
     openSheet(`${slotName(s)} 미리보기`,
       // 내려받기 버튼을 사진보다 위에 (세로로 긴 사진이 휴대폰 화면을 다 덮어도 바로 보이게)
-      dlBtn, outInfo,
+      dlBtn, cpBtn, outInfo,
       wrap, cropNote,
       h('div', { class: 'row' }, field('용도', purposeSel)), h('p', { class: 'legend' }, '비율'), ratioSeg,
       h('div', { class: 'go' }, saveCrop),
@@ -1870,6 +1901,38 @@ export function createStudio(ui) {
     document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 60_000);
   }
+  // 1.7.0 고침: 이미지 복사 — 누른 순간에 클립보드 쓰기를 시작하고(브라우저가 '사용자가 누름'을 요구), 그림은 준비되는 대로 채움
+  function copyImage(getBlob, button, after) {
+    const label = button ? button.textContent : '';
+    const png = Promise.resolve().then(getBlob).then(pngBlob);
+    png.catch(() => {}); // 실패는 아래에서 알림
+    const ok = () => {
+      if (button) { button.textContent = '복사됨'; clearTimeout(button._ct); button._ct = setTimeout(() => { button.textContent = button.dataset.label || label; }, 1800); }
+      toast('복사했어 — 네이버 편집기에서 넣을 자리를 누르고 Ctrl+V 해줘. 이렇게 넣어야 네이버에 올라가서 대표 사진이 되고 안 깨져.', 5000);
+      if (after) after();
+    };
+    const bad = () => toast('이미지 복사가 막혔어. 내려받아서 네이버 사진 버튼으로 올려줘.', 5000);
+    // 약속(Promise)을 담은 복사를 못 받는 브라우저: 그림을 다 만든 뒤 한 번 더
+    const again = () => png.then((b) => navigator.clipboard.write([new ClipboardItem({ 'image/png': b })])).then(ok, bad);
+    let item = null;
+    try { item = new ClipboardItem({ 'image/png': png }); } catch { item = null; }
+    if (!item) { again(); return; }
+    navigator.clipboard.write([item]).then(ok, again);
+  }
+  // 사진 자리에 저장한 용도·자르기 그대로 (내려받는 파일과 같은 그림)
+  function slotOutput(s, img) {
+    const row = s.row || {};
+    const purpose = (row.purpose && IMG.PURPOSES[row.purpose]) ? row.purpose : IMG.slotPurpose(s.key);
+    const ratio = (row.crop && row.crop.ratio) || IMG.defaultRatio(img, purpose);
+    const focus = row.crop ? { x: Number(row.crop.x), y: Number(row.crop.y) } : { x: 0.5, y: 0.5 };
+    return { purpose, ratio, focus, name: 'copy.' + outExt(img) };
+  }
+  // 복사해서 쓰면 내려받기처럼 '사용 가능'으로 (상품 장면 이미지는 상품 디테일 검수를 따로 승인해야 해서 그대로)
+  function reviewedByUse(p, img, then) {
+    if (img.review_status !== '검수 전' || IMG.productSceneMode(img)) return;
+    api('/images/' + img.id, { method: 'POST', body: { review_status: '사용 가능' } }).then(() => { img.review_status = '사용 가능'; if (then) then(); refresh(p.id); }).catch(() => {});
+  }
+  const copyable = (img) => img.review_status !== '사용 안 함' && !(IMG.productSceneMode(img) && !IMG.productApproved(img));
   function downloadAllSheet(p) {
     const d = dataOf(p.id);
     if (!d) return;

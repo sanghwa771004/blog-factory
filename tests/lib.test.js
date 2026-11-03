@@ -228,7 +228,7 @@ describe('1.2.0 이미지가 연결된 원고 내보내기', () => {
   test('미리보기: 사진 자리 순서대로 이미지, 안전한 주소만 그림, 연결 없는 자리는 그대로 자리 표시', () => {
     const html = L.viewHtml(post, [], imgs);
     assert.equal((html.match(/<img /g) || []).length, 1, '안전한 주소 하나만 그림');
-    assert.match(html, /<figure class="img has"><img src="https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co\/storage[^"]+" alt="원룸 청소기"/);
+    assert.match(html, /<figure class="img has" data-n="1" data-ph="사진 1 · 작은 원룸 청소기 보관"><img src="https:\/\/oxewhsqmdkiasckvnyua\.supabase\.co\/storage[^"]+" alt="원룸 청소기"/);
     assert.match(html, /사진 1 · 작은 원룸 청소기 보관 · AI 생성/);
     assert.match(html, /📷 사진 2 · 두 번째 자리<\/div>/);
     assert.match(html, /📷 사진 3 · 세 번째 자리 · 이미지 연결됨/, '주소가 안전하지 않으면 그림 대신 연결됨 표시');

@@ -1456,6 +1456,54 @@ function flash(button) {
   button.textContent = '복사됨'; clearTimeout(button._t);
   button._t = setTimeout(() => { button.textContent = button.dataset.label; }, 1600);
 }
+
+// 1.7.0 고침: 미리보기를 긁어서 복사하면 연결된 사진이 블로그에 '주소 연결'로만 들어가 —
+// 네이버에 올라간 사진이 아니라서 대표 사진(글 목록·홈판 썸네일)이 안 되고, 1시간짜리 서명 주소라 곧 깨짐 (2026-11-03 실제로 겪음).
+// 그래서 미리보기가 걸친 복사는 사진을 '📷 여기에 사진 넣기' 자리로 바꾸고, 제미나이 프롬프트·버튼은 빼고 복사
+function photoSlotEl(label, n) {
+  const ph = document.createElement('p');
+  ph.setAttribute('style', L.PHOTO_SLOT_STYLE);
+  ph.append(`📷 ${label} — 여기에 사진 넣기`);
+  if (n === 1) { const sm = document.createElement('small'); sm.textContent = L.FIRST_PHOTO_NOTE; ph.append(document.createElement('br'), sm); }
+  return ph;
+}
+function cleanPreviewCopy(box) {
+  let photos = 0, other = 0;
+  box.querySelectorAll('.gprompt, button').forEach((x) => { x.remove(); other++; });
+  box.querySelectorAll('figure.img, div.img').forEach((x) => {
+    const label = x.getAttribute('data-ph') || String(x.textContent || '').replace(/\s+/g, ' ').trim().replace(/^(?:📷|🖼️?)\s*/u, '');
+    if (x.querySelector('img')) photos++; else other++;
+    x.replaceWith(photoSlotEl(label, Number(x.getAttribute('data-n') || 0)));
+  });
+  box.querySelectorAll('img').forEach((im) => { photos++; im.replaceWith(photoSlotEl(im.getAttribute('alt') || '사진', 0)); });
+  return { photos, changed: photos + other > 0 };
+}
+function onPreviewCopy(ev) {
+  if (!ev.clipboardData) return;
+  const t = ev.target && (ev.target.nodeType === 1 ? ev.target : ev.target.parentElement);
+  if (t && t.closest && t.closest('input, textarea, [contenteditable="true"]')) return; // 입력칸·복사 버튼이 쓰는 숨은 칸은 그대로
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || !sel.rangeCount) return;
+  const views = [...document.querySelectorAll('.post[id^="pv-"]')];
+  const ranges = Array.from({ length: sel.rangeCount }, (_, i) => sel.getRangeAt(i));
+  if (!views.length || !ranges.some((r) => views.some((v) => r.intersectsNode(v)))) return;
+  const box = document.createElement('div');
+  for (const r of ranges) box.append(r.cloneContents());
+  const c = cleanPreviewCopy(box);
+  if (!c.changed) return; // 글자만 고른 복사는 그대로
+  box.style.cssText = 'position:fixed;left:-9999px;top:0;width:640px';
+  document.body.append(box); // 줄바꿈이 살아 있는 글자를 얻으려고 잠깐 붙임
+  const plain = box.innerText;
+  box.remove();
+  box.removeAttribute('style');
+  ev.clipboardData.setData('text/html', box.innerHTML);
+  ev.clipboardData.setData('text/plain', plain);
+  ev.preventDefault();
+  toast(c.photos
+    ? `사진 ${c.photos}장은 빼고 '📷 여기에 사진 넣기' 자리로 복사했어. 사진은 네이버에 직접 올려야 대표 사진이 되고 안 깨져 (컴퓨터는 사진마다 '이미지 복사' → Ctrl+V).`
+    : "사진 자리·프롬프트는 빼고 복사했어. 서식까지 맞추려면 '서식 그대로 복사'를 써.", 6500);
+}
+document.addEventListener('copy', onPreviewCopy);
 function copyPanel(p, r, links) {
   const ctx = { links, programs: M.prog, images: ST.exportImages(p) };
   const disc = disclosureFor(p.program_ids, M.prog);
@@ -1478,6 +1526,8 @@ function copyPanel(p, r, links) {
     box.append(h('div', { class: 'go' }, btn(`사진 프롬프트 ${gps.length}개 모두 복사`, 'sm ghost', (ev) => copyPlain(L.promptsText(p), ev.currentTarget))),
       h('p', { class: 'hint' }, "📷 사진 자리마다 제미나이 프롬프트가 있어 — 미리보기의 '프롬프트 복사'로 하나씩 제미나이에 붙여 넣어 만들고, 받은 사진을 블로그의 '📷 사진 n' 자리에 넣어줘. 복사한 글에는 프롬프트가 안 들어가."));
   } else if (countImg(p.body)) box.append(h('p', { class: 'hint' }, "📷 사진은 앱이 블로그에 대신 올리지 않아. 복사한 글의 사진 자리마다 내려받을 파일 이름이 적혀 있으니, 원고 아래 '이미지'에서 '모두 내려받기'로 받은 파일을 그 자리에 넣어줘."));
+  // 1.7.0 고침: 대표 사진 — 미리보기를 긁어 붙인 사진은 주소로만 연결돼서 글 목록에 안 보이고 곧 깨짐 (2026-11-03)
+  if (countImg(p.body)) box.append(h('p', { class: 'hint' }, "⭐ 첫 사진이 대표 사진(글 목록·홈판에 보이는 사진)이야 — 썸네일을 맨 위에 넣어줘. 사진은 네이버 사진 버튼으로 올리거나, 컴퓨터에선 사진마다 '이미지 복사' → 그 자리에 Ctrl+V. 미리보기를 긁어 붙인 사진은 주소로만 연결돼서 대표 사진이 안 되고 곧 깨져."));
   box.append(h('p', { class: 'hint' }, "'서식 그대로 복사'는 소제목을 크게, ==강조==와 핵심 상자는 바탕색을 칠해서 붙여 넣어 (네이버 편집기가 일부 서식을 버리면 그 부분만 직접 고쳐줘). 출처가 있으면 글 끝에 '참고 자료'와 [1] 번호가 같이 들어가."));
   // 1.7.0: 네이버가 2026년 5월에 만든 'AI 활용' 표시 (블로그는 권장, 의무 아님 — MTN 2026-07-25 보도)
   if (promptsOf(p.body).some((x) => x.prompt && !x.app)) box.append(h('p', { class: 'hint' }, "🤖 제미나이로 만든 사진처럼 보이는 이미지를 넣으면, 네이버 글쓰기의 'AI 활용' 표시를 켜는 걸 권해 (블로그는 의무가 아니라 권장이야 — 밝히면 오히려 믿음이 가)."));
