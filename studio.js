@@ -1583,7 +1583,7 @@ export function createStudio(ui) {
     const bgOk = (i) => i && i.url && i.kind !== 'card' && !['kogl', 'external'].includes(i.source_type) && i.review_status !== '사용 안 함' && !(IMG.productSceneMode(i) && !IMG.productApproved(i));
     const bgList = [...new Map([...(d0.slots || []), ...(d0.extra || [])].filter((x) => x.key !== s.key && x.row && x.row.image_id).map((x) => imgs0[x.row.image_id]).filter(bgOk).map((i) => [i.id, i])).values()].slice(0, 9);
     const bgNote = h('p', { class: 'hint' });
-    const varChips = h('div', { class: 'chips' });
+    const varChips = h('div', { class: 'chips', role: 'group', 'aria-label': '썸네일 변형' });
     const noteOf = () => (!photoEl ? 'A 색 카드 — 글 종류마다 정해진 색이야.'
       : plain ? `C 사진만 — 배경: ${IMG.originLabel(photoImg)}. 글자 없이 사진만 1:1로 잘라. 제목과 같은 대상이 보이는 사진인지 봐줘.`
         : `B 사진 + 짧은 글자 — 배경: ${IMG.originLabel(photoImg)}. 문구는 5~8자 안팎으로 짧게 해도 돼. 제목과 같은 이야기의 사진인지 봐줘.`);

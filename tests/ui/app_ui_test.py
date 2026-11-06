@@ -3869,7 +3869,7 @@ def main():
                 expect(studio.locator('.slot').nth(0)).to_contain_text('(썸네일) 제목 카드')
                 studio.locator('.slot').nth(0).get_by_role('button', name='썸네일 만들기').click()
                 expect(sheet.locator('canvas.cardprev')).to_be_visible()
-                expect(sheet.locator('.chips button[aria-pressed="true"]')).to_have_text('썸네일 (대표 이미지 1:1)')
+                expect(sheet.locator('.chips:not([aria-label="썸네일 변형"]) button[aria-pressed="true"]')).to_have_text('썸네일 (대표 이미지 1:1)')
                 expect(sheet).to_contain_text('카드 아래 작은 글씨: 기준 2026년 11월 기준')
                 sheet_shot('73-pro170-thumb')
                 n0 = len([c for c in mock.calls if c['path'] == 'images/upload'])
@@ -3879,10 +3879,11 @@ def main():
                 assert len(up) == n0 + 1, '한 번 눌러 한 번 올림'
                 meta = up[-1]['body']['meta']
                 assert meta['kind'] == 'card' and meta['card_label'] == '썸네일' and meta['purpose'] == 'general' and meta['link'] is True, meta
+                assert meta['description'].startswith('썸네일(A 색 카드): '), meta  # 1.8.0: 설명에 썸네일 변형
                 assert up[-1]['body']['mime'] == 'image/png' and up[-1]['body']['size'] > 3000, (up[-1]['body']['mime'], up[-1]['body']['size'])
                 expect(studio.locator('.slot').nth(0).get_by_role('button', name='다시 그리기')).to_be_visible()
                 studio.locator('.slot').nth(1).get_by_role('button', name='정보 카드 만들기').click()
-                expect(sheet.locator('.chips button[aria-pressed="true"]')).to_have_text('체크리스트 — 2. 가습기 종류')
+                expect(sheet.locator('.chips:not([aria-label="썸네일 변형"]) button[aria-pressed="true"]')).to_have_text('체크리스트 — 2. 가습기 종류')
                 sheet.get_by_role('button', name=re.compile('이 카드 쓰기')).click()
                 expect(page.locator('#toast')).to_contain_text('사진 2에 연결했어')
                 meta = [c for c in mock.calls if c['path'] == 'images/upload'][-1]['body']['meta']
