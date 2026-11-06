@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { SEO_RULES, countMe, PLAN_KINDS, PLAN_RUNS, DEFAULT_PLAN, KEEP_DAYS, PLAN_MAX_PER_KIND, promptsOf, parseBody, isAppDrawnSlot, VOICE_PRESETS, figureNumbers } from '../checks.js';
+import { SEO_RULES, countMe, PLAN_KINDS, PLAN_RUNS, DEFAULT_PLAN, KEEP_DAYS, PLAN_MAX_PER_KIND, promptsOf, parseBody, isAppDrawnSlot, VOICE_PRESETS, figureNumbers, FEED_RULES, CLICKBAIT, thumbText, feedCheck } from '../checks.js';
 import { AUTO_RULES, BACKLOG_STAGES, RESCHEDULE_STAGES, backlogInfo, autoPlan } from '../lib.js';
 import { isOwnPhotoSlot } from '../images.js';
 
@@ -175,7 +175,7 @@ test('1.7.0 전문성·사람 말투: 사진 자리·상자·말투·다듬기·
     assert.equal(isAppDrawnSlot(slot.replace(/^\[이미지:\s*|\]$/g, '')), true, slot);
     assert.equal(promptsOf(slot + '\n[프롬프트: 앱이 그리는 정보 카드 — 제미나이 필요 없음]')[0].app, true);
   }
-  assert.ok(ART.includes('[이미지: (썸네일) 제목 카드]') && ART.includes('[이미지: (정보 카드) 무엇을 보여줄지]'));
+  assert.ok(ART.includes('[이미지: (썸네일) 썸네일 문구]') && ART.includes('[이미지: (정보 카드) 무엇을 보여줄지]'));
   // [기준: …]·[용어: …] 예시를 앱이 상자로 읽음
   const basis = PROMPT.match(/"(\[기준: [^"]+\])"/)[1];
   assert.equal(parseBody(basis)[0].t, 'basis');
@@ -208,4 +208,28 @@ test('1.7.0 전문성·사람 말투: 사진 자리·상자·말투·다듬기·
   assert.ok(M021.includes("'naver_blog_invest'") && PROMPT.includes('settings.invest_channel'));
   // 틀: writer_context 에 원문·지문(fp) 없이 구성만
   assert.ok(M021.includes("'templates'") && !/'templates'[\s\S]{0,400}'fp'/.test(M021), 'writer_context 틀에 지문을 안 넘김');
+});
+
+test('1.8.0 홈판 공략: 결론 맨 위·썸네일 문구·제목 규칙·사진 수·주제 이슈가 프롬프트·Claude 안 글공장·앱 홈판 점검에서 같음', () => {
+  // 썸네일 자리 예시를 앱이 썸네일로 알아보고, 문구를 뽑음
+  const ex = PROMPT.match(/"\[이미지: \(썸네일\) ([^"\]]+)\]" — 앱이 크게/)[1];
+  assert.equal(thumbText('(썸네일) ' + ex), ex);
+  assert.ok(isAppDrawnSlot('(썸네일) ' + ex));
+  // 결론 맨 위: 프롬프트·Claude 안 글공장 모두 "> 핵심:" 상자, 앱 홈판 점검이 그 상자를 '첫 3줄에 결론'으로 셈
+  assert.match(PROMPT, /첫 소제목 앞에 "> 핵심: 이 글의 답 한두 문장" 상자를 꼭/);
+  assert.ok(ART.includes('첫 소제목 앞에 \\"> 핵심: 이 글의 답 한두 문장\\" 상자를 꼭'));
+  assert.doesNotMatch(PROMPT, /마지막은 3줄 요약/);
+  const top = feedCheck({ titles: ['t'], body: `[이미지: (썸네일) ${ex}]\n> 핵심: 답부터\n## 소제목\n본문` }, {});
+  assert.equal(top.items.find((x) => x.key === 'top_summary').ok, true);
+  // 제목: 25~40자 = 앱 기준, 낚시 말 목록이 앱 검사에 다 걸림
+  assert.ok(PROMPT.includes(`제목 3개 모두 ${FEED_RULES.titleGoodMin}~${FEED_RULES.titleGoodMax}자`) && ART.includes(`3개 모두 ${FEED_RULES.titleGoodMin}~${FEED_RULES.titleGoodMax}자`));
+  const bait = PROMPT.match(/낚시·과장 말\(([^)]+)\)과 본문에 없는/)[1].split(', ').map((w) => w.replace(/"/g, ''));
+  assert.ok(bait.length >= 8);
+  for (const w of bait) assert.ok(CLICKBAIT.test(w), '앱 낚시 말 검사: ' + w);
+  // 사진 4~8곳 = 앱 기준
+  assert.ok(PROMPT.includes(`한 줄로 ${SEO_RULES.imagesMin}~${SEO_RULES.imagesMax}곳`) && ART.includes(`한 줄로 ${SEO_RULES.imagesMin}~${SEO_RULES.imagesMax}곳`));
+  assert.equal(FEED_RULES.minImages, SEO_RULES.imagesMin);
+  // 오늘 이슈: 블로그 주제와 이어지는 것만, 없으면 주제 안 계절 정보 글
+  assert.match(PROMPT, /블로그 주제와 이어지는 이슈가 오늘 없으면 억지로 엮지 말고, 주제 안의 계절 정보 글/);
+  assert.match(PROMPT, /trending 은 주제 안 세부 분류/);
 });

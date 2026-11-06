@@ -1,5 +1,5 @@
 // lib.js — 앱에서 쓰는 계산 도구 (화면 코드 없음, 테스트 가능)
-import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES, PLAN_KINDS, PLAN_RUNS, cleanPlan, planTotal, KEEP_DAYS, promptsOf, fpOf, FOOTNOTE, isAppDrawnSlot as isAppSlot, VOICE_PRESETS } from './checks.js?v=1.7.0';
+import { parseBody, disclosureFor, SCORE_FACTORS, countMe, focusFit, SEO_RULES, PLAN_KINDS, PLAN_RUNS, cleanPlan, planTotal, KEEP_DAYS, promptsOf, fpOf, FOOTNOTE, isAppDrawnSlot as isAppSlot, VOICE_PRESETS } from './checks.js?v=1.8.0';
 
 // ───────── 날짜·숫자 ─────────
 const WD = ['일', '월', '화', '수', '목', '금', '토'];

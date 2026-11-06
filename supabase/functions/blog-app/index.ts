@@ -23,7 +23,7 @@ import {
   reviewPrompt, parseReview, visionReview, reviewUsageUsd, providerCheck, scrub, storagePath, sha256Hex,
 } from "./image_service.js";
 
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 // 같은 코드를 두 이름으로 올림: blog-app = 모든 기능, blog-gen = 'AI 이미지 만들기' 요청만 받음.
 // 생성 요청이 다른 요청(목록·저장 등)이 쓰던 일꾼에 섞이지 않아서 새 일꾼에서 시작할 때가 많음 → '서버 준비 중' 대기가 줄고,
 // 다른 요청 때문에 일꾼이 멈춰 만들던 이미지를 잃는 일도 줄어듦 (실서버에서 얼마나 줄어드는지는 아직 확인 전)

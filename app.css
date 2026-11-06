@@ -381,3 +381,11 @@ ul.hits li.more{color:var(--muted);list-style:none;margin-left:-20px;font-size:1
 ul.figcheck{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
 ul.figcheck li{border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:2px;min-width:0}
 ul.figcheck small{color:var(--muted);overflow-wrap:anywhere}
+/* 1.8.0 홈판 점검 */
+ul.feedcheck{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:14px}
+ul.feedcheck li{border-left:4px solid var(--line);padding:4px 0 4px 10px;display:flex;flex-direction:column;gap:2px;min-width:0;overflow-wrap:anywhere}
+ul.feedcheck li.ok{border-left-color:var(--done)}
+ul.feedcheck li.mid{border-left-color:var(--warn)}
+ul.feedcheck li.bad{border-left-color:var(--late)}
+ul.feedcheck li span{color:var(--ink)}
+ul.feedcheck small{color:var(--muted);font-size:12px}

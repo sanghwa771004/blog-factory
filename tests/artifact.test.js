@@ -215,7 +215,9 @@ test('1.7.0 말투 카드: 앱(checks.js)과 같은 기본 말투, 저장한 카
   // 앱 'AI 말투 점수'가 잡는 말을 금지 목록으로, 전문가 틀([기준]·[용어]), 썸네일·정보 카드 자리
   for (const ph of ['알아보겠습니다', '결론적으로', '하는 것이 중요합니다', '다양한', '도움이 되셨기를', '많은 분들이']) assert.ok(wp.includes(ph), ph);
   assert.ok(wp.includes('[기준: 이 글의 기준 — 예: 2026년 11월 기준]') && wp.includes('[용어: 용어 — 한 줄 풀이]') && wp.includes('출처 번호'), '전문가 틀');
-  assert.ok(wp.includes('[이미지: (썸네일) 제목 카드]') && wp.includes('[이미지: (정보 카드)') && wp.includes('깔끔한 일러스트'), '앱이 그리는 자리·일러스트 위주');
+  assert.ok(wp.includes('[이미지: (썸네일) 썸네일 문구]') && wp.includes('[이미지: (정보 카드)') && wp.includes('깔끔한 일러스트'), '앱이 그리는 자리·일러스트 위주');
+  // 1.8.0 홈판: 결론 맨 위 '> 핵심' 상자, 제목 25~40자·낚시 말 금지, 짧은 문단
+  assert.ok(wp.includes('첫 소제목 앞에 \"> 핵심: 이 글의 답 한두 문장\" 상자를 꼭') && wp.includes('3개 모두 25~40자') && wp.includes('2~3문장(휴대폰 3~4줄)마다 끊어') && !wp.includes('마지막은 3줄 요약'), '1.8.0 홈판 규칙');
   const sns = P17.buildWritePrompt({ keyword: 'x', channel: ch.threads, programs: [], contentType: 'sns_short', products: [], recent: [], today: '2026-11-03', allowed: ['sns_short'], voice: '반말로 짧게 써.' });
   assert.ok(!sns.includes('- 말투 카드') && !sns.includes('[기준:') && !sns.includes('(썸네일)'), 'SNS 글은 블로그 틀을 강제하지 않음');
   // 문서(자동 작가 프롬프트)의 금지 목록과 같은 말

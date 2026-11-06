@@ -2,7 +2,7 @@
 // 화면(메인 스레드)이 받아서 해시를 확인한 모델·실행기 파일을 넘겨주면, 여기서만 계산해 — 처리하는 동안 화면이 멈추지 않게.
 // 취소는 화면이 이 일꾼을 끝내는(terminate) 방식이라 계산 중간에도 바로 멈춤. 사진은 이 기기 밖으로 나가지 않음.
 import * as ort from './vendor/onnxruntime-web/ort.wasm.bundle.min.mjs';
-import { segInput, probToMap, mapToMask, twoPassMap, maskQuality, SEG_SIZE } from './cutout.js?v=1.7.0';
+import { segInput, probToMap, mapToMask, twoPassMap, maskQuality, SEG_SIZE } from './cutout.js?v=1.8.0';
 
 let session = null;
 const runModel = async (rgba, w, h) => {

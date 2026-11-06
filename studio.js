@@ -1,10 +1,11 @@
 // studio.js — 이미지 스튜디오 화면 (원고 상세의 '이미지' 칸, 만들기·찾기·올리기·고르기, 미리보기·자르기·내려받기, 카드뉴스, 보관함, 설정, 이미지 비용)
 // OpenAI·Pexels 키는 서버(Supabase Secrets)에만 있음. 이 화면은 서버가 알려주는 '키 있음/없음'만 보고, 이미지는 1시간짜리 서명 주소로만 봄.
 // 앱은 블로그에 사진을 대신 올리지 않음 — 사용자가 내려받아서 직접 넣음.
-import * as IMG from './images.js?v=1.7.0';
-import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.7.0';
-import { cardCandidates, bestCandidate, renderInfoCard, themeOf, footnoteOf, fontsFor } from './infocards.js?v=1.7.0';
-import { createProduct, PRODUCT_ERR } from './product.js?v=1.7.0';
+import * as IMG from './images.js?v=1.8.0';
+import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.8.0';
+import { cardCandidates, bestCandidate, renderInfoCard, themeOf, footnoteOf, fontsFor } from './infocards.js?v=1.8.0';
+import { createProduct, PRODUCT_ERR } from './product.js?v=1.8.0';
+import { thumbText } from './checks.js?v=1.8.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -1559,6 +1560,11 @@ export function createStudio(ui) {
   function infoCardSheet(p, s) {
     const post = (ui.post && ui.post(p.id)) || p;
     const cands = cardCandidates(post);
+    // 1.8.0: 썸네일 자리에 짧은 문구가 있으면("(썸네일) 거실 가습기 고르기") 그 문구를 크게 — 홈판 카드는 짧은 글자가 잘 보임
+    const tc = cands.find((c) => c.type === 'thumb');
+    const baseTitle = tc ? tc.title : '';
+    const tt = thumbText(s.text);
+    if (tc && tt) tc.title = tt;
     let cur = bestCandidate(cands, s.text) || cands[0];
     const theme = themeOf(post);
     const brand = String(settings().brand_name || '').trim();
@@ -1566,20 +1572,47 @@ export function createStudio(ui) {
     const canvas = h('canvas', { class: 'cardprev', role: 'img', 'aria-label': '카드 미리보기' });
     const warn = h('p', { class: 'notice', hidden: true }, '글자가 많아 잘린 곳이 있어. 원고의 표·목록을 줄이면 다 들어가.');
     const seg = h('div', { class: 'chips' });
+    // 1.8.0 썸네일: 문구 고치기 + 배경 (색 카드 / 이 글의 사진)
+    let photoEl = null, photoImg = null;
+    const ttInput = h('input', { type: 'text', maxlength: '40', value: tc ? tc.title : '', 'aria-label': '썸네일 문구' });
+    ttInput.addEventListener('input', () => { if (tc) { tc.title = ttInput.value.trim() || baseTitle; if (cur === tc) draw(); } });
+    const d0 = dataOf(p.id) || {};
+    const imgs0 = imgsOf(p.id);
+    // 배경으로 쓸 수 있는 사진: 이 글 다른 자리에 연결된 사진 중 출처 표시가 꼭 필요한 것(공공누리·외부)·'사용 안 함'·검수 전 상품 장면은 빼고
+    const bgOk = (i) => i && i.url && i.kind !== 'card' && !['kogl', 'external'].includes(i.source_type) && i.review_status !== '사용 안 함' && !(IMG.productSceneMode(i) && !IMG.productApproved(i));
+    const bgList = [...new Map([...(d0.slots || []), ...(d0.extra || [])].filter((x) => x.key !== s.key && x.row && x.row.image_id).map((x) => imgs0[x.row.image_id]).filter(bgOk).map((i) => [i.id, i])).values()].slice(0, 9);
+    const bgNote = h('p', { class: 'hint' });
+    const choosePhoto = async (i, button) => {
+      if (!i) { photoEl = null; photoImg = null; bgNote.textContent = '색 카드 — 글 종류마다 정해진 색이야.'; draw(); return; }
+      if (button) button.disabled = true;
+      bgNote.textContent = '사진 불러오는 중…';
+      try { const src = await loadSource(i); photoEl = src.el; photoImg = i; bgNote.textContent = `배경: ${IMG.originLabel(i)} — 사진 위에 문구를 흰 글씨로 크게 얹었어. 제목과 같은 이야기의 사진인지 봐줘.`; draw(); }
+      catch { bgNote.textContent = '사진을 불러오지 못했어. 새로고침한 뒤 다시 해줘 (주소는 1시간 동안만 열려).'; }
+      finally { if (button) button.disabled = false; }
+    };
+    const thumbBox = h('div', { class: 'stack' },
+      field('썸네일 문구 (짧게 — 두 줄 안팎, 제목과 같은 이야기)', ttInput),
+      h('p', { class: 'legend' }, '배경'),
+      h('div', { class: 'go' }, btn('색 카드', 'sm ghost', () => choosePhoto(null))),
+      bgList.length ? h('div', { class: 'grid3' }, bgList.map((i) => pickThumb(i, (ev) => choosePhoto(i, ev.currentTarget))))
+        : h('p', { class: 'hint' }, '이 글의 다른 자리에 사진을 연결하면 그 사진을 배경으로 쓸 수 있어 (출처 표시가 꼭 필요한 공공누리·외부 사진은 빼).'),
+      bgNote);
     let seq = 0;
+    const opts = (scale) => ({ theme, brand, foot, scale, photo: cur && cur.type === 'thumb' ? photoEl : null });
     const draw = async () => {
       const my = ++seq;
       put(seg, cands.map((c) => h('button', { type: 'button', class: 'copy', 'aria-pressed': String(c === cur), onclick: () => { cur = c; draw(); } }, c.label)));
+      thumbBox.hidden = !(cur && cur.type === 'thumb');
       await fontsFor(cur);
       if (my !== seq) return;
-      const r = renderInfoCard(canvas, cur, { theme, brand, foot, scale: 0.5 });
+      const r = renderInfoCard(canvas, cur, opts(0.5));
       warn.hidden = !r.overflow;
     };
-    const full = async () => { const c = document.createElement('canvas'); await fontsFor(cur); renderInfoCard(c, cur, { theme, brand, foot, scale: 1 }); return canvasToBlob(c, 'image/png'); };
+    const full = async () => { const c = document.createElement('canvas'); await fontsFor(cur); renderInfoCard(c, cur, opts(1)); return canvasToBlob(c, 'image/png'); };
     const isThumb = () => cur && cur.type === 'thumb';
     openSheet(`${slotName(s)} — 정보 카드·썸네일`,
       h('p', { class: 'hint' }, '원고의 제목·표·목록·3줄 요약·숫자 확인표·용어 풀이로 앱이 직접 그려 (AI·남의 사진 없이, 글자 안 깨짐). 글 종류마다 색이 정해져 있어서 매일 같은 모양으로 보여.'),
-      seg, canvas, warn, foot ? h('p', { class: 'hint' }, `카드 아래 작은 글씨: ${foot}`) : null,
+      seg, canvas, warn, thumbBox, foot ? h('p', { class: 'hint' }, `카드 아래 작은 글씨: ${foot}`) : null,
       btn(`이 카드 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => {
         const button = ev.currentTarget;
         const thumbNow = isThumb();
@@ -1588,7 +1621,7 @@ export function createStudio(ui) {
           const fd = new FormData();
           // 썸네일은 1:1 그대로 (본문 사진 기본 4:3 으로 잘리지 않게 '일반 삽화용'), 정보 카드는 4:3
           fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose: thumbNow ? 'general' : 'blog_body', link: true, kind: 'card', card_label: thumbNow ? '썸네일' : '정보 카드',
-            description: (thumbNow ? '썸네일: ' : '정보 카드: ') + String(cur.title || cur.label || '').slice(0, 200) }));
+            description: (thumbNow ? (photoEl ? `썸네일(사진 배경 — ${IMG.originLabel(photoImg)}): ` : '썸네일: ') : '정보 카드: ') + String(cur.title || cur.label || '').slice(0, 200) }));
           fd.append('file', blob, (thumbNow ? 'thumbnail' : 'infocard') + '.png');
           return api('/images/upload', { method: 'POST', body: fd });
         });

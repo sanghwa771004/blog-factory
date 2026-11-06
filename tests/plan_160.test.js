@@ -93,13 +93,13 @@ describe('검사 (checkPost) — 1.6.0', () => {
   const run = (post, ctx = {}) => checkPost({ titles: ['제목 하나'], channel_id: 'naver_blog', program_ids: [], keyword: '겨울 가습기 세척 쉬운 제품', ...post }, { channels, ...ctx });
   const codes = (r) => [...r.errors, ...r.warnings, ...r.tips].map((x) => x.code);
 
-  test('사진 자리 3~6곳 기준 (밖이면 알려만 줌), 계획 글은 프롬프트 빠진 자리를 알려줌', () => {
-    const two = '[이미지: a]\n[프롬프트: a]\n[이미지: b]\n[프롬프트: b]' + filler;
-    assert.ok(codes(run({ body: two })).includes('image_count'));
-    assert.ok(!codes(run({ body: two + '\n[이미지: c]\n[프롬프트: c]' })).includes('image_count'));
-    const seven = Array.from({ length: 7 }, (_, i) => `[이미지: ${i}]\n[프롬프트: ${i}]`).join('\n') + filler;
-    assert.ok(codes(run({ body: seven })).includes('image_count'));
-    assert.equal(SEO_RULES.imagesMin, 3); assert.equal(SEO_RULES.imagesMax, 6);
+  test('사진 자리 4~8곳 기준 (1.8.0 — 밖이면 알려만 줌), 계획 글은 프롬프트 빠진 자리를 알려줌', () => {
+    const slots = (n) => Array.from({ length: n }, (_, i) => `[이미지: ${i}]\n[프롬프트: ${i}]`).join('\n') + filler;
+    assert.ok(codes(run({ body: slots(3) })).includes('image_count'));
+    assert.ok(!codes(run({ body: slots(4) })).includes('image_count'));
+    assert.ok(!codes(run({ body: slots(8) })).includes('image_count'));
+    assert.ok(codes(run({ body: slots(9) })).includes('image_count'));
+    assert.equal(SEO_RULES.imagesMin, 4); assert.equal(SEO_RULES.imagesMax, 8);
     const noPrompt = '[이미지: a]\n[프롬프트: a]\n[이미지: b]\n[이미지: c]' + filler;
     assert.ok(codes(run({ body: noPrompt, plan_kind: 'adpost' })).includes('image_prompt_missing'));
     assert.ok(!codes(run({ body: noPrompt })).includes('image_prompt_missing'), '계획 글이 아니면 안 따짐');

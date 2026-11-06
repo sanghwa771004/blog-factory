@@ -4,6 +4,7 @@
 import { test, before, after, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { HAS_DENO, SKIP as skip, startServer, pg } from './harness.mjs';
+import { readFileSync } from 'node:fs';
 
 const POST = '77777777-7777-4777-8777-777777777777';
 const MARKET = '88888888-8888-4888-8888-888888888888';
@@ -123,7 +124,7 @@ describe('021 뒤', () => {
     const st = await srv.call('GET', 'state');
     assert.equal(st.status, 200);
     assert.equal(st.j.templates.length, 1);
-    assert.equal(st.j.version, '1.7.0');
+    assert.equal(st.j.version, JSON.parse(readFileSync(new URL('../../version.json', import.meta.url), 'utf8')).version, '서버 버전 = version.json');
     db.templates = [];
   });
   test('말투 카드: 기본 말투 이름만 받고, 내 말투는 카드·예시 3개까지 (원문은 안 받음), 모르는 이름은 범위 기본값', { skip }, async () => {

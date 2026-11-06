@@ -4047,6 +4047,79 @@ def main():
                 dctx.close()
         check("1.7.0 고침: 미리보기를 긁어 복사하면 사진은 '여기에 사진 넣기' 자리로(프롬프트·버튼·서명 주소 없음), 글자만 복사는 그대로, 첫 사진 대표 안내, 컴퓨터에선 사진·미리보기 창·썸네일 창의 '이미지 복사'가 PNG 그림", t_copy_photo_fix)
 
+        # ═════════ 1.8.0 홈판 공략: 홈판 점검·누락 확인·썸네일 문구·사진 배경 썸네일 ═════════
+        def t_feed_180():
+            close_sheet()
+            P = mock.new_id()
+            para = '물때가 끼면 냄새가 먼저 올라오거든요. 그래서 통이 넓게 열리는 게 편해요.\n'
+            body = ('[이미지: (썸네일) 거실 가습기, 세척부터 봐요]\n[프롬프트: 앱이 그리는 썸네일 — 제미나이 필요 없음]\n> 핵심: 거실이면 용량보다 세척 쉬운지부터 봐요.\n'
+                    '## 거실 가습기, 왜 세척이 먼저일까?\n[기준: 2026년 11월 6일 기준]\n' + para * 8 +
+                    '[이미지: 거실 창가 가습기]\n[프롬프트: 거실 창가 선반 위 상표 없는 흰 가습기, 4:3, 글자 없이]\n'
+                    '## 이런 분께는 안 맞아요\n방이 아주 넓으면 한 대로는 부족할 수 있어요.\n[이미지: 물통을 씻는 손]\n[프롬프트: 주방 개수대에서 물통을 씻는 손, 4:3, 글자 없이]')
+            mock.posts.append({**dict(mock.posts[0]), 'id': P, 'keyword': '거실 가습기 세척 쉬운 제품', 'titles': ['거실 가습기 고르기, 세척 쉬운 제품 3가지 기준'],
+                               'stage': 'review', 'program_ids': ['naver_adpost'], 'content_type': 'checklist', 'publish_date': D(0), 'created_at': NOW,
+                               'source': 'auto', 'plan_kind': 'adpost', 'keep': False, 'body': body})
+            sl = parse_slots(body)
+            photo = mock.add_image('upload', P, sl[1]['key'], fx='16x9', review_status='사용 가능', source_type='own')
+            mock.link(P, sl[1]['key'], photo['id'])
+            saved = {k: mock.settings.get(k) for k in ('focus_topic', 'focus_terms', 'auto_topics')}
+            mock.settings.update({'focus_topic': '계절템·겨울 가전', 'focus_terms': '히터, 전기요, 가습기, 제습기', 'auto_topics': '계절템·겨울 가전, 디지털·전자기기'})
+            try:
+                reload_keys()
+                goto_hash('content/post/' + P)
+                feed = page.locator('section.panel', has=page.locator('h2', has_text='홈판 점검'))
+                expect(feed).to_contain_text('홈판 점수')
+                for t in ['✓ 첫 사진이 썸네일(대표 사진)', '✓ 썸네일 문구가 제목과 같은 이야기', '✓ 첫 3줄에 결론·핵심', '✓ 제목 27자', '✓ 블로그 주제와 맞음',
+                          '✓ 낚시·과장 말 없음', '✓ 언제 정보인지 보임', '△ 직접 겪은 내용', '네이버 공식', '데이터 연구 1개 — 시험']:
+                    expect(feed).to_contain_text(t)
+                expect(feed).to_contain_text('사진 3장')
+                link = feed.get_by_role('link', name=re.compile('누락 확인'))
+                href = link.get_attribute('href')
+                assert href.startswith('https://search.naver.com/search.naver?query=%22') and link.get_attribute('target') == '_blank', href
+                assert '%EB%B0%A9' in href or '%EA%B7%B8' in href or '%EB%AC%BC' in href, href  # 이 글 문장(한글)으로 검색
+                no_overflow('1.8.0 홈판 점검')
+                shot('80-feed180-panel')
+                # 썸네일: 자리의 짧은 문구가 그대로, 이 글의 사진을 배경으로
+                studio = page.locator('section.studio')
+                studio.locator('.slot').nth(0).get_by_role('button', name='썸네일 만들기').click()
+                expect(sheet.locator('canvas.cardprev')).to_be_visible()
+                ti = sheet.get_by_label('썸네일 문구')
+                expect(ti).to_have_value('거실 가습기, 세척부터 봐요')
+                page.wait_for_timeout(400)
+                flat = page.evaluate("document.querySelector('#sheet canvas.cardprev').toDataURL()")
+                sheet.locator('.grid3 button.pick').first.click()
+                expect(sheet).to_contain_text('배경: ')
+                page.wait_for_timeout(500)
+                photo_url = page.evaluate("document.querySelector('#sheet canvas.cardprev').toDataURL()")
+                assert photo_url != flat, '사진 배경으로 다시 그림'
+                # 가운데(사진 위) 픽셀이 색 카드 배경색이 아님 — 사진이 깔림
+                px = page.evaluate("(() => { const c = document.querySelector('#sheet canvas.cardprev'); const d = c.getContext('2d').getImageData(Math.round(c.width*0.5), Math.round(c.height*0.9), 1, 1).data; return [d[0], d[1], d[2]]; })()")
+                assert px != [242, 247, 252], px
+                ti.fill('세척 쉬운 가습기')
+                page.wait_for_timeout(300)
+                sheet_shot('81-feed180-photo-thumb')
+                n0 = len([c for c in mock.calls if c['path'] == 'images/upload'])
+                sheet.get_by_role('button', name=re.compile('이 카드 쓰기')).click()
+                expect(page.locator('#toast')).to_contain_text('사진 1에 연결했어')
+                up = [c for c in mock.calls if c['path'] == 'images/upload']
+                assert len(up) == n0 + 1
+                meta = up[-1]['body']['meta']
+                assert meta['card_label'] == '썸네일' and meta['description'].startswith('썸네일(사진 배경 — ') and '세척 쉬운 가습기' in meta['description'], meta
+                assert up[-1]['body']['mime'] == 'image/png' and up[-1]['body']['size'] > 3000
+                # 색 카드로 되돌리기도 됨
+                studio.locator('.slot').nth(0).get_by_role('button', name='다시 그리기').click()
+                sheet.get_by_role('button', name='색 카드').click()
+                expect(sheet).to_contain_text('색 카드 — 글 종류마다 정해진 색이야.')
+                close_sheet()
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        mock.settings.pop(k, None)
+                    else:
+                        mock.settings[k] = v
+                reload_keys()
+        check('1.8.0 홈판 공략: 홈판 점검(근거 표시·✓△✗)·누락 확인 링크·썸네일 문구가 자리 문구 그대로·이 글의 사진을 배경으로 그려서 연결·색 카드로 되돌리기', t_feed_180)
+
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():
             close_sheet()  # 앞 시험이 연 창이 남아 있으면 닫고 (창이 새로고침 버튼을 가리지 않게)

@@ -1,14 +1,14 @@
-// 글공장 앱 1.7.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
+// 글공장 앱 1.8.0 — 화면 코드 (원고 규칙은 checks.js, 계산은 lib.js, 이미지 규칙은 images.js, 이미지 화면은 studio.js, 저장은 서버 API)
 import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
   PLAN_KINDS, PLAN_RUNS, PLAN_MAX_PER_KIND, KEEP_DAYS, cleanPlan, planTotal, promptsOf, bodyChars,
-  aiTone, AI_TONE_GOOD, AI_TONE_BAD, VOICE_PRESETS, VOICE_SCOPES, voiceCard, unlistedNumbers,
-} from './checks.js?v=1.7.0';
-import * as L from './lib.js?v=1.7.0';
-import * as IMG from './images.js?v=1.7.0';
-import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.7.0';
+  aiTone, AI_TONE_GOOD, AI_TONE_BAD, VOICE_PRESETS, VOICE_SCOPES, voiceCard, unlistedNumbers, feedCheck,
+} from './checks.js?v=1.8.0';
+import * as L from './lib.js?v=1.8.0';
+import * as IMG from './images.js?v=1.8.0';
+import { createStudio, IMAGE_ERR, IMAGE_FIELD, IMAGE_REASON } from './studio.js?v=1.8.0';
 
-const APP_VER = '1.7.0';
+const APP_VER = '1.8.0';
 const API = 'https://oxewhsqmdkiasckvnyua.supabase.co/functions/v1/blog-app';
 const RUN_TIMES = [[8, 51], [13, 21], [18, 51]]; // 자동 작가 실행 시각(한국 시간). 예약 작업 시간과 같아야 함 (1.6.0: 점심은 오후 1:21 — 오늘 뜬 주제)
 const ARTIFACT_URL = 'https://claude.ai/artifact/Va1guCB2shG1Gm7rLXUNCX';
@@ -1145,7 +1145,7 @@ function viewPost(id) {
     box.append(bodyPanel(p));
     // 1.7.0: 사람 말투 점검·다듬기, 투자 글의 숫자 확인표
     const kindOf = (M.ch[p.channel_id] || {}).kind;
-    if (kindOf === 'blog' || kindOf === 'site') box.append(tonePanel(p));
+    if (kindOf === 'blog' || kindOf === 'site') box.append(feedPanel(p), tonePanel(p));
     if ((p.figures && p.figures.length) || (PLAN_KINDS[p.plan_kind] && PLAN_KINDS[p.plan_kind].invest) || (CONTENT_TYPES[p.content_type] && CONTENT_TYPES[p.content_type].invest)) box.append(figuresPanel(p));
     if (!WORK.includes(p.stage)) box.append(ST.postPanel(p));
     box.append(linksPanel(p, links));
@@ -1163,6 +1163,24 @@ function viewPost(id) {
   if (p.body && (LIVE.includes(p.stage) || (p.refresh && Object.keys(p.refresh).length))) box.append(refreshPanel(p));
   box.append(jobsPanel(p));
   return box;
+}
+
+// ───────── 1.8.0 홈판 점검 (원고만 보고 계산 — 참고 점수, 발행은 막지 않음) ─────────
+// 근거마다 '네이버 공식 / 여러 실무자 / 데이터 연구 1개 — 시험'을 같이 보여줌 (2026-11-06 조사 보고서)
+function feedPanel(p) {
+  const st = S.settings || {};
+  const f = feedCheck(p, { focus: st.focus_topic, focusTerms: st.focus_terms, autoTopics: st.auto_topics });
+  const mark = (ok) => (ok === true ? '✓' : ok === null ? '△' : '✗');
+  const items = h('ul', { class: 'feedcheck' }, f.items.map((x) => h('li', { class: x.ok === true ? 'ok' : x.ok === null ? 'mid' : 'bad' },
+    h('b', null, mark(x.ok) + ' ' + x.label), x.hint ? h('span', null, ' — ' + x.hint) : null, h('small', null, x.basis))));
+  // 누락 확인: 올린 뒤 하루~사흘 지나 이 글에만 있는 문장으로 네이버를 검색 → 내 글이 나오면 검색에 잡힌 것
+  const q = f.sentence ? 'https://search.naver.com/search.naver?query=' + encodeURIComponent(`"${f.sentence}"`) : '';
+  return panel('홈판 점검',
+    h('p', { class: f.score >= 80 ? 'okbox' : f.score >= 60 ? 'notice' : 'badbox' }, `홈판 점수 ${f.score}점 — ${f.verdict}`),
+    items,
+    h('p', { class: 'hint' }, "✓ 됨 · △ 시험·참고 · ✗ 손볼 곳. 홈판은 사람마다 다르게 뜨는 추천이라 점수가 높아도 꼭 뜨는 건 아니야. 같은 주제로 2~4주는 꾸준히 올려야 결과가 보여."),
+    q ? h('div', { class: 'go' }, h('a', { class: 'btn sm ghost', href: q, target: '_blank', rel: 'noopener noreferrer' }, '누락 확인 (네이버에서 이 글 문장 검색) ↗')) : null,
+    q ? h('p', { class: 'hint' }, `올리고 하루~사흘 뒤에 눌러봐. "${f.sentence}"로 검색해서 내 글이 안 나오면 검색에 안 잡힌 거야(누락).`) : null);
 }
 
 // ───────── 1.7.0 사람 말투 점검 · 숫자 확인표 ─────────

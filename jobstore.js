@@ -5,7 +5,7 @@
 // 예외 하나: 손으로 고쳤는데 아직 서버에 저장하지 않은 마스크(남길 영역)는 PNG 로 같이 둠 (보통 수십~수백 KB).
 // 보존: 마지막으로 고친 뒤 14일, 다 끝낸 작업은 3일, 많아야 8개(오래된 것부터 지움). 로그아웃하면 모두 지움.
 // Safari 는 이 사이트를 7일 동안 안 쓰면 브라우저 저장소를 먼저 지울 수 있어 — 그때는 이어 하기가 안 보이고, 만든 이미지는 보관함(서버)에 그대로 있어.
-import { cleanProductSpec, cleanLayer, validSlotKey, RATIOS } from './images.js?v=1.7.0';
+import { cleanProductSpec, cleanLayer, validSlotKey, RATIOS } from './images.js?v=1.8.0';
 
 export const JOB_VERSION = 1;
 export const KEEP_DAYS = 14;

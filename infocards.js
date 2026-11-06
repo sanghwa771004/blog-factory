@@ -1,8 +1,8 @@
 // infocards.js — 1.7.0 앱이 그리는 정보 카드·썸네일
 // 원고의 표·목록·요약·숫자 확인표·용어 풀이를 블로그 전용 디자인 PNG로 그림 (남의 사진 없이, 저작권 걱정 없이, 글자 안 깨짐)
 // 후보 고르기(cardCandidates·bestCandidate)는 화면 없이 계산만 → 테스트 가능. 그리기(renderInfoCard)는 캔버스
-import { parseBody, PLAN_KINDS, INFO_CARD_SLOT, THUMB_SLOT } from './checks.js?v=1.7.0';
-import { FONT_TITLE, FONT_BODY, fitText, wrapLines, roundRect, drawIcon, ensureFonts } from './cards.js?v=1.7.0';
+import { parseBody, PLAN_KINDS, INFO_CARD_SLOT, THUMB_SLOT } from './checks.js?v=1.8.0';
+import { FONT_TITLE, FONT_BODY, fitText, wrapLines, roundRect, drawIcon, ensureFonts } from './cards.js?v=1.8.0';
 
 export const CARD_SIZES = { thumb: [1080, 1080], card: [1200, 900] };
 // 글 종류마다 색 (매일 같은 색이면 홈판에서 '채널'처럼 보임)
@@ -95,16 +95,53 @@ function drawLinesAt(ctx, fit, x, y, lh, color) {
   for (const line of fit.lines) { yy += fit.size; ctx.fillText(line, x, yy); yy += fit.size * (lh - 1); }
   return yy;
 }
+// 1.8.0: 홈판 카드는 휴대폰에서 1:1, 컴퓨터에서 3:2 로 잘려 보임 → 글자·띠는 가운데 띠(위아래 17% 안쪽) 안에 (2026-11-06 조사)
+export const THUMB_SAFE = { top: 0.18, bottom: 0.82 };
+const hashOf = (s) => { let x = 0; for (const ch of String(s || '')) x = (x * 31 + ch.codePointAt(0)) >>> 0; return x; };
+// 1.8.0 사진 썸네일: 사진을 꽉 채우고(초점 자리 기준으로 자름) 어둡게 덮은 뒤, 짧은 문구를 흰 글씨로 크게 (사용자가 직접 만들던 모양)
+function drawPhotoThumb(ctx, W, H, T, c, o) {
+  const P = 84, img = o.photo;
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  const s = Math.max(W / iw, H / ih), dw = iw * s, dh = ih * s;
+  const fx = o.focus && Number.isFinite(o.focus.x) ? o.focus.x : 0.5, fy = o.focus && Number.isFinite(o.focus.y) ? o.focus.y : 0.5;
+  ctx.drawImage(img, (W - dw) * fx, (H - dh) * fy, dw, dh);
+  ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fillRect(0, 0, W, H);
+  const g = ctx.createLinearGradient(0, H * THUMB_SAFE.top - 40, 0, H * 0.66);
+  g.addColorStop(0, 'rgba(0,0,0,0.58)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H * 0.66);
+  const top = Math.round(H * THUMB_SAFE.top);
+  if (c.series || o.pill) pillAt(ctx, (c.series || T.label).slice(0, 18), P, top, T, 32);
+  const fit = fitText(ctx, c.title || '', { font: FONT_TITLE, maxW: W - P * 2, maxH: H * 0.4, maxSize: 128, minSize: 64, lineHeight: 1.14 });
+  ctx.font = FONT_TITLE(fit.size);
+  ctx.textAlign = 'center'; ctx.lineJoin = 'round';
+  let y = top + (c.series || o.pill ? 84 : 10);
+  for (const line of fit.lines) {
+    y += fit.size;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)'; ctx.shadowBlur = 22;
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = Math.max(6, fit.size * 0.11); ctx.strokeText(line, W / 2, y);
+    ctx.restore();
+    ctx.fillStyle = '#FFFFFF'; ctx.fillText(line, W / 2, y);
+    y += fit.size * 0.14;
+  }
+  ctx.textAlign = 'left';
+  if (o.brand) { ctx.font = FONT_BODY(30, 600); ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillText(o.brand.slice(0, 24), P, Math.round(H * THUMB_SAFE.bottom)); }
+  return fit.overflow;
+}
 function drawThumb(ctx, W, H, T, c, o) {
+  if (o.photo) return drawPhotoThumb(ctx, W, H, T, c, o);
   const P = 84;
   ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
-  ctx.fillStyle = T.soft; ctx.beginPath(); ctx.arc(W - 60, 150, W * 0.34, 0, Math.PI * 2); ctx.fill();
+  // 1.8.0: 같은 색·같은 모양만 매일 반복하지 않게 둥근 장식 자리를 글마다 바꿈 (색은 그대로 — 채널처럼 보이게)
+  const v = hashOf(c.title) % 3;
+  const [cx, cy] = [[W - 60, 150], [60, H - 150], [W - 40, H - 120]][v];
+  ctx.fillStyle = T.soft; ctx.beginPath(); ctx.arc(cx, cy, W * 0.34, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = T.accent; ctx.fillRect(0, H - 28, W, 28);
-  pillAt(ctx, (c.series || T.label).slice(0, 18), P, P, T, 34);
-  const fit = fitText(ctx, c.title || '', { font: FONT_TITLE, maxW: W - P * 2, maxH: H * 0.5, maxSize: 112, minSize: 62, lineHeight: 1.18 });
+  pillAt(ctx, (c.series || T.label).slice(0, 18), P, Math.round(H * THUMB_SAFE.top), T, 34);
+  const fit = fitText(ctx, c.title || '', { font: FONT_TITLE, maxW: W - P * 2, maxH: H * 0.44, maxSize: 112, minSize: 62, lineHeight: 1.18 });
   const th = fit.lines.length * fit.size * 1.18;
   ctx.font = FONT_TITLE(fit.size);
-  const y0 = Math.max(P + 140, Math.round((H - th) / 2 + 10));
+  const y0 = Math.max(Math.round(H * THUMB_SAFE.top) + 100, Math.round((H - th) / 2 + 10));
   // 첫 줄 아래 형광펜
   let yy = y0;
   fit.lines.forEach((line, i) => {
@@ -113,7 +150,7 @@ function drawThumb(ctx, W, H, T, c, o) {
     ctx.fillStyle = T.ink; ctx.fillText(line, P, yy);
     yy += fit.size * 0.18;
   });
-  if (o.brand) { ctx.font = FONT_BODY(30, 500); ctx.fillStyle = T.muted; ctx.fillText(o.brand.slice(0, 24), P, H - P); }
+  if (o.brand) { ctx.font = FONT_BODY(30, 500); ctx.fillStyle = T.muted; ctx.fillText(o.brand.slice(0, 24), P, Math.round(H * THUMB_SAFE.bottom) + 40); }
   return fit.overflow;
 }
 function drawTitleTop(ctx, W, T, P, title, maxSize = 64) {
