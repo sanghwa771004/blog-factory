@@ -1021,7 +1021,8 @@ export function opsFunnel({ posts, postChannels, metricPostIds, topics, programs
 // 묶음(group): more = 더 쓸 것, fix = 고칠 것, stop = 그만할 것(줄일 것), data = 데이터 먼저
 export const REC_GROUPS = { more: '더 쓸 것', fix: '고칠 것', stop: '그만할 것', data: '데이터 먼저' };
 // postChannels 가 null 이면(못 읽음) '안 퍼뜨린 글' 추천은 안 함. channels 를 주면 올릴 다른 채널이 없는 글도 뺌
-export function recommendations({ posts, byPost, products, postProducts, searchTerms, postChannels, channels, today }) {
+// citations: 설정의 AI 브리핑 누적 인용 수 [{on, total}] (1.8.0 — DB 022 전이면 undefined → 인용 수 알림 안 함)
+export function recommendations({ posts, byPost, products, postProducts, searchTerms, postChannels, channels, today, citations }) {
   const recs = [];
   const t = today || todayStr();
   const map = new Map((byPost || []).map((a) => [a.key, a]));
@@ -1108,6 +1109,20 @@ export function recommendations({ posts, byPost, products, postProducts, searchT
     const stale = prods.filter((x) => (x.price_checked_at && daysSince(x.price_checked_at, t) > 30) || (x.info_checked_at && daysSince(x.info_checked_at, t) > 90));
     const oldSrc = (p.sources || []).filter((s) => s && s.checked_at && daysSince(s.checked_at, t) > 180);
     if (stale.length || oldSrc.length) recs.push({ kind: 'recheck', group: 'fix', postId: p.id, title: '가격·출처를 다시 확인할 때야', reason: [stale.length ? `오래된 상품 정보 ${stale.length}개` : '', oldSrc.length ? `6개월 넘은 출처 ${oldSrc.length}개` : ''].filter(Boolean).join(', '), data: stale.slice(0, 2).map((x) => ({ label: x.name, value: `가격 확인 ${x.price_checked_at || '없음'}` })), action: { type: 'post', postId: p.id }, confidence: '확실' });
+  }
+
+  // 1.8.0 홈판 기록 (feed_log 칸이 있는 글만 — DB 022 뒤): 올린 지 1~7일인데 누락 확인 전 / 7일 넘었는데 7일째 숫자 없음
+  for (const p of live) {
+    const fl = p.feed_log;
+    const since = p.published_on ? daysSince(p.published_on, t) : null;
+    if (!fl || typeof fl !== 'object' || Array.isArray(fl) || since == null) continue;
+    if (since >= 1 && since <= 7 && !fl.indexed) recs.push({ kind: 'feed_index', group: 'data', postId: p.id, title: '누락 확인할 때야', reason: `올린 지 ${since}일 — 원고의 '홈판 점검' 아래 '누락 확인'을 눌러 이 글 문장으로 네이버를 검색하고, 내 글이 나오는지 '홈판 기록'에 적어줘.`, data: [{ label: '게시일', value: p.published_on }], action: { type: 'post', postId: p.id }, confidence: '확실' });
+    if (since >= 7 && fl.feed_pct == null && fl.views_7d == null && fl.avg_secs == null) recs.push({ kind: 'feed_stats', group: 'data', postId: p.id, title: '7일째 숫자를 적을 때야', reason: "블로그 통계에서 홈피드·검색 비중, 조회수, 평균 사용 시간을 보고 원고의 '홈판 기록'에 적어줘 — 썸네일·제목 시험을 우리 글로 판단해.", data: [{ label: '게시일', value: p.published_on }, { label: '썸네일', value: fl.thumb ? `${fl.thumb}` : '기록 없음' }], action: { type: 'post', postId: p.id }, confidence: '확실' });
+  }
+  // 1.8.0 AI 브리핑 인용 수: 게시한 글이 있는데 7일 넘게 안 적음 (주 1회)
+  if (Array.isArray(citations) && live.length) {
+    const last = citations.map((x) => x && x.on).filter(Boolean).sort().pop();
+    if (!last || daysSince(last, t) >= 7) recs.push({ kind: 'ai_citations', group: 'data', title: '이번 주 AI 브리핑 인용 수를 적을 때야', reason: "블로그 프로필에 보이는 'AI 브리핑' 누적 인용 수를 홈의 '최근 7일 정리' 아래에 적어줘 (주 1회 — 검색보다 인용이 먼저 올 수 있어).", data: [{ label: '마지막 기록', value: last || '없음' }], action: null, confidence: '확실' });
   }
 
   if (!withData.length && live.length) recs.push({ kind: 'no_data', group: 'data', title: '성과 분석을 하려면 실적이 필요해', reason: '게시한 글의 조회수·클릭·수익을 입력하거나 파일로 올리면, 어떤 글이 돈이 되는지 비교해줄게.', data: [{ label: '게시한 글', value: String(live.length) }], action: { type: 'import' }, confidence: '확실' });

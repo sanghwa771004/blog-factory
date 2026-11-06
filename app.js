@@ -3,6 +3,7 @@ import {
   STAGES, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, checkPost, disclosureFor, compatOf, countMe, countImg, removeEmptyMe, VAGUE_DISCLOSURE,
   PLAN_KINDS, PLAN_RUNS, PLAN_MAX_PER_KIND, KEEP_DAYS, cleanPlan, planTotal, promptsOf, bodyChars,
   aiTone, AI_TONE_GOOD, AI_TONE_BAD, VOICE_PRESETS, VOICE_SCOPES, voiceCard, unlistedNumbers, feedCheck,
+  FEED_RULES, THUMB_VARIANTS, FEED_TEST_MIN, feedLogError, feedTestSummary,
 } from './checks.js?v=1.8.0';
 import * as L from './lib.js?v=1.8.0';
 import * as IMG from './images.js?v=1.8.0';
@@ -272,6 +273,7 @@ function checksFor(p, withOthers) {
   const r = checkPost(p, {
     programs: M.prog, channels: M.ch, compat: S.compat, links: linksOf(p.id), products: productsOf(p.id), today: todayS(),
     focus: (S.settings || {}).focus_topic || '', focusTerms: (S.settings || {}).focus_terms || '',
+    mainChannel: (S.settings || {}).default_channel || 'naver_blog', investChannel: (S.settings || {}).invest_channel || '', // 1.8.0 증시·종목 글이 메인 블로그에 있는지
     others: withOthers ? S.posts.filter((o) => o.id !== p.id && o.body).slice(0, 80).map((o) => ({ id: o.id, title: titleOf(o), body: o.body })) : [],
     templates: (S.templates || []).filter((t) => t.active), // 1.7.0: 참고 글 문장을 그대로 가져왔는지
   });
@@ -558,9 +560,9 @@ function planBox(pp) {
       h('div', { class: 'side' }, h('span', { class: 'flag ' + (r.done >= r.target ? 'ok' : 'i') }, `${r.done}/${r.target}`))))));
 }
 // 실적(stats)을 불러오기 전에는 실적이 필요 없는 추천만 (실적이 있는 글을 '실적 없음'으로 잠깐 잘못 보여주지 않게)
-const NO_STATS_KINDS = ['title_from_search', 'new_from_search', 'recheck'];
+const NO_STATS_KINDS = ['title_from_search', 'new_from_search', 'recheck', 'feed_index', 'feed_stats', 'ai_citations'];
 const homeRecs = (t, byPost) => {
-  const recs = L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: known('search_terms'), postChannels: known('post_channels'), channels: S.channels, today: t });
+  const recs = L.recommendations({ posts: S.posts, byPost: byPost || [], products: S.products, postProducts: S.post_products, searchTerms: known('search_terms'), postChannels: known('post_channels'), channels: S.channels, today: t, citations: (S.settings || {}).ai_citations });
   return byPost ? recs : recs.filter((r) => NO_STATS_KINDS.includes(r.kind));
 };
 // 개선안은 게시한 글 중 본문이 있는 글만 (서버 createJob 과 같은 기준 — 직접 입력한 게시 기록은 본문이 없어서 못 만듦)
@@ -586,14 +588,16 @@ function seoPanel(t, checked) {
   // 주력 주제 비율: 게시를 마친 글만 (초안은 안 셈). 네이버 블로그와 다른 블로그·사이트는 따로
   if (!focus) li('warn', '주력 주제가 아직 없어. 한 주제로 꾸준히 쓰면 그 주제 검색에서 더 잘 보일 수 있어.', ['app'], btn('정하기', 'sm ghost', () => go('settings/auto')));
   else {
-    const groups = [['네이버 블로그', ['naver_blog']], ['다른 블로그·사이트', S.channels.filter((c) => (c.kind === 'blog' || c.kind === 'site') && c.id !== 'naver_blog').map((c) => c.id)]];
+    // 1.8.0: 투자 블로그(증시·종목 글)는 생활·가전 주제로 재지 않음
+    const invCh = (S.settings || {}).invest_channel || '';
+    const groups = [['네이버 블로그', ['naver_blog']], ['다른 블로그·사이트', S.channels.filter((c) => (c.kind === 'blog' || c.kind === 'site') && c.id !== 'naver_blog' && c.id !== invCh).map((c) => c.id)]];
     let shown = 0;
     for (const [name, chs] of groups) {
       const fs = L.focusShare(S.posts, focus, 30, null, { terms, channels: chs });
       if (!fs.total && chs[0] !== 'naver_blog') continue;
       shown++;
       if (!fs.total) li('none', `${name}: 주력 주제(${focus}) 비율 — 데이터 없음 (게시한 글이 아직 없어. 초안은 안 셈)`, ['mine']);
-      else li(fs.ratio >= fs.goal ? 'ok' : 'warn', `${name} 최근 게시한 글 ${fs.total}개 중 주력 주제(${focus}) 글 ${fs.hit}개 (${Math.round(fs.ratio * 100)}%)${fs.unclear ? ` · 판단 어려움 ${fs.unclear}개` : ''} — 목표 ${Math.round(fs.goal * 100)}% 이상`, ['mine', 'app']);
+      else li(fs.ratio >= fs.goal ? 'ok' : 'warn', `${name} 최근 게시한 글 ${fs.total}개 중 주력 주제(${focus}) 글 ${fs.hit}개 (${Math.round(fs.ratio * 100)}%)${fs.unclear ? ` · 판단 어려움 ${fs.unclear}개` : ''} — 목표 ${fs.goal >= 1 ? '전부 주제 안 글 (오늘 이슈·생활 정보 글도)' : Math.round(fs.goal * 100) + '% 이상'}`, ['mine', 'app']);
     }
     if (!shown) li('none', '주력 주제 비율 — 데이터 없음', ['mine']);
   }
@@ -743,6 +747,7 @@ function weeklyPanel(w, recs, failed) {
     h('span', null, M.post[x.postId] ? titleOf(M.post[x.postId]) : '지워진 글'), h('small', null, [x.revenue != null && `발생 ${L.won(x.revenue)}`, x.clicks != null && `클릭 ${L.fmtNum(x.clicks)}`, x.views != null && `조회 ${L.fmtNum(x.views)}`].filter(Boolean).join(' · '))))));
   const next = (recs || []).filter((r) => r.group === 'fix' || r.group === 'data').slice(0, 2).map((r) => r.title);
   box.append(h('p', { class: 'hint' }, `자동 작가 실행 ${w.ranAuto}번.${next.length ? ' 다음에 할 것: ' + next.join(' / ') : ''}`));
+  box.append(feedTestBox());
   return box;
 }
 
@@ -1167,9 +1172,23 @@ function viewPost(id) {
 
 // ───────── 1.8.0 홈판 점검 (원고만 보고 계산 — 참고 점수, 발행은 막지 않음) ─────────
 // 근거마다 '네이버 공식 / 여러 실무자 / 데이터 연구 1개 — 시험'을 같이 보여줌 (2026-11-06 조사 보고서)
-function feedPanel(p) {
+// 최근 7일 안에 올렸거나 올릴(발행 준비·예약·게시) 같은 채널 글의 제목 — '같은 낱말로 시작하는 제목' 확인용 (초안끼리는 안 봄)
+function recentTitlesFor(p) {
+  const t = todayS(), from = L.addDays(t, -FEED_RULES.recentDays), to = L.addDays(t, FEED_RULES.recentDays);
+  return S.posts.filter((o) => o.id !== p.id && !o.deleted_at && o.channel_id === p.channel_id && (LIVE.includes(o.stage) || o.stage === 'ready' || o.stage === 'scheduled'))
+    .filter((o) => { const d = L.postedOn(o); return d >= from && d <= to; }).map(titleOf);
+}
+const feedCtx = (p) => {
   const st = S.settings || {};
-  const f = feedCheck(p, { focus: st.focus_topic, focusTerms: st.focus_terms, autoTopics: st.auto_topics });
+  return {
+    focus: st.focus_topic, focusTerms: st.focus_terms, autoTopics: st.auto_topics,
+    mainChannel: st.default_channel || 'naver_blog', investChannel: st.invest_channel || '',
+    ownPhoto: (M.slotsBy[p.id] || []).some((x) => x.post_images && x.post_images.source_type === 'own'), // 직접 찍은 사진이 연결된 자리
+    recentTitles: recentTitlesFor(p),
+  };
+};
+function feedPanel(p) {
+  const f = feedCheck(p, feedCtx(p));
   const mark = (ok) => (ok === true ? '✓' : ok === null ? '△' : '✗');
   const items = h('ul', { class: 'feedcheck' }, f.items.map((x) => h('li', { class: x.ok === true ? 'ok' : x.ok === null ? 'mid' : 'bad' },
     h('b', null, mark(x.ok) + ' ' + x.label), x.hint ? h('span', null, ' — ' + x.hint) : null, h('small', null, x.basis))));
@@ -1180,7 +1199,102 @@ function feedPanel(p) {
     items,
     h('p', { class: 'hint' }, "✓ 됨 · △ 시험·참고 · ✗ 손볼 곳. 홈판은 사람마다 다르게 뜨는 추천이라 점수가 높아도 꼭 뜨는 건 아니야. 같은 주제로 2~4주는 꾸준히 올려야 결과가 보여."),
     q ? h('div', { class: 'go' }, h('a', { class: 'btn sm ghost', href: q, target: '_blank', rel: 'noopener noreferrer' }, '누락 확인 (네이버에서 이 글 문장 검색) ↗')) : null,
-    q ? h('p', { class: 'hint' }, `올리고 하루~사흘 뒤에 눌러봐. "${f.sentence}"로 검색해서 내 글이 안 나오면 검색에 안 잡힌 거야(누락).`) : null);
+    q ? h('p', { class: 'hint' }, `올리고 하루~사흘 뒤에 눌러봐. "${f.sentence}"로 검색해서 내 글이 안 나오면 검색에 안 잡힌 거야(누락). 나왔는지 아래 '홈판 기록'에 적어줘.`) : null,
+    feedLogBox(p, f));
+}
+// 평균 사용 시간: '1:35' · '1분 35초' · '95' · '95초' → 초 (빈 칸 = null, 못 읽으면 NaN)
+function parseSecs(v) {
+  const t = String(v == null ? '' : v).trim();
+  if (!t) return null;
+  const m = t.match(/^(\d{1,3})\s*(?:분|:)\s*(?:(\d{1,2})\s*초?)?$/);
+  if (m) return Number(m[1]) * 60 + Number(m[2] || 0);
+  const s2 = t.match(/^(\d{1,5})\s*초?$/);
+  return s2 ? Number(s2[1]) : NaN;
+}
+const fmtSecs = (n) => (n == null ? '' : n >= 60 ? `${Math.floor(n / 60)}분 ${n % 60}초` : `${n}초`);
+// 1.8.0 홈판 기록: 누락 확인·7일째 숫자·썸네일 변형 — 사용자가 블로그 통계에서 보고 적는 숫자 (앱이 네이버에서 가져오지 않음)
+function feedLogBox(p, f) {
+  const has = p.feed_log && typeof p.feed_log === 'object' && !Array.isArray(p.feed_log);
+  const live = LIVE.includes(p.stage);
+  const box = det('feedlog:' + p.id, '홈판 기록 (누락 확인 · 7일째 숫자 · 썸네일 변형)', live);
+  const inner = h('div', { class: 'stack', style: 'margin-top:10px' });
+  box.append(inner);
+  if (!has) { inner.append(h('p', { class: 'hint' }, '기록 칸은 DB 업데이트(022) 뒤에 생겨 — 배포 승인 뒤에 쓸 수 있어.')); return box; }
+  const fl = p.feed_log;
+  const t = todayS();
+  if (!live) inner.append(h('p', { class: 'hint' }, "블로그에 올리고 '게시 완료 기록'을 한 뒤에 적어 — 1~3일 뒤 누락 확인, 7일째 숫자. 썸네일 변형은 미리 골라도 돼."));
+  const numIn = (k, ph, dec) => h('input', { type: 'text', inputmode: dec ? 'decimal' : 'numeric', placeholder: ph, value: fl[k] == null ? '' : String(fl[k]), 'aria-label': k });
+  const checkedOn = h('input', { type: 'date', value: fl.checked_on || '', 'aria-label': '누락 확인한 날' });
+  const indexed = h('select', { 'aria-label': '누락 확인 결과' }, optSel('', '아직 안 봄', !fl.indexed), optSel('yes', '검색에 나와', fl.indexed === 'yes'), optSel('no', '안 나와 (누락)', fl.indexed === 'no'));
+  const feed = numIn('feed_pct', '예: 62', true), search = numIn('search_pct', '예: 30', true);
+  const v1 = numIn('views_1d', '예: 120'), v7 = numIn('views_7d', '예: 480');
+  const secs = h('input', { type: 'text', placeholder: '예: 1분 35초', value: fmtSecs(fl.avg_secs), 'aria-label': '평균 사용 시간' });
+  const statsOn = h('input', { type: 'date', value: fl.stats_on || '', 'aria-label': '7일째 숫자를 본 날' });
+  const thumb = h('select', { 'aria-label': '썸네일 변형' }, optSel('', '모름', !fl.thumb), ...Object.entries(THUMB_VARIANTS).map(([k, v]) => optSel(k, `${k} ${v}`, fl.thumb === k)));
+  const note = h('input', { type: 'text', maxlength: '300', value: fl.note || '', placeholder: '예: 홈피드 유입 처음 생김', 'aria-label': '메모' });
+  inner.append(
+    h('p', { class: 'legend' }, '누락 확인 (올리고 1~3일 뒤)'),
+    h('div', { class: 'row' }, field('확인한 날', checkedOn), field('결과', indexed)),
+    h('p', { class: 'legend' }, '7일째 숫자 (블로그 통계)'),
+    h('div', { class: 'row' }, field('홈피드 비중 %', feed), field('검색 비중 %', search)),
+    h('div', { class: 'row' }, field('첫 24시간 조회', v1), field('7일 조회', v7)),
+    h('div', { class: 'row' }, field('평균 사용 시간', secs), field('숫자를 본 날', statsOn)),
+    h('p', { class: 'hint' }, "블로그 통계의 '유입 경로'에서 홈피드·검색 비중과 조회수, '방문 분석'에서 평균 사용 시간을 봐. 메뉴 이름은 네이버가 바꿀 수 있어서 처음 한 번 확인해 줘. 모르는 칸은 비워 둬 — 0이 아니라 '데이터 없음'으로 남아."),
+    field('썸네일 변형', thumb, '썸네일을 앱에서 만들면 저절로 적혀 (A 색 카드 · B 사진 + 짧은 글자 · C 사진만)'),
+    h('p', { class: 'hint' }, `제목 ${f.titleLen}자 (${f.titleLen <= FEED_RULES.titleShortMax ? '짧은 제목 25~30자' : '긴 제목 31자 넘게'} 쪽) — 저장할 때 같이 적어. 블로그에서 제목을 바꿨으면 원고 제목도 맞춰줘.`),
+    field('메모', note),
+    btn('홈판 기록 저장', 'sm', async (ev) => {
+      const num = (input, int, max) => {
+        const r = L.parseNum(input.value);
+        if (!r.ok || (r.value != null && (r.value < 0 || r.value > max || (int && !Number.isInteger(r.value))))) return NaN;
+        return r.value;
+      };
+      const log = {
+        checked_on: checkedOn.value || (indexed.value ? t : ''), indexed: indexed.value,
+        feed_pct: num(feed, false, 100), search_pct: num(search, false, 100), views_1d: num(v1, true, 1e8), views_7d: num(v7, true, 1e8),
+        avg_secs: parseSecs(secs.value), thumb: thumb.value, note: note.value.trim(), title_len: f.titleLen || null,
+      };
+      log.stats_on = statsOn.value || ([log.feed_pct, log.search_pct, log.views_7d, log.avg_secs].some((x) => x != null) ? t : '');
+      const badNum = Object.entries(log).find(([, v]) => typeof v === 'number' && Number.isNaN(v));
+      if (badNum) { toast(badNum[0] === 'avg_secs' ? "평균 사용 시간은 '1분 35초'나 '95'(초)처럼 적어줘" : '숫자 칸을 확인해줘 (비중은 0~100, 조회수는 0 이상의 정수)'); return; }
+      const bad = feedLogError(log);
+      if (bad) { toast('기록 칸을 확인해줘: ' + bad); return; }
+      const j = await run(ev.currentTarget, () => api('/posts/' + p.id, { method: 'POST', body: { feed_log: log } }), '홈판 기록을 저장했어');
+      if (j) await load();
+    }));
+  return box;
+}
+// 1.8.0 홈판 시험 정리 + AI 브리핑 인용 수 (홈 '최근 7일 정리' 아래)
+function feedTestBox() {
+  const st = S.settings || {};
+  const box = h('div', { class: 'stack' }, h('h3', null, '홈판 시험 (우리 글로 정하기)'));
+  if (!Array.isArray(st.ai_citations)) { box.append(h('p', { class: 'hint' }, '홈판 기록·AI 인용 수 칸은 DB 업데이트(022) 뒤에 생겨.')); return box; }
+  const s = feedTestSummary(S.posts);
+  const avg = (v, unit) => (v == null ? '–' : unit === 's' ? fmtSecs(Math.round(v)) : `${Math.round(v * 10) / 10}${unit}`);
+  const row = (label, x) => h('div', { class: 'vals' }, h('span', null, label), h('span', null, `글 ${x.posts}편 · 숫자 적은 글 ${x.measured}편`),
+    h('span', null, '홈피드 ', h('b', null, avg(x.feedPct, '%'))), h('span', null, '7일 조회 ', h('b', null, avg(x.views7d, ''))), h('span', null, '평균 사용 ', h('b', null, avg(x.avgSecs, 's'))),
+    x.enough ? null : h('small', { class: 'muted' }, `${FEED_TEST_MIN}편 넘게 모이면 비교`));
+  if (!s.posts || (!s.thumbs.length && !s.titles.length)) box.append(h('p', { class: 'hint' }, `썸네일(A 색 카드 · B 사진 + 짧은 글자 · C 사진만)과 제목 길이(25~30자 · 31자 넘게)를 글마다 바꿔 올리고 7일째 숫자를 적으면 여기서 비교해줘. 변형마다 ${FEED_TEST_MIN}편 넘게 모이고 한쪽이 되풀이해 나을 때만 바꿔.`));
+  else {
+    if (s.thumbs.length) box.append(h('div', { class: 'mrow' }, h('b', null, '썸네일 변형'), s.thumbs.map((x) => row(`${x.key} ${THUMB_VARIANTS[x.key]}`, x))));
+    if (s.titles.length) box.append(h('div', { class: 'mrow' }, h('b', null, '제목 길이'), s.titles.map((x) => row(x.key === 'short' ? '25~30자' : '31자 넘게', x))));
+    if (s.checked) box.append(h('p', { class: 'hint' }, `누락 확인 ${s.checked}편 중 검색에 안 나온 글 ${s.missing}편${s.missing ? ' — 공개·검색 허용 설정부터 보고, 여러 번 고치지 말고 기록만 해' : ''}`));
+    box.append(h('p', { class: 'hint' }, '숫자는 네가 블로그 통계에서 보고 적은 것이고, 평균은 참고야. 셋 다 홈피드 유입이 0이면 썸네일 문제가 아니라 아직 후보에 안 든 걸 수 있어 — 주제·리듬을 지키며 4주 더 봐.'));
+  }
+  // AI 브리핑 누적 인용 수 (주 1회 — 블로그 프로필에서 본 누적 값)
+  const list = st.ai_citations.slice(-4);
+  const total = h('input', { type: 'text', inputmode: 'numeric', placeholder: '예: 12', 'aria-label': 'AI 브리핑 누적 인용 수' });
+  box.append(h('p', { class: 'legend' }, 'AI 브리핑 누적 인용 수 (주 1회, 블로그 프로필에서)'),
+    list.length ? h('p', { class: 'small' }, list.map((x, i) => `${L.fmtDate(x.on)} ${L.fmtNum(x.total)}${i ? ` (${x.total - list[i - 1].total >= 0 ? '+' : ''}${x.total - list[i - 1].total})` : ''}`).join(' → ')) : h('p', { class: 'hint' }, '아직 적은 값이 없어.'),
+    h('div', { class: 'row' }, field('오늘 본 누적 인용 수', total), h('div', { class: 'go' }, btn('적기', 'sm ghost', async (ev) => {
+      const r = L.parseNum(total.value);
+      if (!r.ok || r.value == null || r.value < 0 || !Number.isInteger(r.value)) { toast('0 이상의 정수로 적어줘'); return; }
+      const today = todayS();
+      const next = [...st.ai_citations.filter((x) => x.on !== today), { on: today, total: r.value }];
+      const j = await run(ev.currentTarget, () => api('/settings', { method: 'POST', body: { ai_citations: next } }), '인용 수를 적었어');
+      if (j) await load();
+    }))));
+  return box;
 }
 
 // ───────── 1.7.0 사람 말투 점검 · 숫자 확인표 ─────────

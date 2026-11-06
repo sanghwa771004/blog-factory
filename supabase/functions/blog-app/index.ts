@@ -5,7 +5,7 @@
 // - 이미지 스튜디오: OpenAI·Pexels 키는 이 함수의 환경변수(Secrets)에만 있고 화면으로는 '있음/없음'만 보냄.
 //   이미지 파일은 비공개 버킷(post-images)에, 정보는 post_images 표에. 화면은 1시간짜리 서명 주소로만 봄
 import { createClient } from "npm:@supabase/supabase-js@2";
-import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE, cleanPlan, KEEP_DAYS, PLAN_KINDS, VOICE_PRESETS, VOICE_SCOPES } from "./checks.js";
+import { checkPost, disclosureFor, USER_TRANSITIONS, CONTENT_TYPES, SCORE_FACTORS, VAGUE_DISCLOSURE, cleanPlan, KEEP_DAYS, PLAN_KINDS, VOICE_PRESETS, VOICE_SCOPES, feedLogError, citationsError, CITATION_MAX } from "./checks.js";
 import {
   parseSlots, matchSlots, planSlotSync, ctxOf, EXTRA_SLOTS, extraSlot, isExtraKey, validSlotKey, slotPurpose, PURPOSES, RATIOS, QUALITIES, ratioOf, sizeFor,
   validApiSize, promptRisk, blocksOf, estimateUsd, estimateTokens, normQuality, modelCaps, DEFAULT_PRICES, MAX_UPLOAD_BYTES,
@@ -649,6 +649,18 @@ async function patchPost(c: Ctx) {
     if (b.refresh !== null) fail(400, "bad_field", { field: "refresh" });
     patch.refresh = {};
   }
+  // 1.8.0 홈판 기록: 보낸 칸만 바꿈 (빈 값·null 은 그 칸을 지움 = 데이터 없음). 칸 이름·값은 checks.js feedLogError 와 같은 규칙
+  if ("feed_log" in b) {
+    const bad = feedLogError(b.feed_log);
+    if (bad) fail(400, "bad_field", { field: bad === "feed_log" ? "feed_log" : `feed_log.${bad}` });
+    const cur = post.feed_log && typeof post.feed_log === "object" && !Array.isArray(post.feed_log) ? post.feed_log as J : {};
+    const next: J = { ...cur };
+    for (const [k, v] of Object.entries(b.feed_log as J)) {
+      if (v === null || v === "") delete next[k];
+      else next[k] = typeof v === "string" ? v.trim() : v;
+    }
+    patch.feed_log = next;
+  }
 
   if ("channel_id" in b || "program_ids" in b) {
     const ch = "channel_id" in b ? str(b.channel_id, 40) : String(post.channel_id ?? "");
@@ -716,6 +728,7 @@ async function patchPost(c: Ctx) {
   if (error && /product_check_needed/.test(String(error.message ?? ""))) fail(409, "check_failed", { errors: await productGateFor(merged) });
   if (error && "refresh" in patch && missingColumn(error, "refresh")) fail(409, "db_update_needed", { migration: "016" }); // 016 전 DB
   if (error && "keep" in patch && missingColumn(error, "keep")) fail(409, "db_update_needed", { migration: "020" }); // 020 전 DB
+  if (error && "feed_log" in patch && missingColumn(error, "feed_log")) fail(409, "db_update_needed", { migration: "022" }); // 022 전 DB
   if (error) throw error;
   // 본문이 바뀌면 사진 자리 연결을 새 본문에 맞춤 (설명을 조금 고친 자리는 옮기고, 사라진 자리의 이미지는 보관함에 그대로)
   let image_sync: unknown = null;
@@ -1309,6 +1322,13 @@ async function patchSettings(c: Ctx) {
     }
     s.series = out;
   }
+  // 1.8.0 AI 브리핑 누적 인용 수 [{on, total}] — 날짜마다 하나(같은 날은 나중 값), 날짜 순, 최근 CITATION_MAX 개까지
+  if ("ai_citations" in b) {
+    if (citationsError(b.ai_citations)) fail(400, "bad_field", { field: "ai_citations" });
+    const byDay = new Map<string, number>();
+    for (const x of b.ai_citations as J[]) byDay.set(String(x.on), Number(x.total));
+    s.ai_citations = [...byDay.entries()].sort((a, z) => a[0].localeCompare(z[0])).slice(-CITATION_MAX).map(([on, total]) => ({ on, total }));
+  }
   // 1.7.0 투자 글(증시·종목)을 올릴 블로그 채널 — 있는 블로그 채널만, 비우면 같은 블로그
   if ("invest_channel" in b) {
     const ch = str(b.invest_channel, 40).trim();
@@ -1416,7 +1436,7 @@ async function patchSettings(c: Ctx) {
   // DB에 015(주력 주제 낱말 열)가 아직 없으면 그 칸만 빼고 저장 — 서버를 DB보다 먼저 올려도 다른 설정 저장이 막히지 않게
   const skipped: string[] = [];
   // DB에 그 열이 아직 없으면(015 전: 주력 주제 낱말, 016 전: 쌓아둘 원고 한도) 그 칸만 빼고 저장
-  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs", "daily_plan", "keep_days", "voice", "series", "invest_channel", "brand_name"]) {
+  for (const col of ["focus_terms", "backlog_limit", "image_modes", "image_review_model", "image_request_cap_usd", "image_ratio_prefs", "daily_plan", "keep_days", "voice", "series", "invest_channel", "brand_name", "ai_citations"]) {
     if (!(error && col in s && missingColumn(error, col))) continue;
     delete s[col];
     skipped.push(col);

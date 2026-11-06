@@ -5,7 +5,7 @@ import * as IMG from './images.js?v=1.8.0';
 import { renderSlide, ensureFonts, canvasToBlob } from './cards.js?v=1.8.0';
 import { cardCandidates, bestCandidate, renderInfoCard, themeOf, footnoteOf, fontsFor } from './infocards.js?v=1.8.0';
 import { createProduct, PRODUCT_ERR } from './product.js?v=1.8.0';
-import { thumbText } from './checks.js?v=1.8.0';
+import { thumbText, THUMB_VARIANTS } from './checks.js?v=1.8.0';
 
 export const TEST_MODEL = 'gf-test-fake'; // 서버의 점검용 가짜 모델 이름 (image_service.js 와 같음)
 
@@ -1572,8 +1572,9 @@ export function createStudio(ui) {
     const canvas = h('canvas', { class: 'cardprev', role: 'img', 'aria-label': '카드 미리보기' });
     const warn = h('p', { class: 'notice', hidden: true }, '글자가 많아 잘린 곳이 있어. 원고의 표·목록을 줄이면 다 들어가.');
     const seg = h('div', { class: 'chips' });
-    // 1.8.0 썸네일: 문구 고치기 + 배경 (색 카드 / 이 글의 사진)
-    let photoEl = null, photoImg = null;
+    // 1.8.0 썸네일: 문구 고치기 + 변형 A 색 카드 / B 사진 + 짧은 글자 / C 사진만 (홈판 썸네일 시험 — 글마다 어떤 변형인지 홈판 기록에 적힘)
+    let photoEl = null, photoImg = null, plain = false;
+    const variant = () => (!photoEl ? 'A' : plain ? 'C' : 'B');
     const ttInput = h('input', { type: 'text', maxlength: '40', value: tc ? tc.title : '', 'aria-label': '썸네일 문구' });
     ttInput.addEventListener('input', () => { if (tc) { tc.title = ttInput.value.trim() || baseTitle; if (cur === tc) draw(); } });
     const d0 = dataOf(p.id) || {};
@@ -1582,27 +1583,39 @@ export function createStudio(ui) {
     const bgOk = (i) => i && i.url && i.kind !== 'card' && !['kogl', 'external'].includes(i.source_type) && i.review_status !== '사용 안 함' && !(IMG.productSceneMode(i) && !IMG.productApproved(i));
     const bgList = [...new Map([...(d0.slots || []), ...(d0.extra || [])].filter((x) => x.key !== s.key && x.row && x.row.image_id).map((x) => imgs0[x.row.image_id]).filter(bgOk).map((i) => [i.id, i])).values()].slice(0, 9);
     const bgNote = h('p', { class: 'hint' });
+    const varChips = h('div', { class: 'chips' });
+    const noteOf = () => (!photoEl ? 'A 색 카드 — 글 종류마다 정해진 색이야.'
+      : plain ? `C 사진만 — 배경: ${IMG.originLabel(photoImg)}. 글자 없이 사진만 1:1로 잘라. 제목과 같은 대상이 보이는 사진인지 봐줘.`
+        : `B 사진 + 짧은 글자 — 배경: ${IMG.originLabel(photoImg)}. 문구는 5~8자 안팎으로 짧게 해도 돼. 제목과 같은 이야기의 사진인지 봐줘.`);
+    const drawChips = () => put(varChips, Object.entries(THUMB_VARIANTS).map(([k, v]) => h('button', { type: 'button', class: 'copy', 'aria-pressed': String(variant() === k),
+      onclick: () => {
+        if (k === 'A') { choosePhoto(null); return; }
+        if (!photoEl) { bgNote.textContent = `${k} ${v}는 아래에서 이 글의 사진을 먼저 골라줘.`; return; }
+        plain = k === 'C'; bgNote.textContent = noteOf(); draw();
+      } }, `${k} ${v}`)));
     const choosePhoto = async (i, button) => {
-      if (!i) { photoEl = null; photoImg = null; bgNote.textContent = '색 카드 — 글 종류마다 정해진 색이야.'; draw(); return; }
+      if (!i) { photoEl = null; photoImg = null; plain = false; bgNote.textContent = noteOf(); draw(); return; }
       if (button) button.disabled = true;
       bgNote.textContent = '사진 불러오는 중…';
-      try { const src = await loadSource(i); photoEl = src.el; photoImg = i; bgNote.textContent = `배경: ${IMG.originLabel(i)} — 사진 위에 문구를 흰 글씨로 크게 얹었어. 제목과 같은 이야기의 사진인지 봐줘.`; draw(); }
+      try { const src = await loadSource(i); photoEl = src.el; photoImg = i; bgNote.textContent = noteOf(); draw(); }
       catch { bgNote.textContent = '사진을 불러오지 못했어. 새로고침한 뒤 다시 해줘 (주소는 1시간 동안만 열려).'; }
       finally { if (button) button.disabled = false; }
     };
     const thumbBox = h('div', { class: 'stack' },
       field('썸네일 문구 (짧게 — 두 줄 안팎, 제목과 같은 이야기)', ttInput),
-      h('p', { class: 'legend' }, '배경'),
-      h('div', { class: 'go' }, btn('색 카드', 'sm ghost', () => choosePhoto(null))),
+      h('p', { class: 'legend' }, '변형 (홈판 썸네일 시험 — 글마다 돌려 써 봐)'),
+      varChips,
+      h('p', { class: 'legend' }, '배경 사진 (B·C)'),
       bgList.length ? h('div', { class: 'grid3' }, bgList.map((i) => pickThumb(i, (ev) => choosePhoto(i, ev.currentTarget))))
         : h('p', { class: 'hint' }, '이 글의 다른 자리에 사진을 연결하면 그 사진을 배경으로 쓸 수 있어 (출처 표시가 꼭 필요한 공공누리·외부 사진은 빼).'),
       bgNote);
     let seq = 0;
-    const opts = (scale) => ({ theme, brand, foot, scale, photo: cur && cur.type === 'thumb' ? photoEl : null });
+    const opts = (scale) => ({ theme, brand, foot, scale, photo: cur && cur.type === 'thumb' ? photoEl : null, plain: cur && cur.type === 'thumb' && !!photoEl && plain });
     const draw = async () => {
       const my = ++seq;
       put(seg, cands.map((c) => h('button', { type: 'button', class: 'copy', 'aria-pressed': String(c === cur), onclick: () => { cur = c; draw(); } }, c.label)));
       thumbBox.hidden = !(cur && cur.type === 'thumb');
+      drawChips();
       await fontsFor(cur);
       if (my !== seq) return;
       const r = renderInfoCard(canvas, cur, opts(0.5));
@@ -1616,16 +1629,22 @@ export function createStudio(ui) {
       btn(`이 카드 쓰기 → ${slotName(s)}에 연결`, 'wide', async (ev) => {
         const button = ev.currentTarget;
         const thumbNow = isThumb();
+        const vr = variant();
         const j = await run(button, async () => {
           const blob = await full();
           const fd = new FormData();
           // 썸네일은 1:1 그대로 (본문 사진 기본 4:3 으로 잘리지 않게 '일반 삽화용'), 정보 카드는 4:3
+          // 1.8.0: 설명에 변형(A/B/C)과 사진 출처를 남김 — 사진 배경이면 그 사진이 직접 찍은 것인지·AI 이미지인지 그대로 (앱이 그린 카드로 바꿔 부르지 않음)
           fd.append('meta', JSON.stringify({ post_id: p.id, slot_key: s.key, purpose: thumbNow ? 'general' : 'blog_body', link: true, kind: 'card', card_label: thumbNow ? '썸네일' : '정보 카드',
-            description: (thumbNow ? (photoEl ? `썸네일(사진 배경 — ${IMG.originLabel(photoImg)}): ` : '썸네일: ') : '정보 카드: ') + String(cur.title || cur.label || '').slice(0, 200) }));
+            description: (thumbNow ? `썸네일(${vr} ${THUMB_VARIANTS[vr]}${photoEl ? ` — ${IMG.originLabel(photoImg)}` : ''}): ` : '정보 카드: ') + String(cur.title || cur.label || '').slice(0, 200) }));
           fd.append('file', blob, (thumbNow ? 'thumbnail' : 'infocard') + '.png');
           return api('/images/upload', { method: 'POST', body: fd });
         });
-        if (j) { toast(`${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id); }
+        if (j) {
+          toast(`${slotName(s)}에 연결했어`); closeSheet(); refresh(p.id);
+          // 홈판 기록의 썸네일 변형을 같이 적음 (DB 022 전이면 칸이 없어서 건너뜀 — 연결은 이미 끝남)
+          if (thumbNow && post.feed_log && typeof post.feed_log === 'object') api('/posts/' + p.id, { method: 'POST', body: { feed_log: { thumb: vr } } }).then(() => ui.load()).catch(() => {});
+        }
       }),
       btn('PNG로 내려받기', 'sm ghost', async () => { const b = await full(); blobDownload(b, (isThumb() ? 'thumbnail' : 'infocard') + '.png'); }),
       // 1.7.0 고침: 컴퓨터에서는 그림으로 복사 → 네이버 편집기에 Ctrl+V (썸네일은 글 맨 위 첫 사진으로 — 대표 사진)

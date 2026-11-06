@@ -233,3 +233,28 @@ test('1.8.0 홈판 공략: 결론 맨 위·썸네일 문구·제목 규칙·사�
   assert.match(PROMPT, /블로그 주제와 이어지는 이슈가 오늘 없으면 억지로 엮지 말고, 주제 안의 계절 정보 글/);
   assert.match(PROMPT, /trending 은 주제 안 세부 분류/);
 });
+
+test('1.8.0 보고서 결론 맞추기: 핵심+누구·제목 길이 둘·앞 25자·사진 관련성·직접 찍기·분량 상한·주제 안 생활 정보가 프롬프트·Claude 안 글공장·앱에서 같음', () => {
+  // 맨 위 핵심 상자: 답 + 누구에게 해당하는지 (프롬프트·Claude 안 글공장)
+  assert.ok(PROMPT.includes('답 다음에 누구에게 해당하는지도') && ART.includes('답 다음에 누구에게 해당하는지도'));
+  // 제목: 하나는 25~30자, 하나는 31자 넘게 (= 앱의 짧은 제목·긴 제목 경계), 핵심은 앞 25자 안 (= 앱 홈판 점검)
+  assert.ok(PROMPT.includes(`그중 하나는 ${FEED_RULES.titleGoodMin}~${FEED_RULES.titleShortMax}자, 하나는 ${FEED_RULES.titleShortMax + 1}자 넘게`) && ART.includes(`그중 하나는 ${FEED_RULES.titleGoodMin}~${FEED_RULES.titleShortMax}자, 하나는 ${FEED_RULES.titleShortMax + 1}자 넘게`));
+  assert.ok(PROMPT.includes(`앞 ${FEED_RULES.frontChars}자 안에`) && ART.includes(`앞 ${FEED_RULES.frontChars}자 안에`));
+  // 사진: 그 문단 장면만, 분위기 컷 금지, 모자라면 줄임 (앱이 '장식 사진?'으로 알려줌)
+  for (const t of ['분위기만 내는 컷', '같은 장면 두 번은 금지', '4곳보다 적어도 돼']) assert.ok(PROMPT.includes(t) && ART.includes(t), t);
+  assert.doesNotMatch(PROMPT, /분위기 컷\(창가 선반의 가습기, 겨울 거실 같은 것\)에만/);
+  // 직접 찍기 자리: 쿠팡·토스 글에 더해 애드포스트 유입 글·오늘 이슈에도
+  const kindLine = (k) => PROMPT.split('\n').find((l) => l.startsWith(`- ${k} — `)) || '';
+  for (const k of ['affiliate', 'adpost', 'trending']) assert.ok(kindLine(k).includes('[이미지: (직접 찍기) …]'), k);
+  for (const k of ['market', 'stock']) assert.ok(!kindLine(k).includes('직접 찍기'), k);
+  // 애드포스트 유입 글도 블로그 주제 안에서 (예전 '꼭 안에 있지 않아도 돼' 삭제)
+  assert.doesNotMatch(PROMPT, /꼭 안에 있지 않아도 돼/);
+  assert.ok(kindLine('adpost').includes('블로그 주제(settings.focus_topic·auto_topics) 안의 생활 정보만'));
+  // 오늘 이슈 뼈대
+  assert.ok(PROMPT.includes("'무슨 일 → 왜 → 우리 집 가전·기기에 미치는 영향 → 지금 할 일'"));
+  // 분량: 상한만, 채우기 금지 (예전 len 의 90~115% 삭제)
+  assert.doesNotMatch(PROMPT, /90~115%/);
+  assert.ok(PROMPT.includes('정해진 글자 수는 없어') && ART.includes('정해진 글자 수는 없어'));
+  // 앱: 메인 블로그 주력 주제 비율 목표 100%
+  assert.equal(SEO_RULES.focusShareGoal, 1);
+});

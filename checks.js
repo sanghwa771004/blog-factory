@@ -239,8 +239,9 @@ export function similarity(a, b) {
 // ───────── 검색 노출 점검 (앱의 권장 기준 — 검색 순위 공식이 아님) ─────────
 // 아래 숫자는 네이버가 밝힌 기준이 아니라 앱이 정한 권장 기준이야. 검색량·경쟁도는 조회하지 않아.
 // 자동 작가 프롬프트(docs/auto-writer-prompt.md)도 같은 값을 써 — tests/sync.test.js 가 서로 맞는지 확인
-// 1.8.0: 사진 4~8장 (홈판·검색 조사 2026-11-06 — 사진이 많은 글이 더 읽힌다는 데이터 연구 1개·실무자 의견. 네이버가 밝힌 기준은 아님)
-export const SEO_RULES = { minKeywordWords: 3, maxLinks: 2, earlyLinkShare: 0.15, focusShareGoal: 0.7, perDayRecommended: 1, imagesMin: 4, imagesMax: 8 };
+// 1.8.0: 사진 4~8장 (홈판·검색 조사 2026-11-06 — 사진이 많은 글이 더 읽힌다는 데이터 연구 1개·실무자 의견. 네이버가 밝힌 기준은 아님 — 맞는 사진이 모자라면 적어도 됨)
+// 1.8.0: 메인 블로그 주력 주제 비율 목표 100% (조사 보고서 — '일관된 주제'가 네이버 공식 원칙, 오늘 이슈·생활 정보 글도 주제 안에서. 숫자는 우리 기준)
+export const SEO_RULES = { minKeywordWords: 3, maxLinks: 2, earlyLinkShare: 0.15, focusShareGoal: 1, perDayRecommended: 1, imagesMin: 4, imagesMax: 8 };
 // 투자 글 (1.6.0): '투자 권유 아님' 안내와, 권유로 읽히는 표현
 export const INVEST_DISCLAIMER = /투자\s*(를\s*)?(권유|권고|추천|조언)[^.!?\n]{0,12}(아니|아닙|아님|않)|투자\s*판단[^.!?\n]{0,20}(본인|스스로|책임)|투자의?\s*(책임|결과)[^.!?\n]{0,10}(본인|투자자)/;
 export const INVEST_ADVICE = /(지금|당장|꼭|무조건)\s*(사|매수|담|팔|매도)(세요|야|자|하세요|해야)|매수\s*(추천|하세요|타이밍)|매도\s*(추천|하세요|타이밍)|목표\s*(주가|가)\s*[0-9]|수익\s*보장|무조건\s*(오른|상승|수익)|강력\s*추천\s*종목|급등\s*예상/;
@@ -350,7 +351,8 @@ export function linkTooEarly(body) {
 
 // ───────── 원고 검사 ─────────
 // ctx: { programs: {id: program}, channels: {id: channel}, compat: [], links: [], products: [], others: [{id, title, body}], today: 'YYYY-MM-DD',
-//        focus: 설정의 주력 주제 (없으면 주제 검사 안 함), focusTerms: 설정의 주력 주제 낱말 (쉼표로) }
+//        focus: 설정의 주력 주제 (없으면 주제 검사 안 함), focusTerms: 설정의 주력 주제 낱말 (쉼표로),
+//        mainChannel·investChannel: 메인 블로그·투자 블로그 채널 id (1.8.0 — 주면 증시·종목 글이 메인 블로그에 있는지 봄) }
 // 결과: { errors, warnings, tips } — errors 가 하나라도 있으면 '발행 준비 완료' 불가
 
 // ───────── 1.7.0 전문성·사람 말투 ─────────
@@ -448,24 +450,50 @@ export function aiTone(body) {
 }
 
 // ───────── 1.8.0 홈판 점검 (원고만 보고 계산하는 참고 점수 — 발행은 막지 않음) ─────────
-// 근거 (2026-11-06 조사): 네이버 공식 — 카드에 대표 사진·제목이 보임, 일관된 주제·최신성·직접 경험·읽기 쉬운 구조, 과장·관련 없는 이미지 피하기
-// 여러 실무자 — 첫 3줄에 결론·핵심, 제목에 호기심 장치(숫자·질문, 과장 없이), 짧은 문단, 썸네일과 제목이 같은 이야기
-// 데이터 연구 1개·오래된 팁 — 제목 25~40자, 사진 많을수록 (시험 항목)
-export const FEED_RULES = { titleMin: 18, titleGoodMin: 25, titleGoodMax: 40, titleMax: 50, paraMaxChars: 150, minImages: SEO_RULES.imagesMin, goodImages: 6 };
+// 근거 (조사 보고서 '네이버 홈판 상위노출 공략', 2026-11-06): 네이버 공식 — 홈판 카드에 대표 사진·제목이 보임, 일관된 주제·최신성·직접 경험·읽기 쉬운 구조,
+// 관련 없는 이미지·과장 피하기 / 여러 실무자 — 첫 3줄에 결론, 제목에 사실형 호기심 장치 하나(과장 없이), 짧은 문단, 썸네일과 제목이 같은 대상, 핵심 낱말은 제목 앞쪽
+// 시험 항목 (근거가 갈림) — 제목 길이 25~30자 vs 31자 넘게, 사진 수. 글자 수·발행 시각·키워드 반복 횟수는 근거가 없어서 안 봄
+export const FEED_RULES = { titleMin: 18, titleGoodMin: 25, titleShortMax: 30, titleGoodMax: 40, titleMax: 50, frontChars: 25, paraMaxChars: 150, paraMaxSentences: 4, minImages: SEO_RULES.imagesMin, recentDays: 7 };
 export const CLICKBAIT = /(충격|경악|소름|대박|역대급|헉|실화|난리|알고\s*보니|이것\s*하나로|무조건|100\s*%|절대\s*하지\s*마)/;
-const TITLE_HOOK = /(\d|\?|？|왜|이유|차이|방법|비교|\bvs\b|총정리|체크리스트|한눈에)/i;
+// 사실형 호기심 장치: 구체 숫자 · 질문 · 비교 · 독자 지정("원룸이라면", "자취생")
+const TITLE_HOOK = /(\d|\?|？|왜|이유|차이|방법|비교|\bvs\b|총정리|체크리스트|한눈에|이라면|라면\b|라면[,\s]|인\s*분|하는\s*분|분들|초보|자취|원룸|신혼|아이\s*있는|부모님)/i;
 const SUMMARY_LEAD = /^(핵심|결론|요약|한\s*줄\s*요약|3줄\s*요약|먼저\s*결론|바로\s*답)/;
+// 제목의 군더더기: 시리즈 이름 말고 대괄호·꺾쇠, 장식 기호·이모지, 느낌표·물음표·물결 겹치기
+const TITLE_BRACKET = /[[\]【】「」『』〈〉《》<>]/;
+const TITLE_SPECIAL = /[★☆♥♡❤♪♬◆◇■□▶▷►●○◎※♣♠✔✅❗❓]|\p{Extended_Pictographic}|[!?！？]{2,}|~{2,}/u;
+// 제목에 흔히 쓰는 말(본문에 그대로 없어도 되는 말) — '본문에 없는 낱말' 검사에서 뺌
+const TITLE_STOP = new Set(['고르기', '고르는', '고르는법', '방법', '이유', '차이', '비교', '정리', '총정리', '기준', '가지', '체크리스트', '한눈에', '추천', '가이드', '꿀팁', '후기', '리뷰', '사용법', '장단점', '주의', '주의점', '핵심', '요약', '먼저', '지금', '오늘', '올해', '이번', '최신', '제품', '상품', '모델', '종류', '선택', '고민', '필요', '정보', '알아야', '하는', '하기', '있는', '없는', '좋은', '어떤', '무엇', '언제', '어디', '얼마', '이것', '그것', '진짜', '정말', '바로', '이라면', '라면']);
 // "[이미지: (썸네일) 거실 가습기 고르기]" → '거실 가습기 고르기' (썸네일에 크게 쓸 짧은 문구). 비었거나 '제목 카드'면 '' (제목을 씀)
 export function thumbText(slotText) {
   const t = String(slotText || '').replace(THUMB_SLOT, '').replace(/^[\s:·—-]+/, '').trim();
   return !t || /^제목\s*카드/.test(t) ? '' : t.slice(0, 40);
 }
-const nounsOf = (s) => (String(s || '').match(/[가-힣A-Za-z0-9]{2,}/g) || []).map((w) => w.replace(/(은|는|이|가|을|를|의|에|와|과|로|으로|도|만)$/, '')).filter((w) => w.length >= 2);
+const nounsOf = (s) => (String(s || '').match(/[가-힣A-Za-z0-9]{2,}/g) || []).map((w) => w.replace(/(은|는|이|가|을|를|의|에|와|과|로|으로|도|만|부터|까지|에서)$/, '')).filter((w) => w.length >= 2);
+const sameWord = (w, x) => w === x || (w.length >= 2 && x.includes(w)) || (x.length >= 2 && w.includes(x));
+// 사진 자리 설명에서 표시 말을 뺀 장면 설명 ("(직접 찍기) 우리 집 보일러 화면 (제품 사진)" → "우리 집 보일러 화면")
+const slotScene = (t) => String(t || '').replace(/^\s*\((썸네일|정보\s*카드|직접\s*찍기)\)\s*/, '').replace(/\((제품\s*사진|직접\s*찍기)\)/g, '').replace(/^[\s:·—-]+/, '').trim();
+// 짧은 글 두 개가 얼마나 같은지 (띄어쓰기 뺀 두 글자 묶음 겹침, 0~1) — 사진 설명처럼 짧은 글용
+const bigramDice = (a, b) => {
+  const bg = (s) => { const t = String(s || '').replace(/\s+/g, ''); const m = new Map(); for (let i = 0; i + 2 <= t.length; i++) { const k = t.slice(i, i + 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const A = bg(a), B = bg(b);
+  let inter = 0, na = 0, nb = 0;
+  for (const v of A.values()) na += v;
+  for (const v of B.values()) nb += v;
+  for (const [k, v] of A) inter += Math.min(v, B.get(k) || 0);
+  return na + nb ? (2 * inter) / (na + nb) : 0;
+};
+const textOfBlock = (b) => (b.t === 'ul' ? b.items.join(' ') : b.t === 'table' ? b.rows.flat().join(' ') : b.t === 'term' ? `${b.term} ${b.text}` : b.text || '');
 // 누락 확인에 쓸 문장: 이 글에만 있을 만한 문단 문장 (15~45자, 숫자·괄호·주소 없는 것 중 가장 긴 것)
 export function uniqueSentence(body) {
   const c = readerSentences(body, false).filter((x) => x.length >= 15 && x.length <= 45 && !/[[\]()「」<>]|https?:|\d/.test(x) && !SUMMARY_LEAD.test(x));
   return c.sort((a, b) => b.length - a.length)[0] || '';
 }
+// 제목의 첫 낱말 (시리즈 이름 빼고) — 최근 제목과 시작이 같은지 볼 때
+export const titleLead = (title) => nounsOf(stripMd(String(title || '')).replace(/^\s*\[[^\]]{1,30}\]\s*/, ''))[0] || '';
+// 투자 글(증시 정리·종목 설명)인지
+const isInvestPost = (p) => !!((PLAN_KINDS[p.plan_kind] && PLAN_KINDS[p.plan_kind].invest) || (CONTENT_TYPES[p.content_type] && CONTENT_TYPES[p.content_type].invest));
+// ctx: focus·focusTerms·autoTopics (설정의 주력 주제·낱말·자동 주제), mainChannel·investChannel (메인 블로그·투자 블로그 채널 id),
+//      ownPhoto (이 글 사진 자리에 직접 찍은 사진이 연결됨), recentTitles (최근 7일 다른 글 제목들 — 앱이 고름)
 export function feedCheck(post, ctx = {}) {
   const p = post || {};
   const blocks = parseBody(p.body);
@@ -473,57 +501,192 @@ export function feedCheck(post, ctx = {}) {
   const title = stripMd(raw).replace(/^\s*\[[^\]]{1,30}\]\s*/, '').trim(); // [시리즈 이름]은 빼고 셈
   const items = [];
   const add = (key, ok, label, hint, basis) => items.push({ key, ok, label, hint: ok === true ? '' : hint, basis });
+  const own = ownTerms(ctx.focusTerms);
+  const reader = blocks.filter((b) => !['img', 'cta', 'basis'].includes(b.t)).map((b) => stripMd(textOfBlock(b))).join(' ');
   // 1) 첫 사진 = 썸네일 (네이버는 첫 사진을 대표 사진으로 — 홈판·글 목록 카드에 보임)
   const imgs = blocks.filter((b) => b.t === 'img' && b.full);
   const first = imgs[0];
   const isThumb = !!first && THUMB_SLOT.test(first.text);
   add('thumb', isThumb, '첫 사진이 썸네일(대표 사진)', first ? "맨 위 첫 사진 자리를 '(썸네일)'로 — 홈판·글 목록 카드에 보이는 사진이야" : '사진 자리가 없어 — 홈판 카드에 사진 없이 글자만 나와', '네이버 공식');
-  // 2) 썸네일 문구가 제목과 같은 이야기 (제목·사진이 다르면 빠진다는 실무자 말)
+  // 2) 썸네일 문구가 제목과 같은 대상 + 썸네일 속 숫자는 제목·본문에도 (이미지 속 글자는 검색이 못 읽음)
   const tt = isThumb ? thumbText(first.text) : '';
   if (tt) {
-    const tw = new Set(nounsOf(title));
-    const shared = nounsOf(tt).some((w) => tw.has(w) || [...tw].some((x) => x.includes(w) || w.includes(x)));
-    add('thumb_match', shared, '썸네일 문구가 제목과 같은 이야기', `썸네일 문구 '${tt}'와 제목에 겹치는 낱말이 없어 — 다른 이야기처럼 보이면 안 돼`, '여러 실무자');
+    const tw = nounsOf(title);
+    const core = termsIn(title, own);  // 제목의 핵심 대상 (설정의 주력 주제 낱말 — 제품군)
+    const shared = nounsOf(tt).some((w) => tw.some((x) => sameWord(w, x)));
+    const hasCore = !core.length || core.some((w) => countIn(tt, w) > 0);
+    const nums = (tt.match(/\d+(?:[.,]\d+)?/g) || []).filter((n) => !title.includes(n) && !reader.includes(n));
+    const ok = !shared || nums.length ? false : hasCore ? true : null;
+    add('thumb_match', ok, '썸네일 문구가 제목과 같은 대상',
+      !shared ? `썸네일 문구 '${tt}'와 제목에 겹치는 낱말이 없어 — 다른 이야기처럼 보이면 안 돼`
+        : nums.length ? `썸네일의 숫자 '${nums[0]}'가 제목·본문에 없어 — 사진 속 글자는 검색이 못 읽어서 본문에도 있어야 해`
+          : `썸네일 문구에 '${core[0]}'가 없어 — 카드만 보고도 무엇에 대한 글인지 알게 (사진이 그 물건을 보여주면 괜찮아)`, '네이버 공식 · 여러 실무자');
   }
   // 3) 첫 3줄에 결론·핵심 (첫 소제목 전에 요약 상자·짧은 목록·'핵심:' 문단)
   const hi = blocks.findIndex((b) => b.t === 'h');
   const lead = (hi < 0 ? blocks.slice(0, 6) : blocks.slice(0, hi)).filter((b) => !['img', 'basis'].includes(b.t));
   const topSum = lead.some((b) => b.t === 'note' || (b.t === 'ul' && b.items.length >= 2 && b.items.length <= 5) || (b.t === 'p' && SUMMARY_LEAD.test(stripMd(b.text))));
-  add('top_summary', topSum, '첫 3줄에 결론·핵심', "첫 소제목 앞에 '> 핵심: …' 상자나 2~4줄 요약을 둬 — 카드를 누른 사람이 바로 답을 봐", '여러 실무자');
-  // 4) 제목 길이 (시리즈 이름 빼고)
+  add('top_summary', topSum, '첫 3줄에 결론·핵심', "첫 소제목 앞에 '> 핵심: 답 + 누구에게 해당하는지' 상자나 2~4줄 요약을 둬 — 카드를 누른 사람이 바로 답을 봐", '여러 실무자');
+  // 4) 제목 길이 (시리즈 이름 빼고) — 25~30자와 31자 넘게 중 어느 쪽이 나은지는 우리 글로 시험 중
   const n = [...title].length;
   const lenOk = n >= FEED_RULES.titleGoodMin && n <= FEED_RULES.titleGoodMax ? true : n >= FEED_RULES.titleMin && n <= FEED_RULES.titleMax ? null : false;
-  add('title_len', title ? lenOk : false, `제목 ${n}자 (25~40자 권장 — 시험 중)`, n < FEED_RULES.titleGoodMin ? '조금 짧아 — 무엇을·누가·언제 중 하나를 더해봐' : '길어 — 카드에서 잘릴 수 있어. 앞쪽에 핵심을', '데이터 연구 1개 — 시험');
-  // 5) 제목 호기심 장치 (숫자·질문·비교) — 과장 없이
-  add('title_hook', TITLE_HOOK.test(title) ? true : null, '제목에 숫자·질문·비교 하나', '숫자(3가지·11월)나 질문(왜 …?)을 하나 넣는 것도 시험해봐 — 과장 말은 빼고', '여러 실무자 (의견 갈림)');
-  // 6) 낚시·과장 말 없음
+  const arm = n < FEED_RULES.titleGoodMin ? '25자보다 짧음' : n <= FEED_RULES.titleShortMax ? '짧은 제목(25~30자) 쪽' : '긴 제목(31자 넘게) 쪽';
+  add('title_len', title ? lenOk : false, `제목 ${n}자 · ${arm} — 길이는 시험 중`, n < FEED_RULES.titleGoodMin ? '조금 짧아 — 무엇을·누가·언제 중 하나를 더해봐' : '길어 — 카드에서 잘릴 수 있어. 앞쪽에 핵심을', '실무자 1~2곳, 서로 반대 — 시험');
+  // 5) 핵심 대상(제품군·키워드 낱말)이 제목 앞 25자 안에
+  const fr = FEED_RULES.frontChars;
+  const kwHits = nounsOf(p.keyword).filter((w) => !/^\d+$/.test(w) && title.includes(w));
+  const coreHits = termsIn(title, own);
+  const front = (ws) => ws.map((w) => ({ w, i: title.indexOf(w) })).filter((x) => x.i >= 0).sort((a, b) => a.i - b.i)[0];
+  const cf = front(coreHits) || front(kwHits);
+  if (cf) add('title_front', cf.i + cf.w.length <= fr ? true : null, `핵심 낱말이 제목 앞 ${fr}자 안에`, `'${cf.w}'가 ${cf.i + 1}번째 글자부터 나와 — 카드에서 잘리지 않게 앞으로`, '여러 실무자');
+  else if (String(p.keyword || '').trim() && title) add('title_front', false, `핵심 낱말이 제목 앞 ${fr}자 안에`, `제목에 키워드('${clip(String(p.keyword).trim(), 20)}')의 낱말이 없어 — 무엇에 대한 글인지 앞쪽에`, '여러 실무자');
+  // 6) 제목에 군더더기 없음: 대괄호·특수문자·같은 낱말 두 번 (✗), 본문에서 못 찾은 낱말 (△ — 낱말로만 보는 거라 참고)
+  if (title) {
+    const probs = [];
+    if (TITLE_BRACKET.test(title)) probs.push('대괄호·꺾쇠');
+    if (TITLE_SPECIAL.test(title)) probs.push('특수문자·이모지');
+    const toks = nounsOf(title).filter((w) => !/^\d/.test(w));
+    const rep = toks.find((w, i) => toks.indexOf(w) !== i);
+    if (rep) probs.push(`같은 낱말 두 번('${rep}')`);
+    const missing = [...new Set(toks)].filter((w) => !TITLE_STOP.has(w) && !/(요|다|죠|까|네|운|은|는|한|할|된|인|던|데|고|며|면|서|게|지|야)$/.test(w)
+      && !reader.includes(w) && !(w.length >= 3 && reader.includes(w.slice(0, -1)))).slice(0, 3);
+    add('title_form', probs.length ? false : missing.length ? null : true, '제목에 군더더기 없음 (대괄호·특수문자·같은 낱말 반복·본문에 없는 말)',
+      probs.length ? `${probs.join(' · ')} — 빼줘 (시리즈 이름 [ ]은 괜찮아)` : `본문에서 못 찾은 낱말: ${missing.map((w) => `'${w}'`).join(', ')} — 본문이 정말 다루는 말인지 봐줘`, '여러 실무자 · 네이버 공식(관련 없는 키워드 금지)');
+  }
+  // 7) 제목 호기심 장치 하나 (구체 숫자·질문·비교·독자 지정) — 과장 없이. 효과는 시험
+  add('title_hook', TITLE_HOOK.test(title) ? true : null, '제목에 숫자·질문·독자 지정 하나', "숫자(3가지·11월)·질문(왜 …?)·독자 지정('원룸이라면') 중 하나를 시험해봐 — 과장 말은 빼고", '여러 실무자 (반대 2곳 — 시험)');
+  // 8) 낚시·과장 말 없음
   const leadText = [title, ...lead.filter((b) => b.t === 'p' || b.t === 'note').map((b) => stripMd(b.text))].join(' ');
   const bait = leadText.match(CLICKBAIT);
   add('no_bait', !bait, '낚시·과장 말 없음', bait ? `'${bait[0]}' 같은 말은 빼 — 거짓 없는 글이 네이버 원칙이고, 낚시 제목은 홈판에서 빠진다는 말이 많아` : '', '네이버 공식');
-  // 7) 블로그 주제와 맞음 (주력 주제·자동 주제)
-  if (ctx.focus) {
+  // 9) 최근 7일 제목과 시작이 다름 (같은 낱말로 시작하는 제목이 이어지면 비슷한 글처럼 보여)
+  if (Array.isArray(ctx.recentTitles) && title) {
+    const lw = titleLead(title);
+    const same = lw ? ctx.recentTitles.filter((t) => titleLead(t) === lw).length : 0;
+    add('title_recent', same ? null : true, `최근 ${FEED_RULES.recentDays}일 제목과 시작이 다름`, `최근 ${FEED_RULES.recentDays}일 안에 '${lw}'로 시작한 제목이 ${same}개 — 첫 낱말을 바꿔 봐`, '실무자 1~2곳');
+  }
+  // 10) 블로그 주제와 맞음 — 투자 글은 대신 '투자 블로그에 있는지'
+  if (isInvestPost(p)) {
+    if (ctx.investChannel !== undefined) {
+      const onInvest = !!ctx.investChannel && ctx.investChannel !== ctx.mainChannel && p.channel_id === ctx.investChannel;
+      add('invest_blog', onInvest, '투자 글은 투자 블로그로', "증시·종목 글이 메인 블로그에 있어 — 메인 블로그 주제가 흐려져. 설정 > 말투·전문성의 '투자 글을 올릴 블로그'를 정하고 그 블로그에 올려", '네이버 공식(일관된 주제) · 여러 실무자');
+    }
+  } else if (ctx.focus) {
     const f = focusFit(p, ctx.focus, ctx.focusTerms);
     const topics = String(ctx.autoTopics || '').split(/[,·\s]+/).map((x) => x.trim()).filter((x) => x.length >= 2);
     const hay = `${p.keyword || ''} ${title}`;
     const other = topics.some((w) => hay.includes(w));
     add('topic', f.verdict === 'match' || other ? true : f.verdict === 'unclear' ? null : false, '블로그 주제와 맞음',
-      f.verdict === 'unclear' ? '주제 글인지 애매해 — 키워드·제목에 주제 낱말을 자연스럽게' : '블로그 주제 밖 글이야 — 한 주제로 꾸준한 블로그가 홈판·검색 모두 유리해', '네이버 공식');
+      f.verdict === 'unclear' ? '주제 글인지 애매해 — 키워드·제목에 주제 낱말을 자연스럽게' : '블로그 주제 밖 글이야 — 메인 블로그는 주제 안 글만 올리는 게 목표야 (한 주제로 꾸준한 블로그가 홈판·검색 모두 유리)', '네이버 공식');
   }
-  // 8) 짧은 문단 (휴대폰 3~4줄)
-  const longP = blocks.filter((b) => (b.t === 'p' || b.t === 'note') && stripMd(b.text).length > FEED_RULES.paraMaxChars).length;
+  // 11) 짧은 문단 (휴대폰 3~4줄 — 4문장·150자 안쪽, 우리가 정한 근사치)
+  const longP = blocks.filter((b) => (b.t === 'p' || b.t === 'note') && (stripMd(b.text).length > FEED_RULES.paraMaxChars
+    || stripMd(b.text).split(/(?<=[.!?。…])\s+/).filter((x) => x.trim().length >= 2).length > FEED_RULES.paraMaxSentences)).length;
   add('short_para', longP === 0, '문단이 짧음 (휴대폰 3~4줄)', `긴 문단 ${longP}곳 — 2~3문장마다 끊어줘`, '여러 실무자');
-  // 9) 사진 수
+  // 12) 사진이 옆 문단과 맞음 — 장식 사진·같은 장면 두 번 (낱말로만 보는 참고 — 네이버는 관련 없는 이미지를 피하라고 함)
+  const scenes = [];
+  blocks.forEach((b, bi) => {
+    if (b.t !== 'img' || !b.full || THUMB_SLOT.test(b.text) || INFO_CARD_SLOT.test(b.text)) return;
+    const scene = slotScene(b.text);
+    const sw = nounsOf(scene);
+    if (!sw.length) return;
+    // 그 사진이 든 부분: 바로 위 소제목부터 다음 소제목 전까지의 글 (사진·링크 자리·기준 상자는 빼고)
+    let a = bi; while (a > 0 && blocks[a - 1].t !== 'h') a--;
+    if (a > 0) a--;
+    let z = bi; while (z + 1 < blocks.length && blocks[z + 1].t !== 'h') z++;
+    const near = blocks.slice(a, z + 1).filter((x) => !['img', 'cta', 'basis'].includes(x.t)).map(textOfBlock);
+    const cw = nounsOf(stripMd(near.join(' ')));
+    scenes.push({ scene, sw, fits: !cw.length || sw.some((w) => cw.some((x) => sameWord(w, x))) });
+  });
+  const deco = scenes.filter((s) => !s.fits);
+  const dup = [];
+  for (let i = 0; i < scenes.length; i++) for (let j = i + 1; j < scenes.length; j++) {
+    const A = new Set(scenes[i].sw), B = new Set(scenes[j].sw);
+    const inter = [...A].filter((w) => B.has(w)).length;
+    if (scenes[i].scene === scenes[j].scene || bigramDice(scenes[i].scene, scenes[j].scene) >= 0.7 || (A.size >= 2 && B.size >= 2 && inter / (A.size + B.size - inter) >= 0.6)) dup.push([scenes[i].scene, scenes[j].scene]);
+  }
+  if (scenes.length) add('img_fit', deco.length || dup.length ? null : true, '사진이 옆 문단과 맞음 (장식 사진·같은 장면 없음)',
+    [deco.length ? `장식 사진? '${clip(deco[0].scene, 24)}' — 옆 소제목·문단과 겹치는 낱말이 없어${deco.length > 1 ? ` (그 밖 ${deco.length - 1}곳)` : ''}` : '',
+      dup.length ? `비슷한 사진 자리: '${clip(dup[0][0], 18)}' / '${clip(dup[0][1], 18)}'` : ''].filter(Boolean).join(' · ') + ' — 그 문단이 말하는 물건·화면·장면만, 맞는 게 없으면 자리를 줄여', '네이버 공식 · 실무자 3곳');
+  // 13) 사진 수 — 맞는 사진이 먼저라 참고만 (사진 수 효과는 시험 중)
   const ni = imgs.length;
-  add('images', ni >= FEED_RULES.goodImages ? true : ni >= FEED_RULES.minImages ? null : false, `사진 ${ni}장 (6장 넘게 권장 — 시험 중)`, '사진이 많은 글이 더 읽힌다는 자료가 있어 — 문단과 맞는 사진만 더해줘', '데이터 연구 1개 — 시험');
-  // 10) 직접 경험 (네이버가 첫째로 꼽는 것)
-  const exp = !!String(p.experience || '').trim();
-  add('experience', exp ? true : null, '직접 겪은 내용', '직접 찍은 사진이나 써본 한 줄이 있으면 더 좋아 (없는 경험을 만들지는 마)', '네이버 공식');
-  // 11) 최신성 ([기준: 날짜] 상자)
+  add('images', ni >= FEED_RULES.minImages ? true : null, `사진 ${ni}장 (${SEO_RULES.imagesMin}~${SEO_RULES.imagesMax}장이 앱 기준 — 참고)`, '맞는 사진이 모자라면 적어도 괜찮아. 억지로 채우지 마 (사진 수 효과는 시험 중)', '실무자 1~2곳 — 시험');
+  // 14) 직접 겪은 내용 (네이버가 첫째로 꼽는 것) — 경험 칸이나 직접 찍은 사진
+  const exp = !!String(p.experience || '').trim() || ctx.ownPhoto === true;
+  const shootSlot = imgs.some((b) => /^\s*\(직접\s*찍기\)/.test(b.text));
+  add('experience', exp ? true : null, '직접 겪은 내용 (경험·직접 찍은 사진)', shootSlot ? "'(직접 찍기)' 자리에 네가 찍은 사진을 넣으면 그게 직접 경험이야 (못 찍으면 그 자리는 지워 — 없는 경험을 만들지는 마)" : '직접 찍은 사진이나 써본 한 줄이 있으면 더 좋아 (없는 경험을 만들지는 마)', '네이버 공식');
+  // 15) 최신성 ([기준: 날짜] 상자)
   add('fresh', blocks.some((b) => b.t === 'basis') ? true : null, '언제 정보인지 보임 ([기준] 상자)', '[기준: 2026년 11월 6일 기준] 같은 상자를 넣으면 최신 글로 보여', '네이버 공식');
   const pts = items.reduce((s, x) => s + (x.ok === true ? 1 : x.ok === null ? 0.5 : 0), 0);
   const score = items.length ? Math.round((pts / items.length) * 100) : 0;
   const verdict = score >= 80 ? '홈판 준비 됨' : score >= 60 ? '거의 됨' : '손볼 곳 있음';
-  return { score, verdict, items, title, thumbText: tt, sentence: uniqueSentence(p.body) };
+  return { score, verdict, items, title, titleLen: n, thumbText: tt, sentence: uniqueSentence(p.body) };
+}
+
+// ───────── 1.8.0 홈판 기록 (posts.feed_log — DB 022) ─────────
+// 글마다: 누락 확인(날짜·결과), 7일째 숫자(홈피드·검색 비중 %, 조회, 평균 사용 시간), 썸네일 변형(A/B/C), 제목 글자 수
+// 숫자는 사용자가 블로그 통계에서 보고 적은 것 — 앱이 네이버에서 가져오지 않음
+export const THUMB_VARIANTS = { A: '색 카드', B: '사진 + 짧은 글자', C: '사진만' };
+export const FEED_LOG_KEYS = ['checked_on', 'indexed', 'feed_pct', 'search_pct', 'views_1d', 'views_7d', 'avg_secs', 'stats_on', 'thumb', 'title_len', 'note'];
+// 서버·앱이 같이 쓰는 검사: 알 수 없는 칸·이상한 값이면 그 칸 이름을 돌려줌 (null 이면 통과). 빈 값('', null)은 '데이터 없음'
+export function feedLogError(log) {
+  if (!log || typeof log !== 'object' || Array.isArray(log)) return 'feed_log';
+  const ymdOk = (v) => v === null || v === '' || (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v + 'T00:00:00Z')));
+  const numOk = (v, max, int) => v === null || v === '' || (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= max && (!int || Number.isInteger(v)));
+  for (const [k, v] of Object.entries(log)) {
+    if (!FEED_LOG_KEYS.includes(k)) return k;
+    if ((k === 'checked_on' || k === 'stats_on') && !ymdOk(v)) return k;
+    if (k === 'indexed' && !['', 'yes', 'no', null].includes(v)) return k;
+    if ((k === 'feed_pct' || k === 'search_pct') && !numOk(v, 100, false)) return k;
+    if ((k === 'views_1d' || k === 'views_7d') && !numOk(v, 100000000, true)) return k;
+    if (k === 'avg_secs' && !numOk(v, 86400, true)) return k;
+    if (k === 'title_len' && !numOk(v, 300, true)) return k;
+    if (k === 'thumb' && !['', 'A', 'B', 'C', null].includes(v)) return k;
+    if (k === 'note' && !(v === null || (typeof v === 'string' && v.length <= 300))) return k;
+  }
+  return null;
+}
+// 홈판 시험 정리: 썸네일 변형(A/B/C)·제목 길이(25~30자 / 31자 넘게)별로 7일째 숫자 평균. 변형마다 5편이 넘어야 비교 (조사 보고서의 판정 규칙)
+export const FEED_TEST_MIN = 5;
+export function feedTestSummary(posts) {
+  const rows = (posts || []).filter((p) => p && !p.deleted_at && p.feed_log && typeof p.feed_log === 'object');
+  const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const group = (keyOf) => {
+    const g = new Map();
+    for (const p of rows) {
+      const k = keyOf(p);
+      if (!k) continue;
+      const L = p.feed_log;
+      const x = g.get(k) || { key: k, posts: 0, measured: 0, feed: [], views: [], secs: [], indexedNo: 0, checked: 0 };
+      x.posts++;
+      if (num(L.feed_pct) != null || num(L.views_7d) != null || num(L.avg_secs) != null) x.measured++;
+      if (num(L.feed_pct) != null) x.feed.push(L.feed_pct);
+      if (num(L.views_7d) != null) x.views.push(L.views_7d);
+      if (num(L.avg_secs) != null) x.secs.push(L.avg_secs);
+      if (L.indexed === 'yes' || L.indexed === 'no') x.checked++;
+      if (L.indexed === 'no') x.indexedNo++;
+      g.set(k, x);
+    }
+    return [...g.values()].map((x) => ({ key: x.key, posts: x.posts, measured: x.measured, enough: x.measured >= FEED_TEST_MIN, feedPct: avg(x.feed), views7d: avg(x.views), avgSecs: avg(x.secs), checked: x.checked, missing: x.indexedNo }));
+  };
+  const thumbs = group((p) => (THUMB_VARIANTS[p.feed_log.thumb] ? p.feed_log.thumb : '')).sort((a, b) => a.key.localeCompare(b.key));
+  const lenOf = (p) => { const n = num(p.feed_log.title_len); return n == null ? '' : n <= FEED_RULES.titleShortMax ? 'short' : 'long'; };
+  const titles = group(lenOf).sort((a, b) => (a.key === 'short' ? -1 : 1) - (b.key === 'short' ? -1 : 1));
+  const checked = rows.filter((p) => p.feed_log.indexed === 'yes' || p.feed_log.indexed === 'no');
+  return { posts: rows.length, thumbs, titles, checked: checked.length, missing: checked.filter((p) => p.feed_log.indexed === 'no').length };
+}
+// AI 브리핑 누적 인용 수 (settings.ai_citations — [{on: 'YYYY-MM-DD', total}], 블로그 프로필에서 본 누적 값을 주 1회)
+export const CITATION_MAX = 104;
+export function citationsError(list) {
+  if (!Array.isArray(list) || list.length > CITATION_MAX) return 'ai_citations';
+  for (const x of list) {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) return 'ai_citations';
+    if (Object.keys(x).some((k) => !['on', 'total'].includes(k))) return 'ai_citations';
+    if (typeof x.on !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(x.on) || Number.isNaN(Date.parse(x.on + 'T00:00:00Z'))) return 'ai_citations';
+    if (typeof x.total !== 'number' || !Number.isInteger(x.total) || x.total < 0 || x.total > 100000000) return 'ai_citations';
+  }
+  return null;
 }
 
 // 잘 나가는 글 '틀'의 지문: 띄어쓰기를 뺀 글을 8글자씩 한 칸씩 밀며 잘라 만든 해시(정수). 원문은 저장하지 않고 이 숫자만 저장
@@ -763,14 +926,18 @@ export function checkPost(post, ctx = {}) {
   if (searchCh) {
     const kwN = keywordWords(post.keyword);
     if (kwN > 0 && kwN < SEO_RULES.minKeywordWords) T('short_keyword', `키워드가 ${kwN}단어야. 짧은 키워드는 같은 낱말로 쓴 글이 많을 수 있어 (검색량·경쟁도는 조회하지 않았어 · 앱 권장 ${SEO_RULES.minKeywordWords}단어 이상).`, '찾는 사람이 분명해지게 좁혀줘. 예: "제습기" → "원룸 겨울 결로 제습기 용량"');
-    // 1.6.0: 하루 계획의 유입 글·오늘 이슈·증시·종목 글은 주력 주제 밖이 정상이라 주제 검사를 안 함 (쿠팡·토스 링크 글만)
-    if (ctx.focus && (!planKind || planKind === 'affiliate')) {
+    // 1.8.0: 메인 블로그 글은 쿠팡·토스·애드포스트 유입 글·오늘 이슈 모두 주력 주제 안에서 (조사 보고서 — 한 주제가 홈판·검색 모두 유리). 증시·종목 글은 투자 블로그 글이라 주제 검사를 안 함
+    const investPost = (ctype && ctype.invest) || (planKind && PLAN_KINDS[planKind].invest);
+    if (investPost && ctx.investChannel !== undefined && !(ctx.investChannel && ctx.investChannel !== ctx.mainChannel && post.channel_id === ctx.investChannel)) {
+      W('invest_on_main', '증시·종목 글이 메인 블로그 채널로 잡혀 있어. 생활·가전 블로그에 투자 글이 섞이면 블로그 주제가 흐려져.', "채널을 투자 블로그로 바꾸고, 설정 > 말투·전문성의 '투자 글을 올릴 블로그'를 정해줘.");
+    }
+    if (ctx.focus && !investPost) {
       const f = focusFit(post, ctx.focus, ctx.focusTerms);
       const name = clip(String(ctx.focus), 30);
       const ev = f.evidence.join(' · ');
       if (f.verdict === 'match') T('focus_match', `주력 주제(${name})와 맞아 — 근거: ${ev}`);
       else if (f.verdict === 'unclear') W('focus_unclear', `주력 주제(${name})와 맞는지 판단하기 어려워 — 근거: ${ev}.`, `주제 안의 글이면 키워드나 제목에 주제 낱말(${f.terms.slice(0, 4).join(', ')})을 넣거나, 설정 > 자동 글쓰기의 '주력 주제 낱말'에 이 글의 낱말을 더해줘.`);
-      else if (f.verdict === 'off') W('off_focus', `주력 주제(${name}) 밖의 글로 보여 — 근거: ${ev}.`, '주력 주제 안의 글을 먼저 쓰거나, 주제 안의 글이면 설정에서 주력 주제 낱말을 더해줘.');
+      else if (f.verdict === 'off') W('off_focus', `주력 주제(${name}) 밖의 글로 보여${planKind === 'trending' || planKind === 'adpost' ? ` (${PLAN_KINDS[planKind].short} 글도 메인 블로그에서는 주제 안에서)` : ''} — 근거: ${ev}.`, '주력 주제 안의 글을 먼저 쓰거나, 주제 안의 글이면 설정에서 주력 주제 낱말을 더해줘.');
     }
     const nLinks = Math.max(cta, links.length);
     if (nLinks > SEO_RULES.maxLinks) W('too_many_links', `링크가 ${nLinks}개야. 링크가 많으면 광고 글로 보이기 쉬워 (앱 권장 ${SEO_RULES.maxLinks}개까지).`, '본문 중간 1곳, 끝 1곳으로 줄여줘.');

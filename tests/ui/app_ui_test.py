@@ -470,6 +470,15 @@ class Mock:
             if stage == 'ready' and p['id'] == self.ids['P1']:
                 return 409, {'error': 'check_failed', 'errors': [{'code': 'link_missing', 'msg': '서버 검사: 링크 없음', 'fix': '', 'examples': []}]}
             for k, v in body.items():
+                if k == 'feed_log' and isinstance(v, dict):  # 서버처럼: 보낸 칸만 바꾸고 빈 값은 지움 (1.8.0 홈판 기록)
+                    cur = dict(p.get('feed_log') or {})
+                    for fk, fv in v.items():
+                        if fv is None or fv == '':
+                            cur.pop(fk, None)
+                        else:
+                            cur[fk] = fv.strip() if isinstance(fv, str) else fv
+                    p['feed_log'] = cur
+                    continue
                 p[k] = v
             return 200, {'post': p, 'demoted': None}
         if path == 'imports' and method == 'POST':
@@ -575,6 +584,9 @@ class Mock:
     # ── 1.7.0 전문성·사람 말투: 말투 카드·시리즈 설정, 다듬기 요청, 이전 본문·되돌리기, 숫자 대조, 틀 (서버와 같은 규칙만 흉내) ──
     def handle_pro(self, method, path, body):
         post = lambda pid: next((p for p in self.posts if p['id'] == pid and not p['deleted_at']), None)
+        if path == 'settings' and method == 'POST' and 'ai_citations' in body:  # 1.8.0 AI 브리핑 인용 수 (서버처럼 날짜 순)
+            self.settings['ai_citations'] = sorted(body['ai_citations'], key=lambda x: x['on'])
+            return 200, {'settings': self.settings}
         if path == 'settings' and method == 'POST' and 'voice' in body:
             for k in ('voice', 'series', 'brand_name', 'invest_channel'):
                 if k in body:
@@ -4058,21 +4070,26 @@ def main():
                     '## 이런 분께는 안 맞아요\n방이 아주 넓으면 한 대로는 부족할 수 있어요.\n[이미지: 물통을 씻는 손]\n[프롬프트: 주방 개수대에서 물통을 씻는 손, 4:3, 글자 없이]')
             mock.posts.append({**dict(mock.posts[0]), 'id': P, 'keyword': '거실 가습기 세척 쉬운 제품', 'titles': ['거실 가습기 고르기, 세척 쉬운 제품 3가지 기준'],
                                'stage': 'review', 'program_ids': ['naver_adpost'], 'content_type': 'checklist', 'publish_date': D(0), 'created_at': NOW,
-                               'source': 'auto', 'plan_kind': 'adpost', 'keep': False, 'body': body})
+                               'source': 'auto', 'plan_kind': 'adpost', 'keep': False, 'body': body, 'feed_log': {}})
             sl = parse_slots(body)
             photo = mock.add_image('upload', P, sl[1]['key'], fx='16x9', review_status='사용 가능', source_type='own')
             mock.link(P, sl[1]['key'], photo['id'])
-            saved = {k: mock.settings.get(k) for k in ('focus_topic', 'focus_terms', 'auto_topics')}
-            mock.settings.update({'focus_topic': '계절템·겨울 가전', 'focus_terms': '히터, 전기요, 가습기, 제습기', 'auto_topics': '계절템·겨울 가전, 디지털·전자기기'})
+            saved = {k: mock.settings.get(k) for k in ('focus_topic', 'focus_terms', 'auto_topics', 'ai_citations')}
+            mock.settings.update({'focus_topic': '계절템·겨울 가전', 'focus_terms': '히터, 전기요, 가습기, 제습기', 'auto_topics': '계절템·겨울 가전, 디지털·전자기기', 'ai_citations': []})
             try:
                 reload_keys()
                 goto_hash('content/post/' + P)
                 feed = page.locator('section.panel', has=page.locator('h2', has_text='홈판 점검'))
                 expect(feed).to_contain_text('홈판 점수')
-                for t in ['✓ 첫 사진이 썸네일(대표 사진)', '✓ 썸네일 문구가 제목과 같은 이야기', '✓ 첫 3줄에 결론·핵심', '✓ 제목 27자', '✓ 블로그 주제와 맞음',
-                          '✓ 낚시·과장 말 없음', '✓ 언제 정보인지 보임', '△ 직접 겪은 내용', '네이버 공식', '데이터 연구 1개 — 시험']:
+                for t in ['✓ 첫 사진이 썸네일(대표 사진)', '✓ 썸네일 문구가 제목과 같은 대상', '✓ 첫 3줄에 결론·핵심', '✓ 제목 27자 · 짧은 제목(25~30자) 쪽', '✓ 블로그 주제와 맞음',
+                          '✓ 핵심 낱말이 제목 앞 25자 안에', '✓ 제목에 군더더기 없음', '✓ 낚시·과장 말 없음', '✓ 언제 정보인지 보임',
+                          '✓ 직접 겪은 내용 (경험·직접 찍은 사진)', '네이버 공식', '실무자 1~2곳 — 시험']:
                     expect(feed).to_contain_text(t)
-                expect(feed).to_contain_text('사진 3장')
+                # 직접 찍은 사진(own)이 연결돼서 직접 경험 ✓, 맞는 문단이 없는 사진은 '장식 사진?', 사진 수는 참고(△)
+                expect(feed).to_contain_text("△ 사진이 옆 문단과 맞음")
+                expect(feed).to_contain_text("장식 사진? '물통을 씻는 손'")
+                expect(feed).to_contain_text('△ 사진 3장')
+                expect(feed).to_contain_text('억지로 채우지 마')
                 link = feed.get_by_role('link', name=re.compile('누락 확인'))
                 href = link.get_attribute('href')
                 assert href.startswith('https://search.naver.com/search.naver?query=%22') and link.get_attribute('target') == '_blank', href
@@ -4087,11 +4104,23 @@ def main():
                 expect(ti).to_have_value('거실 가습기, 세척부터 봐요')
                 page.wait_for_timeout(400)
                 flat = page.evaluate("document.querySelector('#sheet canvas.cardprev').toDataURL()")
+                # B·C 는 사진을 먼저 골라야 함
+                sheet.get_by_role('button', name='C 사진만').click()
+                expect(sheet).to_contain_text('C 사진만는 아래에서 이 글의 사진을 먼저 골라줘.')
                 sheet.locator('.grid3 button.pick').first.click()
-                expect(sheet).to_contain_text('배경: ')
+                expect(sheet).to_contain_text('B 사진 + 짧은 글자 — 배경: ')
+                expect(sheet.get_by_role('button', name='B 사진 + 짧은 글자')).to_have_attribute('aria-pressed', 'true')
                 page.wait_for_timeout(500)
                 photo_url = page.evaluate("document.querySelector('#sheet canvas.cardprev').toDataURL()")
                 assert photo_url != flat, '사진 배경으로 다시 그림'
+                # C 사진만: 글자 없이 사진만 → B 와 다르게 그림, 다시 B 로
+                sheet.get_by_role('button', name='C 사진만').click()
+                expect(sheet).to_contain_text('C 사진만 — 배경: ')
+                page.wait_for_timeout(400)
+                plain_url = page.evaluate("document.querySelector('#sheet canvas.cardprev').toDataURL()")
+                assert plain_url != photo_url and plain_url != flat, '사진만 따로 그림'
+                sheet.get_by_role('button', name='B 사진 + 짧은 글자').click()
+                page.wait_for_timeout(400)
                 # 가운데(사진 위) 픽셀이 색 카드 배경색이 아님 — 사진이 깔림
                 px = page.evaluate("(() => { const c = document.querySelector('#sheet canvas.cardprev'); const d = c.getContext('2d').getImageData(Math.round(c.width*0.5), Math.round(c.height*0.9), 1, 1).data; return [d[0], d[1], d[2]]; })()")
                 assert px != [242, 247, 252], px
@@ -4104,13 +4133,56 @@ def main():
                 up = [c for c in mock.calls if c['path'] == 'images/upload']
                 assert len(up) == n0 + 1
                 meta = up[-1]['body']['meta']
-                assert meta['card_label'] == '썸네일' and meta['description'].startswith('썸네일(사진 배경 — ') and '세척 쉬운 가습기' in meta['description'], meta
+                assert meta['card_label'] == '썸네일' and meta['description'].startswith('썸네일(B 사진 + 짧은 글자 — 직접 촬영)') and '세척 쉬운 가습기' in meta['description'], meta
                 assert up[-1]['body']['mime'] == 'image/png' and up[-1]['body']['size'] > 3000
+                # 홈판 기록에 썸네일 변형 B 가 적힘
+                page.wait_for_function("() => true")
+                for _ in range(20):
+                    if (next(x for x in mock.posts if x['id'] == P).get('feed_log') or {}).get('thumb') == 'B':
+                        break
+                    page.wait_for_timeout(150)
+                assert next(x for x in mock.posts if x['id'] == P)['feed_log'] == {'thumb': 'B'}, next(x for x in mock.posts if x['id'] == P)['feed_log']
                 # 색 카드로 되돌리기도 됨
                 studio.locator('.slot').nth(0).get_by_role('button', name='다시 그리기').click()
-                sheet.get_by_role('button', name='색 카드').click()
-                expect(sheet).to_contain_text('색 카드 — 글 종류마다 정해진 색이야.')
+                sheet.get_by_role('button', name='A 색 카드').click()
+                expect(sheet).to_contain_text('A 색 카드 — 글 종류마다 정해진 색이야.')
                 close_sheet()
+                # 홈판 기록: 누락 확인·7일째 숫자 → 서버에 보낸 칸 (분:초는 초로, 날짜를 안 고르면 오늘)
+                feed = page.locator('section.panel', has=page.locator('h2', has_text='홈판 점검'))
+                rec = feed.locator('details', has=page.locator('summary', has_text='홈판 기록'))
+                rec.locator('summary').click()
+                expect(rec.get_by_label('썸네일 변형')).to_have_value('B')
+                rec.get_by_label('누락 확인 결과').select_option('yes')
+                rec.get_by_label('feed_pct').fill('62')
+                rec.get_by_label('views_7d').fill('480')
+                rec.get_by_label('평균 사용 시간').fill('1분 35초')
+                no_overflow('1.8.0 홈판 기록')
+                shot('82-feed180-log')
+                rec.get_by_role('button', name='홈판 기록 저장').click()
+                expect(page.locator('#toast')).to_contain_text('홈판 기록을 저장했어')
+                sent = [c for c in mock.calls if c['path'] == 'posts/' + P and 'feed_log' in (c['body'] or {})][-1]['body']['feed_log']
+                assert sent['indexed'] == 'yes' and sent['checked_on'] == D(0) and sent['feed_pct'] == 62 and sent['views_7d'] == 480 and sent['avg_secs'] == 95, sent
+                assert sent['thumb'] == 'B' and sent['title_len'] == 27 and sent['stats_on'] == D(0), sent
+                # 이상한 값은 보내지 않음
+                n1 = len(mock.calls)
+                rec = feed.locator('details', has=page.locator('summary', has_text='홈판 기록'))
+                rec.get_by_label('feed_pct').fill('140')
+                rec.get_by_role('button', name='홈판 기록 저장').click()
+                expect(page.locator('#toast')).to_contain_text('숫자 칸을 확인해줘')
+                assert not [c for c in mock.calls[n1:] if c['path'] == 'posts/' + P]
+                # 홈: 홈판 시험 정리(썸네일 B 한 편) + AI 브리핑 인용 수 적기
+                goto_hash('home')
+                week = page.locator('section.panel', has=page.locator('h2', has_text='최근 7일 정리'))
+                expect(week).to_contain_text('홈판 시험 (우리 글로 정하기)')
+                expect(week).to_contain_text('B 사진 + 짧은 글자')
+                expect(week).to_contain_text('5편 넘게 모이면 비교')
+                week.get_by_label('AI 브리핑 누적 인용 수').fill('12')
+                week.get_by_role('button', name='적기').click()
+                expect(page.locator('#toast')).to_contain_text('인용 수를 적었어')
+                assert mock.settings['ai_citations'] == [{'on': D(0), 'total': 12}], mock.settings['ai_citations']
+                week = page.locator('section.panel', has=page.locator('h2', has_text='최근 7일 정리'))
+                expect(week).to_contain_text('12')
+                no_overflow('1.8.0 홈판 시험')
             finally:
                 for k, v in saved.items():
                     if v is None:
@@ -4118,7 +4190,7 @@ def main():
                     else:
                         mock.settings[k] = v
                 reload_keys()
-        check('1.8.0 홈판 공략: 홈판 점검(근거 표시·✓△✗)·누락 확인 링크·썸네일 문구가 자리 문구 그대로·이 글의 사진을 배경으로 그려서 연결·색 카드로 되돌리기', t_feed_180)
+        check('1.8.0 홈판 공략: 홈판 점검(근거 표시·✓△✗·장식 사진·직접 찍은 사진)·누락 확인 링크·썸네일 A/B/C(문구 그대로·사진 배경·사진만)·변형이 홈판 기록에 적힘·홈판 기록 저장·홈판 시험 정리·AI 인용 수', t_feed_180)
 
         # 10) 세션이 끊기면(권한 없음) 로그인 화면으로
         def t_unauthorized():

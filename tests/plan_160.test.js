@@ -88,7 +88,7 @@ describe('네이버 붙여넣기 서식 (lib.js exportHtml · exportPlain · vie
 });
 
 describe('검사 (checkPost) — 1.6.0', () => {
-  const channels = { naver_blog: { id: 'naver_blog', name: '네이버 블로그', kind: 'blog' } };
+  const channels = { naver_blog: { id: 'naver_blog', name: '네이버 블로그', kind: 'blog' }, naver_blog_invest: { id: 'naver_blog_invest', name: '네이버 블로그 (투자)', kind: 'blog' } };
   const filler = '\n' + '읽을 만한 정보 문장이에요. '.repeat(25);
   const run = (post, ctx = {}) => checkPost({ titles: ['제목 하나'], channel_id: 'naver_blog', program_ids: [], keyword: '겨울 가습기 세척 쉬운 제품', ...post }, { channels, ...ctx });
   const codes = (r) => [...r.errors, ...r.warnings, ...r.tips].map((x) => x.code);
@@ -120,7 +120,22 @@ describe('검사 (checkPost) — 1.6.0', () => {
     assert.ok(INVEST_ADVICE.test('무조건 오른다') && !INVEST_ADVICE.test('주가가 올랐어요'));
   });
 
-  test('계획 글(쿠팡·토스 말고)은 주력 주제·내 경험 없음 확인을 안 함', () => {
+  test('1.8.0: 메인 블로그의 애드포스트 유입 글·오늘 이슈도 주력 주제 검사, 증시·종목 글이 메인 블로그면 경고', () => {
+    const ctx = { focus: '계절템·겨울 가전', focusTerms: '가습기', mainChannel: 'naver_blog', investChannel: 'naver_blog_invest' };
+    const body = '## 코스피 마감\n오늘 시장 정리예요.' + filler;
+    for (const k of ['adpost', 'trending']) {
+      const r = run({ body, keyword: '코스피 마감 외국인 순매도 이유', plan_kind: k }, ctx);
+      assert.ok(codes(r).includes('off_focus'), k);
+      assert.match(r.warnings.find((w) => w.code === 'off_focus').msg, /메인 블로그에서는 주제 안에서/);
+    }
+    const onMain = run({ body, keyword: '코스피 마감 외국인 순매도 이유', plan_kind: 'market' }, ctx);
+    assert.ok(codes(onMain).includes('invest_on_main') && !codes(onMain).includes('off_focus'));
+    const onInvest = run({ body, keyword: '코스피 마감 외국인 순매도 이유', plan_kind: 'market', channel_id: 'naver_blog_invest' }, ctx);
+    assert.ok(!codes(onInvest).includes('invest_on_main'));
+    assert.ok(!codes(run({ body, plan_kind: 'market' }, { focus: '계절템·겨울 가전' })).includes('invest_on_main'), '채널 정보를 안 주면(서버 검사) 안 봄');
+  });
+
+  test('증시·종목 계획 글은 주력 주제 검사를 안 하고, 계획 글은 내 경험 없음 확인을 안 함', () => {
     const ctx = { focus: '계절템·겨울 가전', focusTerms: '가습기' };
     const body = '## 코스피 마감\n오늘 시장 정리예요.' + filler;
     const off = run({ body, keyword: '코스피 마감 외국인 순매도 이유' }, ctx);

@@ -309,8 +309,8 @@ describe('검색 노출 도우미 (1.3.0)', () => {
     const r = L.focusShare(posts, F);
     assert.deepEqual([r.total, r.hit, r.unclear, r.off], [3, 1, 0, 2], '게시한 3개 중 1개 (초안 2개·실패·지운 글은 안 셈)');
     assert.equal(r.ratio, 1 / 3);
-    assert.equal(r.goal, 0.7);
-    assert.deepEqual(L.focusShare(posts, F, 1), { total: 1, hit: 1, unclear: 0, off: 0, none: 0, ratio: 1, goal: 0.7 }, '최근 1개만 (게시일 순)');
+    assert.equal(r.goal, 1);
+    assert.deepEqual(L.focusShare(posts, F, 1), { total: 1, hit: 1, unclear: 0, off: 0, none: 0, ratio: 1, goal: 1 }, '최근 1개만 (게시일 순)');
     const m = L.focusShare(posts, F, 30, (p) => /배터리/.test(p.keyword));
     assert.equal(m.hit, 1, '판정 방법을 넘길 수 있음 (true/false 도 됨)');
     assert.equal(L.focusShare(posts, F, 30, null, { terms: '스마트폰' }).hit, 2, '주력 주제 낱말을 더하면 키워드로 확인');

@@ -128,7 +128,17 @@ function drawPhotoThumb(ctx, W, H, T, c, o) {
   if (o.brand) { ctx.font = FONT_BODY(30, 600); ctx.fillStyle = 'rgba(255,255,255,0.92)'; ctx.fillText(o.brand.slice(0, 24), P, Math.round(H * THUMB_SAFE.bottom)); }
   return fit.overflow;
 }
+// 1.8.0 C 사진만: 글자·덮개 없이 사진만 꽉 채움 (초점 자리 기준으로 1:1로 자름) — 홈판 썸네일 A/B/C 시험의 C
+function drawPhotoOnly(ctx, W, H, o) {
+  const img = o.photo;
+  const iw = img.naturalWidth || img.width, ih = img.naturalHeight || img.height;
+  const s = Math.max(W / iw, H / ih), dw = iw * s, dh = ih * s;
+  const fx = o.focus && Number.isFinite(o.focus.x) ? o.focus.x : 0.5, fy = o.focus && Number.isFinite(o.focus.y) ? o.focus.y : 0.5;
+  ctx.drawImage(img, (W - dw) * fx, (H - dh) * fy, dw, dh);
+  return false;
+}
 function drawThumb(ctx, W, H, T, c, o) {
+  if (o.photo && o.plain) return drawPhotoOnly(ctx, W, H, o);
   if (o.photo) return drawPhotoThumb(ctx, W, H, T, c, o);
   const P = 84;
   ctx.fillStyle = T.bg; ctx.fillRect(0, 0, W, H);
@@ -150,7 +160,7 @@ function drawThumb(ctx, W, H, T, c, o) {
     ctx.fillStyle = T.ink; ctx.fillText(line, P, yy);
     yy += fit.size * 0.18;
   });
-  if (o.brand) { ctx.font = FONT_BODY(30, 500); ctx.fillStyle = T.muted; ctx.fillText(o.brand.slice(0, 24), P, Math.round(H * THUMB_SAFE.bottom) + 40); }
+  if (o.brand) { ctx.font = FONT_BODY(30, 500); ctx.fillStyle = T.muted; ctx.fillText(o.brand.slice(0, 24), P, Math.round(H * THUMB_SAFE.bottom) - 6); }
   return fit.overflow;
 }
 function drawTitleTop(ctx, W, T, P, title, maxSize = 64) {
