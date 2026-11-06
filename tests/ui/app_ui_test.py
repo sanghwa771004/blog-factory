@@ -3606,7 +3606,7 @@ def main():
                 expect(pv.locator('button[data-prompt="1"]')).to_have_text('복사됨')
                 assert clip_text() == '햇살 드는 거실 창가 선반 위 상표 없는 흰 가습기, 정면 45도, 1:1 정사각형, 이미지 안에 글자 없이', clip_text()
                 expect(page.locator('#view')).to_contain_text('본문 ')
-                expect(page.locator('#view')).not_to_contain_text('[프롬프트')
+                expect(pv).not_to_contain_text('[프롬프트')  # 미리보기에는 프롬프트 줄이 날것으로 안 보임 (1.8.0: 사진 3곳이면 '4~8곳' 안내 문구에 '[프롬프트: …]' 예시가 나와서 미리보기만 봄)
                 # 블로그에 올리기: 프롬프트 모두 복사, 서식 그대로 복사(소제목 24px·바탕색, 프롬프트 없음)
                 cp = page.locator('section.panel', has=page.locator('h2', has_text='블로그에 올리기'))
                 cp.get_by_role('button', name='사진 프롬프트 3개 모두 복사').click()
